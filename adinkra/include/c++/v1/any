@@ -1,0 +1,253 @@
+#ifndef ADINKRA_ANY
+#define ADINKRA_ANY
+
+#include <__adinkra/config>
+#include <initializer_list>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class bad_any_cast : public bad_cast {
+public:
+    const char* what() const noexcept override {
+        return "bad any_cast";
+    }
+};
+
+class any {
+    struct storage {
+        virtual ~storage() = default;
+        virtual storage* clone() const = 0;
+        virtual const type_info& type() const noexcept = 0;
+    };
+
+    template<class Type>
+    struct stored_value final : storage {
+        template<class... Arguments>
+        explicit stored_value(Arguments&&... arguments)
+            : value(std::forward<Arguments>(arguments)...) {}
+
+        storage* clone() const override {
+            return new stored_value(value);
+        }
+
+        const type_info& type() const noexcept override {
+            return typeid(Type);
+        }
+
+        Type value;
+    };
+
+public:
+    constexpr any() noexcept = default;
+
+    any(const any& other)
+        : storage_(other.storage_ == nullptr
+                       ? nullptr
+                       : other.storage_->clone()) {}
+
+    any(any&& other) noexcept
+        : storage_(other.storage_) {
+        other.storage_ = nullptr;
+    }
+
+    template<
+        class Value,
+        class Stored = decay_t<Value>,
+        enable_if_t<
+            !is_same_v<Stored, any> &&
+            is_copy_constructible_v<Stored>,
+            int> = 0>
+    any(Value&& value)
+        : storage_(
+              new stored_value<Stored>(
+                  std::forward<Value>(value))) {}
+
+    template<class Type, class... Arguments>
+    explicit any(
+        in_place_type_t<Type>,
+        Arguments&&... arguments)
+        : storage_(
+              new stored_value<decay_t<Type>>(
+                  std::forward<Arguments>(arguments)...)) {}
+
+    template<class Type, class Element, class... Arguments>
+    explicit any(
+        in_place_type_t<Type>,
+        initializer_list<Element> values,
+        Arguments&&... arguments)
+        : storage_(
+              new stored_value<decay_t<Type>>(
+                  values, std::forward<Arguments>(arguments)...)) {}
+
+    ~any() {
+        delete storage_;
+    }
+
+    any& operator=(const any& other) {
+        any(other).swap(*this);
+        return *this;
+    }
+
+    any& operator=(any&& other) noexcept {
+        if (this != &other) {
+            reset();
+            storage_ = other.storage_;
+            other.storage_ = nullptr;
+        }
+        return *this;
+    }
+
+    template<
+        class Value,
+        class Stored = decay_t<Value>,
+        enable_if_t<
+            !is_same_v<Stored, any> &&
+            is_copy_constructible_v<Stored>,
+            int> = 0>
+    any& operator=(Value&& value) {
+        any(std::forward<Value>(value)).swap(*this);
+        return *this;
+    }
+
+    template<class Type, class... Arguments>
+    decay_t<Type>& emplace(Arguments&&... arguments) {
+        reset();
+        auto* value = new stored_value<decay_t<Type>>(
+            std::forward<Arguments>(arguments)...);
+        storage_ = value;
+        return value->value;
+    }
+
+    template<class Type, class Element, class... Arguments>
+    decay_t<Type>& emplace(
+        initializer_list<Element> values,
+        Arguments&&... arguments) {
+        reset();
+        auto* value = new stored_value<decay_t<Type>>(
+            values, std::forward<Arguments>(arguments)...);
+        storage_ = value;
+        return value->value;
+    }
+
+    void reset() noexcept {
+        delete storage_;
+        storage_ = nullptr;
+    }
+
+    void swap(any& other) noexcept {
+        storage* temporary = storage_;
+        storage_ = other.storage_;
+        other.storage_ = temporary;
+    }
+
+    _ADINKRA_NODISCARD bool has_value() const noexcept {
+        return storage_ != nullptr;
+    }
+
+    _ADINKRA_NODISCARD const type_info& type() const noexcept {
+        return storage_ == nullptr ? typeid(void) : storage_->type();
+    }
+
+private:
+    template<class Type>
+    Type* get() noexcept {
+        if (storage_ == nullptr ||
+            storage_->type() != typeid(Type)) {
+            return nullptr;
+        }
+        return &static_cast<stored_value<Type>*>(storage_)->value;
+    }
+
+    template<class Type>
+    const Type* get() const noexcept {
+        if (storage_ == nullptr ||
+            storage_->type() != typeid(Type)) {
+            return nullptr;
+        }
+        return &static_cast<const stored_value<Type>*>(
+                    storage_)
+                    ->value;
+    }
+
+    template<class Type>
+    friend Type* any_cast(any*) noexcept;
+
+    template<class Type>
+    friend const Type* any_cast(const any*) noexcept;
+
+    storage* storage_ = nullptr;
+};
+
+inline void swap(any& left, any& right) noexcept {
+    left.swap(right);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD Type* any_cast(any* value) noexcept {
+    static_assert(!is_reference_v<Type>);
+    return value == nullptr
+        ? nullptr
+        : value->template get<remove_cv_t<Type>>();
+}
+
+template<class Type>
+_ADINKRA_NODISCARD const Type*
+any_cast(const any* value) noexcept {
+    static_assert(!is_reference_v<Type>);
+    return value == nullptr
+        ? nullptr
+        : value->template get<remove_cv_t<Type>>();
+}
+
+template<class Type>
+_ADINKRA_NODISCARD Type any_cast(const any& value) {
+    using Stored = remove_cvref_t<Type>;
+    const Stored* result = any_cast<Stored>(&value);
+    if (result == nullptr) {
+        throw bad_any_cast();
+    }
+    return static_cast<Type>(*result);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD Type any_cast(any& value) {
+    using Stored = remove_cvref_t<Type>;
+    Stored* result = any_cast<Stored>(&value);
+    if (result == nullptr) {
+        throw bad_any_cast();
+    }
+    return static_cast<Type>(*result);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD Type any_cast(any&& value) {
+    using Stored = remove_cvref_t<Type>;
+    Stored* result = any_cast<Stored>(&value);
+    if (result == nullptr) {
+        throw bad_any_cast();
+    }
+    return static_cast<Type>(std::move(*result));
+}
+
+template<class Type, class... Arguments>
+_ADINKRA_NODISCARD any make_any(Arguments&&... arguments) {
+    return any(
+        in_place_type<Type>,
+        std::forward<Arguments>(arguments)...);
+}
+
+template<class Type, class Element, class... Arguments>
+_ADINKRA_NODISCARD any make_any(
+    initializer_list<Element> values,
+    Arguments&&... arguments) {
+    return any(
+        in_place_type<Type>,
+        values, std::forward<Arguments>(arguments)...);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

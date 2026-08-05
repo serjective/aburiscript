@@ -1,0 +1,6 @@
+#ifndef ADINKRA_CFLOAT
+#define ADINKRA_CFLOAT
+
+#include <float.h>
+
+#endif

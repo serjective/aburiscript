@@ -1,0 +1,6 @@
+#ifndef ADINKRA_CERRNO
+#define ADINKRA_CERRNO
+
+#include <errno.h>
+
+#endif

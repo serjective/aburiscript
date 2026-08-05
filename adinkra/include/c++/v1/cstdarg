@@ -1,0 +1,11 @@
+#ifndef ADINKRA_CSTDARG
+#define ADINKRA_CSTDARG
+
+#include <__adinkra/config>
+#include <stdarg.h>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+using ::va_list;
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

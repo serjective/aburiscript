@@ -1,1277 +1,22 @@
 #include "parser.h"
-#include "tentative_syntax_probe.h"
+
 #include "../perf_stats.h"
 
-#include <cstdlib>
-#include <cstdint>
-#include <cassert>
-#include <iostream>
-
-bool token_can_start_cast_operand(TokenType tok);
+namespace aburi::syntax {
 
 namespace {
-struct ParserTentativeMetrics {
-    uint64_t tentative_context_begins = 0;
-    uint64_t tentative_context_commits = 0;
-    uint64_t tentative_context_rollbacks = 0;
-    uint64_t tentative_state_captures = 0;
-    uint64_t tentative_state_restores = 0;
-};
 
-bool refactor_metrics_enabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("ABURI_REFACTOR_METRICS");
-        return env && env[0] != '\0' && env[0] != '0';
-    }();
-    return enabled;
-}
-
-ParserTentativeMetrics& parser_tentative_metrics() {
-    static ParserTentativeMetrics metrics;
-    return metrics;
-}
-
-void emit_parser_tentative_metrics_at_exit() {
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    const auto& metrics = parser_tentative_metrics();
-    std::cerr
-        << "[refactor-metrics] parser.tentative "
-        << "begins=" << metrics.tentative_context_begins
-        << " commits=" << metrics.tentative_context_commits
-        << " rollbacks=" << metrics.tentative_context_rollbacks
-        << " captures=" << metrics.tentative_state_captures
-        << " restores=" << metrics.tentative_state_restores
-        << '\n';
-}
-
-struct ParserTentativeMetricsReporter {
-    ~ParserTentativeMetricsReporter() {
-        emit_parser_tentative_metrics_at_exit();
-    }
-};
-
-ParserTentativeMetricsReporter g_parser_tentative_metrics_reporter;
-
-class TokenStreamCheckpoint {
-public:
-    explicit TokenStreamCheckpoint(TokenMgnt& tok_mgnt)
-        : tok_mgnt_(tok_mgnt),
-          token_idx_(tok_mgnt.get_token_idx()),
-          split_state_(tok_mgnt.get_split_token_state()) {}
-
-    TokenStreamCheckpoint(const TokenStreamCheckpoint&) = delete;
-    TokenStreamCheckpoint& operator=(const TokenStreamCheckpoint&) = delete;
-
-    ~TokenStreamCheckpoint() {
-        restore();
-    }
-
-    void restore() {
-        if (!active_) {
-            return;
-        }
-        tok_mgnt_.set_token_idx(token_idx_);
-        tok_mgnt_.set_split_token_state(split_state_);
-        active_ = false;
-    }
-
-private:
-    TokenMgnt& tok_mgnt_;
-    size_t token_idx_ = 0;
-    TokenMgnt::SplitTokenState split_state_;
-    bool active_ = true;
-};
-
-void bump_tentative_context_begins() {
+void bump_parser_counter(PerfCounter counter) {
     if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTentativeBegins);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++parser_tentative_metrics().tentative_context_begins;
-}
-
-void bump_tentative_context_mode_begin(Parser::TentativeMode mode) {
-    auto* profiler = active_perf_profiler();
-    if (!profiler) {
-        return;
-    }
-    profiler->add_counter(
-        mode == Parser::TentativeMode::ParserOnly
-            ? PerfCounter::ParserTentativeParserOnlyBegins
-            : PerfCounter::ParserTentativeCollectBackedBegins);
-}
-
-void bump_tentative_context_commits() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTentativeCommits);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++parser_tentative_metrics().tentative_context_commits;
-}
-
-void bump_tentative_context_rollbacks() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTentativeRollbacks);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++parser_tentative_metrics().tentative_context_rollbacks;
-}
-
-void bump_tentative_state_captures() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTentativeStateCaptures);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++parser_tentative_metrics().tentative_state_captures;
-}
-
-void bump_tentative_state_restores() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTentativeStateRestores);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++parser_tentative_metrics().tentative_state_restores;
-}
-
-void bump_annotation_store_hit() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserAnnotationStoreHits);
+        profiler->add_counter(counter);
     }
 }
 
-void bump_annotation_store_miss() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserAnnotationStoreMisses);
-    }
-}
-
-void bump_typed_annotation_hit() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserTypedAnnotationHits);
-    }
-}
-
-void bump_typed_annotation_miss() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserTypedAnnotationMisses);
-    }
-}
-
-void bump_typed_annotation_publish() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserTypedAnnotationPublishes);
-    }
-}
-
-void bump_declarator_annotation_hit() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationHits);
-    }
-}
-
-void bump_declarator_annotation_miss() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationMisses);
-    }
-}
-
-void bump_declarator_annotation_publish() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationPublishes);
-    }
-}
-
-void bump_declarator_paren_suffix_type_scope_reject() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserDeclaratorParenSuffixTypeScopeRejects);
-    }
-}
-
-void bump_declarator_paren_suffix_type_scope_fallback() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserDeclaratorParenSuffixTypeScopeFallbacks);
-    }
-}
 } // namespace
 
-size_t Parser::begin_tentative_context(TentativeMode mode) {
-    bump_tentative_context_begins();
-    bump_tentative_context_mode_begin(mode);
-    TentativeContextFrame frame;
-    frame.id = next_tentative_context_id_++;
-    frame.mode = mode;
-    if (mode == TentativeMode::ParserOnly) {
-        frame.token_checkpoint = capture_tentative_token_state();
-    } else {
-        frame.parser_checkpoint = capture_tentative_state();
-    }
-    frame.cxx_disambiguation_state = cxx_tentative_state_;
-    if (diag_engine) {
-        frame.diag_checkpoint = diag_engine->checkpoint();
-    }
-    if (collect_ && mode == TentativeMode::CollectBacked) {
-        collect_->collect_begin_speculative_parse();
-    }
-    tentative_context_stack_.push_back(std::move(frame));
-    return tentative_context_stack_.back().id;
-}
-
-void Parser::restore_tentative_context_frame(const TentativeContextFrame& frame) {
-    if (collect_ && frame.mode == TentativeMode::CollectBacked) {
-        collect_->collect_rollback_speculative_parse();
-    }
-    if (frame.mode == TentativeMode::ParserOnly) {
-        restore_tentative_token_state(frame.token_checkpoint);
-    } else {
-        restore_tentative_state(frame.parser_checkpoint);
-    }
-    cxx_tentative_state_ = frame.cxx_disambiguation_state;
-    if (diag_engine) {
-        diag_engine->restore(frame.diag_checkpoint);
-    }
-}
-
-void Parser::commit_tentative_context(size_t context_id) {
-    if (tentative_context_stack_.empty()) {
-        assert(false && "commit_tentative_context with empty stack");
-        return;
-    }
-    while (!tentative_context_stack_.empty() &&
-           tentative_context_stack_.back().id != context_id) {
-        assert(false && "tentative commit order violation");
-        auto stray = std::move(tentative_context_stack_.back());
-        tentative_context_stack_.pop_back();
-        restore_tentative_context_frame(stray);
-    }
-    if (tentative_context_stack_.empty()) {
-        return;
-    }
-
-    auto frame = std::move(tentative_context_stack_.back());
-    tentative_context_stack_.pop_back();
-    bump_tentative_context_commits();
-    if (collect_ && frame.mode == TentativeMode::CollectBacked) {
-        collect_->collect_commit_speculative_parse();
-    }
-}
-
-void Parser::rollback_tentative_context(size_t context_id) {
-    if (tentative_context_stack_.empty()) {
-        assert(false && "rollback_tentative_context with empty stack");
-        return;
-    }
-    while (!tentative_context_stack_.empty() &&
-           tentative_context_stack_.back().id != context_id) {
-        assert(false && "tentative rollback order violation");
-        auto stray = std::move(tentative_context_stack_.back());
-        tentative_context_stack_.pop_back();
-        restore_tentative_context_frame(stray);
-    }
-    if (tentative_context_stack_.empty()) {
-        return;
-    }
-
-    auto frame = std::move(tentative_context_stack_.back());
-    tentative_context_stack_.pop_back();
-    bump_tentative_context_rollbacks();
-    restore_tentative_context_frame(frame);
-}
-
-bool Parser::is_in_tentative_context() const {
-    return !tentative_context_stack_.empty();
-}
-
-tentative_syntax_probe::Config Parser::syntax_probe_config() const {
-    return tentative_syntax_probe::Config{
-        .cxx_mode = is_cxx_mode_active(),
-        .blocks_enabled = type_ctx && type_ctx->target &&
-            darwin_blocks::blocks_enabled_for_langopts(
-                lang_opts, *type_ctx->target)};
-}
-
-bool Parser::can_use_annotation_store() const {
-    return !tok_mgnt.has_split_tokens();
-}
-
-bool Parser::can_use_semantic_annotation_store() const {
-    return can_use_annotation_store() && collect_ &&
-           !is_in_tentative_context() &&
-           !collect_->collect_is_speculative_parsing();
-}
-
-ParserAnnotationStore::SemanticKey Parser::semantic_annotation_key() const {
-    ParserAnnotationStore::SemanticKey key;
-    key.syntax_key =
-        ParserAnnotationStore::make_config_key(syntax_probe_config());
-    if (!collect_) {
-        return key;
-    }
-    key.lookup_generation = collect_->collect_lookup_generation();
-    key.scope = collect_->collect_current_scope().get();
-    key.decl_context = collect_->get_current_decl_context().get();
-    return key;
-}
-
-tentative_syntax_probe::Result Parser::probe_type_name_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::TypeName,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto result = tentative_syntax_probe::probe_type_name(tok_mgnt, cfg);
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::TypeName,
-            key,
-            result);
-    }
-    return result;
-}
-
-tentative_syntax_probe::Result Parser::probe_declarator_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::Declarator,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto result = tentative_syntax_probe::probe_declarator(tok_mgnt, cfg);
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::Declarator,
-            key,
-            result);
-    }
-    return result;
-}
-
-tentative_syntax_probe::Result
-Parser::probe_cxx_constrained_placeholder_type_specifier_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::CxxConstrainedPlaceholder,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto result =
-        tentative_syntax_probe::probe_cxx_constrained_placeholder_type_specifier(
-        tok_mgnt,
-        cfg);
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::CxxConstrainedPlaceholder,
-            key,
-            result);
-    }
-    return result;
-}
-
-tentative_syntax_probe::Result Parser::probe_cpp_qualified_id_start_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::CppQualifiedIdStart,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto result = tentative_syntax_probe::probe_cpp_qualified_id_start(
-        tok_mgnt,
-        cfg);
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::CppQualifiedIdStart,
-            key,
-            result);
-    }
-    return result;
-}
-
-tentative_syntax_probe::Result Parser::probe_cpp_qualified_declarator_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::CppQualifiedDeclarator,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto result = tentative_syntax_probe::probe_cpp_qualified_declarator(
-        tok_mgnt,
-        cfg);
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::CppQualifiedDeclarator,
-            key,
-            result);
-    }
-    return result;
-}
-
-tentative_syntax_probe::Result
-Parser::probe_cpp_template_name_argument_prefix_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::CppTemplateNameArgumentPrefix,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto result = tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
-        tok_mgnt,
-        cfg);
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::CppTemplateNameArgumentPrefix,
-            key,
-            result);
-    }
-    return result;
-}
-
-tentative_syntax_probe::Result Parser::probe_parenthesized_type_name_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_result(
-                token_idx,
-                ParserAnnotationStore::ResultKind::ParenthesizedTypeName,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    tentative_syntax_probe::Result result =
-        tentative_syntax_probe::Result::NoMatch;
-    if (tok_mgnt.gentle_check_and_consume(TokenType::LEFT_PAREN) &&
-        current_token().type != TokenType::EXTENSION_KW) {
-        result = tentative_syntax_probe::probe_type_name(tok_mgnt, cfg);
-    }
-    if (use_store) {
-        annotation_store_.store_result(
-            token_idx,
-            ParserAnnotationStore::ResultKind::ParenthesizedTypeName,
-            key,
-            result);
-    }
-    return result;
-}
-
-ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation
-Parser::classify_cxx_parenthesized_type_id_for_lookahead() {
-    ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation inconclusive;
-    inconclusive.kind =
-        ParserAnnotationStore::CxxParenthesizedTypeIdKind::Inconclusive;
-    inconclusive.close_token_idx = tok_mgnt.get_token_idx();
-    inconclusive.end_token_idx = tok_mgnt.get_token_idx();
-    inconclusive.dependent_or_ambiguous = true;
-
-    if (!is_cxx_mode_active()) {
-        ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation no_match;
-        no_match.close_token_idx = tok_mgnt.get_token_idx();
-        no_match.end_token_idx = tok_mgnt.get_token_idx();
-        return no_match;
-    }
-    if (tok_mgnt.has_split_tokens()) {
-        return inconclusive;
-    }
-
-    const bool use_store = can_use_semantic_annotation_store();
-    const size_t token_idx = tok_mgnt.get_token_idx();
-    ParserAnnotationStore::SemanticKey key;
-    if (use_store) {
-        key = semantic_annotation_key();
-        if (auto stored =
-                annotation_store_
-                    .lookup_cxx_parenthesized_type_id_annotation(
-                        token_idx,
-                        key)) {
-            bump_annotation_store_hit();
-            bump_typed_annotation_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-        bump_typed_annotation_miss();
-    }
-
-    auto annotation = compute_cxx_parenthesized_type_id_for_lookahead();
-    if (use_store) {
-        annotation =
-            annotation_store_.store_cxx_parenthesized_type_id_annotation(
-                token_idx,
-                key,
-                annotation);
-        bump_typed_annotation_publish();
-    }
-    return annotation;
-}
-
-ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation
-Parser::compute_cxx_parenthesized_type_id_for_lookahead() {
-    using Kind = ParserAnnotationStore::CxxParenthesizedTypeIdKind;
-    ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation result;
-    const size_t start_idx = tok_mgnt.get_token_idx();
-    result.close_token_idx = start_idx;
-    result.end_token_idx = start_idx;
-
-    auto finish = [&](Kind kind) {
-        result.kind = kind;
-        return result;
-    };
-    auto finish_inconclusive = [&]() {
-        result.kind = Kind::Inconclusive;
-        result.dependent_or_ambiguous = true;
-        return result;
-    };
-    auto is_cv_or_nullability_qualifier = [](TokenType type) {
-        switch (type) {
-            case TokenType::CONST:
-            case TokenType::VOLATILE:
-            case TokenType::RESTRICT:
-            case TokenType::ATOMIC:
-            case TokenType::NULLABILITY_QUALIFIER:
-                return true;
-            default:
-                return false;
-        }
-    };
-    auto should_semantically_classify_start = [](TokenType type) {
-        return type == TokenType::IDENTIFIER ||
-               type == TokenType::SCOPE_RESOLUTION ||
-               type == TokenType::TYPENAME ||
-               type == TokenType::DECLTYPE_KW ||
-               type == TokenType::COLON;
-    };
-    auto scan_parenthesized_follow_token = [&]() -> std::optional<TokenType> {
-        if (peek_token_shortcut(0).type != TokenType::LEFT_PAREN) {
-            return std::nullopt;
-        }
-        size_t offset = 0;
-        size_t depth = 0;
-        while (peek_token_shortcut(offset).type != TokenType::Eof) {
-            TokenType type = peek_token_shortcut(offset).type;
-            if (type == TokenType::LEFT_PAREN) {
-                ++depth;
-            } else if (type == TokenType::RIGHT_PAREN) {
-                --depth;
-                ++offset;
-                if (depth == 0) {
-                    return peek_token_shortcut(offset).type;
-                }
-                continue;
-            }
-            ++offset;
-        }
-        return std::nullopt;
-    };
-
-    if (!is_cxx_mode_active() || !collect_ ||
-        tok_mgnt.current_token().type != TokenType::LEFT_PAREN) {
-        return result;
-    }
-
-    bool semantic_start_dependent_or_ambiguous = false;
-    {
-        TokenStreamCheckpoint checkpoint(tok_mgnt);
-        tok_mgnt.advance(); // consume '('
-        if (tok_mgnt.current_token().type == TokenType::EXTENSION_KW) {
-            return result;
-        }
-        while (is_cv_or_nullability_qualifier(tok_mgnt.current_token().type)) {
-            tok_mgnt.advance();
-        }
-        TokenType semantic_start = tok_mgnt.current_token().type;
-        if (should_semantically_classify_start(semantic_start)) {
-            auto type_scope = classify_cpp_type_scope_for_lookahead(
-                ParserAnnotationStore::CppTypeScopeContext::TypeId);
-            switch (type_scope.kind) {
-                case ParserAnnotationStore::CppTypeScopeKind::TypeName:
-                case ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId:
-                case ParserAnnotationStore::CppTypeScopeKind::DependentType:
-                case ParserAnnotationStore::CppTypeScopeKind::
-                    PlaceholderConstraint:
-                    break;
-                case ParserAnnotationStore::CppTypeScopeKind::NoMatch:
-                case ParserAnnotationStore::CppTypeScopeKind::NonType:
-                    return result;
-                case ParserAnnotationStore::CppTypeScopeKind::ScopeOnly:
-                case ParserAnnotationStore::CppTypeScopeKind::DependentScope:
-                case ParserAnnotationStore::CppTypeScopeKind::Inconclusive:
-                    semantic_start_dependent_or_ambiguous = true;
-                    break;
-                case ParserAnnotationStore::CppTypeScopeKind::Error:
-                    return finish(Kind::Error);
-            }
-        }
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    tok_mgnt.advance(); // consume '('
-    if (tok_mgnt.current_token().type == TokenType::EXTENSION_KW) {
-        return result;
-    }
-
-    auto syntax_result =
-        tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
-    switch (syntax_result) {
-        case tentative_syntax_probe::Result::NoMatch:
-            return result;
-        case tentative_syntax_probe::Result::Inconclusive:
-            if (auto follow = scan_parenthesized_follow_token();
-                follow && *follow != TokenType::LEFT_BRACE &&
-                !token_can_start_cast_operand(*follow)) {
-                return result;
-            }
-            return finish_inconclusive();
-        case tentative_syntax_probe::Result::Error:
-            return finish(Kind::Error);
-        case tentative_syntax_probe::Result::Match:
-            break;
-    }
-
-    if (tok_mgnt.current_token().type != TokenType::RIGHT_PAREN) {
-        return finish_inconclusive();
-    }
-    result.close_token_idx = tok_mgnt.get_token_idx();
-    tok_mgnt.advance(); // consume ')'
-    result.end_token_idx = tok_mgnt.get_token_idx();
-    TokenType follow = tok_mgnt.current_token().type;
-    result.followed_by_left_brace = follow == TokenType::LEFT_BRACE;
-    result.followed_by_cast_operand =
-        follow != TokenType::LEFT_BRACE && token_can_start_cast_operand(follow);
-    result.dependent_or_ambiguous = semantic_start_dependent_or_ambiguous;
-    return finish(Kind::TypeId);
-}
-
-tentative_syntax_probe::TemplateArgumentListScan
-Parser::scan_template_argument_list_scope_follow_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored =
-                annotation_store_.lookup_template_argument_list_scan(
-                    token_idx,
-                    key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto scan =
-        tentative_syntax_probe::scan_template_argument_list_scope_follow(
-            tok_mgnt,
-            cfg);
-    if (use_store) {
-        annotation_store_.store_template_argument_list_scan(
-            token_idx,
-            key,
-            scan);
-    }
-    return scan;
-}
-
-tentative_syntax_probe::TemplateArgumentListScopeFollow
-Parser::classify_template_argument_list_scope_follow_syntax() {
-    return scan_template_argument_list_scope_follow_syntax().scope_follow;
-}
-
-tentative_syntax_probe::CxxTypeConstructionScan
-Parser::scan_cpp_type_construction_candidate_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored =
-                annotation_store_.lookup_type_construction_scan(
-                    token_idx,
-                    key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto scan = tentative_syntax_probe::scan_cpp_type_construction_candidate(
-        tok_mgnt,
-        cfg);
-    if (use_store) {
-        annotation_store_.store_type_construction_scan(
-            token_idx,
-            key,
-            scan);
-    }
-    return scan;
-}
-
-tentative_syntax_probe::CxxParameterClauseShape
-Parser::scan_cxx_parameter_clause_shape_syntax() {
-    auto cfg = syntax_probe_config();
-    uint32_t key = ParserAnnotationStore::make_config_key(cfg);
-    size_t token_idx = tok_mgnt.get_token_idx();
-    bool use_store = can_use_annotation_store();
-    if (use_store) {
-        if (auto stored = annotation_store_.lookup_parameter_clause_shape(
-                token_idx,
-                key)) {
-            bump_annotation_store_hit();
-            return *stored;
-        }
-        bump_annotation_store_miss();
-    }
-
-    TokenStreamCheckpoint checkpoint(tok_mgnt);
-    auto shape = tentative_syntax_probe::scan_cxx_parameter_clause_shape(
-        tok_mgnt,
-        cfg);
-    if (use_store) {
-        annotation_store_.store_parameter_clause_shape(
-            token_idx,
-            key,
-            shape);
-    }
-    return shape;
-}
-
-ParserAnnotationStore::CxxDeclaratorParenSuffixAnnotation
-Parser::classify_cxx_declarator_paren_suffix_for_lookahead() {
-    ParserAnnotationStore::CxxDeclaratorParenSuffixAnnotation inconclusive;
-    inconclusive.kind =
-        ParserAnnotationStore::CxxDeclaratorParenSuffixKind::Inconclusive;
-    inconclusive.dependent_or_ambiguous = true;
-
-    if (tok_mgnt.has_split_tokens()) {
-        return inconclusive;
-    }
-
-    const bool use_store = can_use_semantic_annotation_store();
-    const size_t token_idx = tok_mgnt.get_token_idx();
-    ParserAnnotationStore::SemanticKey key;
-    if (use_store) {
-        key = semantic_annotation_key();
-        if (auto stored =
-                annotation_store_
-                    .lookup_cxx_declarator_paren_suffix_annotation(
-                        token_idx,
-                        key)) {
-            bump_typed_annotation_hit();
-            bump_declarator_annotation_hit();
-            return *stored;
-        }
-        bump_typed_annotation_miss();
-        bump_declarator_annotation_miss();
-    }
-
-    auto annotation = compute_cxx_declarator_paren_suffix_for_lookahead();
-    if (use_store) {
-        annotation =
-            annotation_store_.store_cxx_declarator_paren_suffix_annotation(
-                token_idx,
-                key,
-                annotation);
-        bump_declarator_annotation_publish();
-        bump_typed_annotation_publish();
-    }
-    return annotation;
-}
-
-ParserAnnotationStore::CxxDeclaratorParenSuffixAnnotation
-Parser::compute_cxx_declarator_paren_suffix_for_lookahead() {
-    ParserAnnotationStore::CxxDeclaratorParenSuffixAnnotation result;
-    result.kind =
-        ParserAnnotationStore::CxxDeclaratorParenSuffixKind::NoMatch;
-    result.end_token_idx = tok_mgnt.get_token_idx();
-
-    if (!is_cxx_mode_active()) {
-        return result;
-    }
-
-    auto finish = [&](ParserAnnotationStore::CxxDeclaratorParenSuffixKind kind) {
-        result.kind = kind;
-        return result;
-    };
-
-    if (tok_mgnt.current_token().type == TokenType::RIGHT_PAREN) {
-        return finish(
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                EmptyParameterClause);
-    }
-    if (tok_mgnt.current_token().type == TokenType::ELLIPSIS) {
-        return finish(
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                EllipsisParameterClause);
-    }
-    if (is_gnu_attribute_token(tok_mgnt.current_token()) ||
-        (tok_mgnt.current_token().type == TokenType::LEFT_BRACKET &&
-         tok_mgnt.peek_token().type == TokenType::LEFT_BRACKET)) {
-        return finish(
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                DefiniteParameterClause);
-    }
-
-    auto shape = scan_cxx_parameter_clause_shape_syntax();
-    if (shape == tentative_syntax_probe::CxxParameterClauseShape::NoMatch) {
-        return finish(
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                DefiniteDirectInitializer);
-    }
-    if (shape == tentative_syntax_probe::CxxParameterClauseShape::Empty) {
-        return finish(
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                EmptyParameterClause);
-    }
-    if (shape == tentative_syntax_probe::CxxParameterClauseShape::Ellipsis) {
-        return finish(
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                EllipsisParameterClause);
-    }
-    if (shape ==
-        tentative_syntax_probe::CxxParameterClauseShape::PotentialParameter) {
-        result.kind =
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::Ambiguous;
-        result.dependent_or_ambiguous = true;
-        return result;
-    }
-
-    TokenType parameter_start_type = tok_mgnt.current_token().type;
-    if (parameter_start_type == TokenType::IDENTIFIER ||
-        parameter_start_type == TokenType::SCOPE_RESOLUTION ||
-        (parameter_start_type == TokenType::COLON &&
-         tok_mgnt.peek_token().type == TokenType::COLON)) {
-        auto type_scope = classify_cpp_type_scope_for_lookahead(
-            ParserAnnotationStore::CppTypeScopeContext::DeclaratorParameter);
-        switch (type_scope.kind) {
-            case ParserAnnotationStore::CppTypeScopeKind::NoMatch:
-            case ParserAnnotationStore::CppTypeScopeKind::NonType:
-                bump_declarator_paren_suffix_type_scope_reject();
-                return finish(
-                    ParserAnnotationStore::CxxDeclaratorParenSuffixKind::
-                        DefiniteDirectInitializer);
-            case ParserAnnotationStore::CppTypeScopeKind::TypeName:
-            case ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId:
-            case ParserAnnotationStore::CppTypeScopeKind::DependentType:
-            case ParserAnnotationStore::CppTypeScopeKind::DependentScope:
-            case ParserAnnotationStore::CppTypeScopeKind::ScopeOnly:
-            case ParserAnnotationStore::CppTypeScopeKind::
-                PlaceholderConstraint:
-            case ParserAnnotationStore::CppTypeScopeKind::Inconclusive:
-            case ParserAnnotationStore::CppTypeScopeKind::Error:
-                bump_declarator_paren_suffix_type_scope_fallback();
-                break;
-        }
-        result.kind =
-            ParserAnnotationStore::CxxDeclaratorParenSuffixKind::Ambiguous;
-        result.dependent_or_ambiguous = true;
-        return result;
-    }
-
-    result.kind =
-        ParserAnnotationStore::CxxDeclaratorParenSuffixKind::Inconclusive;
-    result.dependent_or_ambiguous = true;
-    return result;
-}
-
-ParserAnnotationStore::CppQualifiedDeclaratorPrefixAnnotation
-Parser::classify_cpp_qualified_declarator_prefix_for_lookahead() {
-    ParserAnnotationStore::CppQualifiedDeclaratorPrefixAnnotation inconclusive;
-    inconclusive.kind =
-        ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::Inconclusive;
-    inconclusive.dependent_or_ambiguous = true;
-
-    if (tok_mgnt.has_split_tokens()) {
-        return inconclusive;
-    }
-
-    const bool use_store = can_use_annotation_store();
-    const size_t token_idx = tok_mgnt.get_token_idx();
-    const uint32_t key =
-        ParserAnnotationStore::make_config_key(syntax_probe_config());
-    if (use_store) {
-        if (auto stored =
-                annotation_store_
-                    .lookup_cpp_qualified_declarator_prefix_annotation(
-                        token_idx,
-                        key)) {
-            bump_typed_annotation_hit();
-            bump_declarator_annotation_hit();
-            return *stored;
-        }
-        bump_typed_annotation_miss();
-        bump_declarator_annotation_miss();
-    }
-
-    auto annotation = compute_cpp_qualified_declarator_prefix_for_lookahead();
-    if (use_store) {
-        annotation =
-            annotation_store_.store_cpp_qualified_declarator_prefix_annotation(
-                token_idx,
-                key,
-                annotation);
-        bump_declarator_annotation_publish();
-        bump_typed_annotation_publish();
-    }
-    return annotation;
-}
-
-ParserAnnotationStore::CppQualifiedDeclaratorPrefixAnnotation
-Parser::compute_cpp_qualified_declarator_prefix_for_lookahead() {
-    ParserAnnotationStore::CppQualifiedDeclaratorPrefixAnnotation result;
-    result.kind =
-        ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::NoMatch;
-    result.end_token_idx = tok_mgnt.get_token_idx();
-
-    if (!is_cxx_mode_active()) {
-        return result;
-    }
-
-    const size_t start_idx = tok_mgnt.get_token_idx();
-    auto token_at = [&](size_t offset) -> const Token& {
-        if (offset == 0) {
-            return tok_mgnt.current_token();
-        }
-        return tok_mgnt.peek_token(offset);
-    };
-    auto finish_inconclusive = [&]() {
-        result.kind =
-            ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::
-                Inconclusive;
-        result.dependent_or_ambiguous = true;
-        return result;
-    };
-    auto skip_balanced_group_at =
-        [&](size_t& offset,
-            TokenType open_tok,
-            TokenType close_tok) {
-        if (token_at(offset).type != open_tok) {
-            return false;
-        }
-        size_t depth = 0;
-        while (token_at(offset).type != TokenType::Eof) {
-            TokenType type = token_at(offset).type;
-            if (type == open_tok) {
-                ++depth;
-            } else if (type == close_tok) {
-                --depth;
-                ++offset;
-                if (depth == 0) {
-                    return true;
-                }
-                continue;
-            }
-            ++offset;
-        }
-        return false;
-    };
-    auto skip_template_argument_list_at = [&](size_t& offset) {
-        if (token_at(offset).type != TokenType::LESS_THAN) {
-            return true;
-        }
-        int depth = 0;
-        while (token_at(offset).type != TokenType::Eof) {
-            TokenType type = token_at(offset).type;
-            if (type == TokenType::LEFT_PAREN) {
-                if (!skip_balanced_group_at(
-                        offset,
-                        TokenType::LEFT_PAREN,
-                        TokenType::RIGHT_PAREN)) {
-                    return false;
-                }
-                continue;
-            }
-            if (type == TokenType::LEFT_BRACKET) {
-                if (!skip_balanced_group_at(
-                        offset,
-                        TokenType::LEFT_BRACKET,
-                        TokenType::RIGHT_BRACKET)) {
-                    return false;
-                }
-                continue;
-            }
-            if (type == TokenType::LEFT_BRACE) {
-                if (!skip_balanced_group_at(
-                        offset,
-                        TokenType::LEFT_BRACE,
-                        TokenType::RIGHT_BRACE)) {
-                    return false;
-                }
-                continue;
-            }
-            if (type == TokenType::LESS_THAN) {
-                ++depth;
-                ++offset;
-                continue;
-            }
-            if (type == TokenType::GREATER_THAN) {
-                --depth;
-                ++offset;
-                if (depth == 0) {
-                    return true;
-                }
-                if (depth < 0) {
-                    return false;
-                }
-                continue;
-            }
-            if (type == TokenType::RIGHT_SHIFT ||
-                type == TokenType::ASSIGN_RSHIFT) {
-                if (depth <= 0) {
-                    return false;
-                }
-                if (depth <= 2) {
-                    ++offset;
-                    return true;
-                }
-                depth -= 2;
-                ++offset;
-                continue;
-            }
-            ++offset;
-        }
-        return false;
-    };
-    auto consume_scope_resolution_at = [&](size_t& offset) {
-        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
-            ++offset;
-            return true;
-        }
-        if (token_at(offset).type == TokenType::COLON &&
-            token_at(offset + 1).type == TokenType::COLON) {
-            offset += 2;
-            return true;
-        }
-        return false;
-    };
-    auto skip_post_pointer_qualifiers_at = [&](size_t& offset) {
-        while (true) {
-            TokenType type = token_at(offset).type;
-            if (type == TokenType::CONST ||
-                type == TokenType::VOLATILE ||
-                type == TokenType::RESTRICT ||
-                type == TokenType::ATOMIC ||
-                type == TokenType::NULLABILITY_QUALIFIER) {
-                ++offset;
-                continue;
-            }
-            if (is_gnu_attribute_token(token_at(offset))) {
-                ++offset;
-                if (token_at(offset).type == TokenType::LEFT_PAREN &&
-                    !skip_balanced_group_at(offset,
-                                            TokenType::LEFT_PAREN,
-                                            TokenType::RIGHT_PAREN)) {
-                    return false;
-                }
-                continue;
-            }
-            return true;
-        }
-    };
-    auto skip_leading_declarator_prefix_at = [&](size_t& offset) {
-        while (true) {
-            TokenType type = token_at(offset).type;
-            if (type == TokenType::MULTIPLY ||
-                type == TokenType::BITWISE_XOR) {
-                ++offset;
-                if (!skip_post_pointer_qualifiers_at(offset)) {
-                    return false;
-                }
-                continue;
-            }
-            if (type == TokenType::LOGICAL_AND ||
-                type == TokenType::BITWISE_AND) {
-                ++offset;
-                continue;
-            }
-            return true;
-        }
-    };
-    auto parse_identifier_component_at = [&](size_t& offset) {
-        if (token_at(offset).type != TokenType::IDENTIFIER) {
-            return false;
-        }
-        ++offset;
-        if (token_at(offset).type == TokenType::LESS_THAN) {
-            result.has_template_id_component = true;
-            if (!skip_template_argument_list_at(offset)) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    size_t offset = 0;
-    if (!skip_leading_declarator_prefix_at(offset)) {
-        return finish_inconclusive();
-    }
-
-    bool has_global_qualifier = consume_scope_resolution_at(offset);
-    result.has_global_qualifier = has_global_qualifier;
-    bool saw_scope = has_global_qualifier;
-
-    if (has_global_qualifier &&
-        token_at(offset).type == TokenType::OPERATOR_KW) {
-        result.terminal_is_operator_id = true;
-        result.end_token_idx = start_idx + offset;
-        result.kind =
-            ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::
-                QualifiedDeclarator;
-        return result;
-    }
-
-    if (!parse_identifier_component_at(offset)) {
-        if (has_global_qualifier) {
-            return finish_inconclusive();
-        }
-        return result;
-    }
-
-    while (consume_scope_resolution_at(offset)) {
-        saw_scope = true;
-        if (token_at(offset).type == TokenType::OPERATOR_KW) {
-            result.terminal_is_operator_id = true;
-            result.end_token_idx = start_idx + offset;
-            result.kind =
-                ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::
-                    QualifiedDeclarator;
-            return result;
-        }
-        if (!parse_identifier_component_at(offset)) {
-            return finish_inconclusive();
-        }
-    }
-
-    result.end_token_idx = start_idx + offset;
-    if (saw_scope) {
-        result.kind =
-            ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::
-                QualifiedDeclarator;
-    }
-    return result;
-}
-
-Parser::TentativeParsingAction::TentativeParsingAction(
-    Parser& parser,
-    std::source_location loc)
-    : TentativeParsingAction(
-          parser,
-          TentativeMode::CollectBacked,
-          loc) {}
-
-Parser::TentativeParsingAction::TentativeParsingAction(
-    Parser& parser,
-    TentativeMode mode,
-    std::source_location loc)
-    : parser_(parser),
-      tentative_mode_(mode) {
-    if (auto* profiler = active_perf_profiler(); profiler && profiler->wants_full()) {
-        tentative_profiler_ = profiler;
-        tentative_file_ = loc.file_name();
-        tentative_function_ = loc.function_name();
-        tentative_line_ = loc.line();
-        tentative_start_token_idx_ = parser_.get_token_idx();
-        tentative_depth_ = parser_.tentative_context_stack_.size() + 1;
-        tentative_start_ = std::chrono::steady_clock::now();
-    }
-    context_id_ = parser_.begin_tentative_context(mode);
-}
+Parser::TentativeParsingAction::TentativeParsingAction(Parser& parser,
+                                                       TentativeMode mode)
+    : parser_(parser), context_id_(parser_.begin_tentative_context(mode)) {}
 
 Parser::TentativeParsingAction::~TentativeParsingAction() {
     revert();
@@ -1281,7 +26,6 @@ void Parser::TentativeParsingAction::commit() {
     if (!active_) {
         return;
     }
-    record_tentative_outcome(true);
     parser_.commit_tentative_context(context_id_);
     active_ = false;
 }
@@ -1290,249 +34,378 @@ void Parser::TentativeParsingAction::revert() {
     if (!active_) {
         return;
     }
-    record_tentative_outcome(false);
     parser_.rollback_tentative_context(context_id_);
     active_ = false;
 }
 
-void Parser::TentativeParsingAction::record_tentative_outcome(bool committed) {
-    if (!tentative_profiler_) {
+Parser::ParserCheckpoint Parser::capture_parser_checkpoint() const {
+    bump_parser_counter(PerfCounter::ParserTentativeStateCaptures);
+    return ParserCheckpoint{
+        cursor_,
+        last_consumed_raw_end_,
+        pending_template_closes_,
+        diagnostics_.size(),
+        tree_.checkpoint(),
+        constraint_concept_id_syntax_.size(),
+        constraint_fold_operand_syntax_.size()
+    };
+}
+
+void Parser::restore_parser_checkpoint(const ParserCheckpoint& checkpoint) {
+    bump_parser_counter(PerfCounter::ParserTentativeStateRestores);
+    cursor_ = checkpoint.cursor;
+    last_consumed_raw_end_ = checkpoint.last_consumed_raw_end;
+    pending_template_closes_ = checkpoint.pending_template_closes;
+    diagnostics_.resize(checkpoint.diagnostics_size);
+    tree_.rollback_to(checkpoint.tree_checkpoint);
+    constraint_concept_id_syntax_.resize(
+        checkpoint.constraint_concept_id_syntax_size);
+    constraint_fold_operand_syntax_.resize(
+        checkpoint.constraint_fold_operand_syntax_size);
+}
+
+bool Parser::declaration_attributes_terminate_template_head_constraint() {
+    if (template_head_constraint_attribute_boundary_depth_ == 0 ||
+        !check(TokenType::LEFT_BRACKET) ||
+        peek(1).type != TokenType::LEFT_BRACKET) {
+        return false;
+    }
+
+    RevertingTentativeParsingAction tentative(*this,
+                                               TentativeMode::ParserOnly);
+    const size_t diagnostic_watermark = diagnostics_.size();
+    const size_t attribute_begin = current_raw_index();
+    ParsedAttributes attributes = try_parse_standard_or_gnu_attributes();
+    const bool parsed_attributes =
+        current_raw_index() != attribute_begin &&
+        !attributes.syntax.empty() &&
+        diagnostics_.size() == diagnostic_watermark;
+    if (!parsed_attributes) {
+        return false;
+    }
+
+    return is_type_start(current().type) ||
+           current().type == TokenType::OPERATOR_KW ||
+           current().type == TokenType::BITWISE_NOT;
+}
+
+size_t Parser::begin_tentative_context(TentativeMode mode) {
+    bump_parser_counter(PerfCounter::ParserTentativeBegins);
+    bump_parser_counter(mode == TentativeMode::ParserOnly
+                            ? PerfCounter::ParserTentativeParserOnlyBegins
+                            : PerfCounter::ParserTentativeCollectBackedBegins);
+    TentativeContextFrame frame;
+    frame.id = next_tentative_context_id_++;
+    if (next_tentative_context_id_ == 0) {
+        next_tentative_context_id_ = 1;
+    }
+    frame.mode = mode;
+    frame.parser_checkpoint = capture_parser_checkpoint();
+    if (mode == TentativeMode::CollectBacked) {
+        collect_session_.begin_speculative_parse();
+    }
+    tentative_context_stack_.push_back(std::move(frame));
+    return tentative_context_stack_.back().id;
+}
+
+void Parser::commit_tentative_context(size_t context_id) {
+    if (tentative_context_stack_.empty() ||
+        tentative_context_stack_.back().id != context_id) {
         return;
     }
-
-    tentative_profiler_->record_tentative_parse_site(
-        tentative_file_,
-        tentative_function_,
-        tentative_line_,
-        committed,
-        tentative_mode_ == TentativeMode::CollectBacked,
-        tentative_start_token_idx_,
-        parser_.get_token_idx(),
-        tentative_depth_,
-        std::chrono::steady_clock::now() - tentative_start_);
-    tentative_profiler_ = nullptr;
-}
-
-Parser::TentativeParserState Parser::capture_tentative_state() {
-    bump_tentative_state_captures();
-    TentativeParserState state;
-    state.token_idx = get_token_idx();
-    state.split_token_state = tok_mgnt.get_split_token_state();
-    state.func_type = func_type;
-    state.active_language_linkage = current_language_linkage_;
-    state.seen_stmt_labels = seen_stmt_labels;
-    state.stmt_labels = stmt_labels;
-    state.local_label_scopes = local_label_scopes_;
-    state.local_label_unique_id = local_label_unique_id_;
-    state.loop_count = loop_count;
-    state.switch_count = switch_count;
-    state.has_default = has_default;
-    state.case_values = case_values;
-    state.template_pattern_depth = template_pattern_depth_;
-    state.template_parameter_depth = template_parameter_depth_;
-    state.template_argument_expression_depth =
-        template_argument_expression_depth_;
-    state.template_argument_group_depth = template_argument_group_depth_;
-    state.cpp_template_declaration_subject_parse_depth =
-        cpp_template_declaration_subject_parse_depth_;
-    return state;
-}
-
-void Parser::restore_tentative_state(const TentativeParserState& state) {
-    bump_tentative_state_restores();
-    set_token_idx(state.token_idx);
-    tok_mgnt.set_split_token_state(state.split_token_state);
-    func_type = state.func_type;
-    current_language_linkage_ = state.active_language_linkage;
-    seen_stmt_labels = state.seen_stmt_labels;
-    stmt_labels = state.stmt_labels;
-    local_label_scopes_ = state.local_label_scopes;
-    local_label_unique_id_ = state.local_label_unique_id;
-    loop_count = state.loop_count;
-    switch_count = state.switch_count;
-    has_default = state.has_default;
-    case_values = state.case_values;
-    template_pattern_depth_ = state.template_pattern_depth;
-    template_parameter_depth_ = state.template_parameter_depth;
-    template_argument_expression_depth_ =
-        state.template_argument_expression_depth;
-    template_argument_group_depth_ = state.template_argument_group_depth;
-    cpp_template_declaration_subject_parse_depth_ =
-        state.cpp_template_declaration_subject_parse_depth;
-}
-
-Parser::TentativeTokenState Parser::capture_tentative_token_state() {
-    bump_tentative_state_captures();
-    TentativeTokenState state;
-    state.token_idx = get_token_idx();
-    state.split_token_state = tok_mgnt.get_split_token_state();
-    return state;
-}
-
-void Parser::restore_tentative_token_state(const TentativeTokenState& state) {
-    bump_tentative_state_restores();
-    set_token_idx(state.token_idx);
-    tok_mgnt.set_split_token_state(state.split_token_state);
-}
-
-Parser::TPResult Parser::try_parse_type_name() {
-    if (!isTokenDeclarationSpec(current_token())) {
-        return TPResult::False;
-    }
-    size_t start_idx = tok_mgnt.get_token_idx();
-
-    tentative_syntax_probe::Result syntax_probe_result = probe_type_name_syntax();
-    if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
-        return TPResult::True;
-    }
-    if (syntax_probe_result == tentative_syntax_probe::Result::NoMatch) {
-        return TPResult::False;
-    }
-    if (syntax_probe_result == tentative_syntax_probe::Result::Error) {
-        return TPResult::Error;
-    }
-
-    RevertingTentativeParsingAction tentative(*this);
-    try {
-        DeclarationParser decl(this);
-        auto parsed_type = decl.parse_declaration();
-        if (!parsed_type) {
-            return TPResult::Error;
-        }
-        if (tok_mgnt.get_token_idx() == start_idx) {
-            return TPResult::False;
-        }
-        if (!decl.name.empty()) {
-            return TPResult::False;
-        }
-        return TPResult::True;
-    } catch (const FatalErrorLimitReached&) {
-        return TPResult::Error;
-    } catch (const ParseError&) {
-        return TPResult::Error;
+    bump_parser_counter(PerfCounter::ParserTentativeCommits);
+    TentativeContextFrame frame = std::move(tentative_context_stack_.back());
+    tentative_context_stack_.pop_back();
+    if (frame.mode == TentativeMode::CollectBacked) {
+        collect_session_.commit_speculative_parse();
     }
 }
 
-Parser::TPResult Parser::try_parse_declarator() {
-    TokenType tok = current_token().type;
-    if (tok != TokenType::MULTIPLY &&
-        tok != TokenType::BITWISE_XOR &&
-        tok != TokenType::BITWISE_AND &&
-        tok != TokenType::LOGICAL_AND &&
-        tok != TokenType::LEFT_PAREN &&
-        tok != TokenType::IDENTIFIER &&
-        tok != TokenType::LEFT_BRACKET) {
-        return TPResult::False;
+void Parser::rollback_tentative_context(size_t context_id) {
+    if (tentative_context_stack_.empty() ||
+        tentative_context_stack_.back().id != context_id) {
+        return;
     }
-    size_t start_idx = tok_mgnt.get_token_idx();
-
-    tentative_syntax_probe::Result syntax_probe_result = probe_declarator_syntax();
-    if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
-        return TPResult::True;
+    bump_parser_counter(PerfCounter::ParserTentativeRollbacks);
+    TentativeContextFrame frame = std::move(tentative_context_stack_.back());
+    tentative_context_stack_.pop_back();
+    if (frame.mode == TentativeMode::CollectBacked) {
+        collect_session_.rollback_speculative_parse();
     }
-    if (syntax_probe_result == tentative_syntax_probe::Result::NoMatch) {
-        return TPResult::False;
-    }
-    if (syntax_probe_result == tentative_syntax_probe::Result::Error) {
-        return TPResult::Error;
-    }
-
-    RevertingTentativeParsingAction tentative(*this);
-    try {
-        DeclarationParser decl(this);
-        auto placeholder = std::make_shared<PlaceholderType>();
-        auto parsed_type = decl.parse_declarator(placeholder);
-        if (!parsed_type) {
-            return TPResult::Error;
-        }
-        if (tok_mgnt.get_token_idx() == start_idx) {
-            return TPResult::False;
-        }
-        return TPResult::True;
-    } catch (const FatalErrorLimitReached&) {
-        return TPResult::Error;
-    } catch (const ParseError&) {
-        return TPResult::Error;
-    }
+    restore_parser_checkpoint(frame.parser_checkpoint);
 }
 
-Parser::TPResult Parser::try_parse_simple_declaration() {
-    RevertingTentativeParsingAction tentative(*this);
-    size_t start_idx = get_token_idx();
-    bool had_leading_attrs = false;
-    try {
-        if (is_gnu_attribute_token(current_token()) ||
-            (gentle_check(TokenType::LEFT_BRACKET) && peek_token().type == TokenType::LEFT_BRACKET)) {
-            had_leading_attrs = true;
-            try_parse_attributes();
-        }
-        if (!isTokenDeclarationSpec(current_token())) {
-            return had_leading_attrs ? TPResult::Ambiguous : TPResult::False;
-        }
-        auto parsed_decls = parse_declaration();
-        if (parsed_decls.empty()) {
-            return TPResult::Error;
-        }
-        if (get_token_idx() == start_idx) {
-            return TPResult::False;
-        }
-        return TPResult::True;
-    } catch (const FatalErrorLimitReached&) {
-        return TPResult::Error;
-    } catch (const ParseError&) {
-        return TPResult::Error;
+bool Parser::probe_declaration_statement_start() {
+    if (is_attribute_start()) {
+        RevertingTentativeParsingAction tentative(*this, TentativeMode::ParserOnly);
+        (void)try_parse_attributes();
+        return is_type_start(current().type) || is_attribute_start() ||
+               (lang_opts_.is_cxx_mode() &&
+                starts_type_constraint_placeholder());
     }
+    if (lang_opts_.is_cxx_mode() &&
+        starts_type_constraint_placeholder()) {
+        return true;
+    }
+
+    uint32_t config_key = lang_opts_.is_cxx_mode() ? 1u : 0u;
+    if (auto cached = annotation_store_.lookup_result(
+            mark(),
+            ParserAnnotationStore::ResultKind::DeclarationStatementStart,
+            config_key,
+            0,
+            0)) {
+        bump_parser_counter(PerfCounter::ParserAnnotationStoreHits);
+        if (*cached != tentative_syntax_probe::Result::Inconclusive) {
+            return *cached == tentative_syntax_probe::Result::Match;
+        }
+    } else {
+        bump_parser_counter(PerfCounter::ParserAnnotationStoreMisses);
+        tentative_syntax_probe::Result syntax_result =
+            tentative_syntax_probe::probe_declaration_statement_start(current().type);
+        annotation_store_.store_result(
+            mark(),
+            ParserAnnotationStore::ResultKind::DeclarationStatementStart,
+            config_key,
+            0,
+            0,
+            syntax_result);
+        if (syntax_result != tentative_syntax_probe::Result::Inconclusive) {
+            return syntax_result == tentative_syntax_probe::Result::Match;
+        }
+    }
+
+    uint64_t lookup_generation = collect_session_.lookup_generation();
+    uint64_t scope = collect_session_.current_scope();
+    if (auto cached_semantic = annotation_store_.lookup_result(
+            mark(),
+            ParserAnnotationStore::ResultKind::DeclarationStatementStart,
+            config_key,
+            lookup_generation,
+            scope)) {
+        bump_parser_counter(PerfCounter::ParserAnnotationStoreHits);
+        return *cached_semantic == tentative_syntax_probe::Result::Match;
+    }
+    bump_parser_counter(PerfCounter::ParserAnnotationStoreMisses);
+
+    bool names_a_type;
+    if (lang_opts_.is_cxx_mode() &&
+        (check(TokenType::SCOPE_RESOLUTION) ||
+         (is_identifier_token(current().type) &&
+          peek(1).type == TokenType::SCOPE_RESOLUTION))) {
+
+        names_a_type = peek_cxx_qualified_type().has_value();
+    } else if (lang_opts_.is_cxx_mode() &&
+               is_identifier_token(current().type) &&
+               peek(1).type == TokenType::LESS_THAN &&
+               template_id_precedes_scope(0)) {
+
+        names_a_type = peek_cxx_qualified_type().has_value();
+    } else if (lang_opts_.is_cxx_mode() &&
+               is_identifier_token(current().type) &&
+               peek(1).type == TokenType::LESS_THAN) {
+
+        const collect::Session::TemplateInfo* info =
+            collect_session_.template_info_for_name(current().value);
+        names_a_type =
+            info && (info->is_class_template || info->is_alias_template);
+    } else if (is_deduced_class_template_declaration_start()) {
+
+        names_a_type = true;
+    } else {
+        names_a_type = collect_session_.is_type_name(current().value);
+    }
+    tentative_syntax_probe::Result result = names_a_type
+        ? tentative_syntax_probe::Result::Match
+        : tentative_syntax_probe::Result::NoMatch;
+    annotation_store_.store_result(
+        mark(),
+        ParserAnnotationStore::ResultKind::DeclarationStatementStart,
+        config_key,
+        lookup_generation,
+        scope,
+        result);
+    return result == tentative_syntax_probe::Result::Match;
 }
 
-Parser::TPResult Parser::try_parse_expression_statement_start() {
-    RevertingTentativeParsingAction tentative(*this);
-    if (gentle_check(TokenType::SEMICOLON)) {
-        return TPResult::True;
+bool Parser::probe_expression_statement_start() {
+    if (is_attribute_start()) {
+        RevertingTentativeParsingAction tentative(*this, TentativeMode::ParserOnly);
+        (void)try_parse_attributes();
+        return check(TokenType::SEMICOLON);
     }
-    size_t start_idx = get_token_idx();
-    try {
-        auto expr = parse_expression();
-        if (!expr) {
-            return TPResult::Error;
-        }
-        if (get_token_idx() == start_idx) {
-            return TPResult::False;
-        }
-        return TPResult::True;
-    } catch (const FatalErrorLimitReached&) {
-        return TPResult::Error;
-    } catch (const ParseError&) {
-        return TPResult::Error;
+
+    uint32_t config_key = lang_opts_.is_cxx_mode() ? 1u : 0u;
+    if (auto cached = annotation_store_.lookup_result(
+            mark(),
+            ParserAnnotationStore::ResultKind::ExpressionStatementStart,
+            config_key,
+            0,
+            0)) {
+        bump_parser_counter(PerfCounter::ParserAnnotationStoreHits);
+        return *cached == tentative_syntax_probe::Result::Match;
     }
+    bump_parser_counter(PerfCounter::ParserAnnotationStoreMisses);
+
+    tentative_syntax_probe::Result result =
+        tentative_syntax_probe::probe_expression_statement_start(current().type);
+    annotation_store_.store_result(
+        mark(),
+        ParserAnnotationStore::ResultKind::ExpressionStatementStart,
+        config_key,
+        0,
+        0,
+        result);
+    return result == tentative_syntax_probe::Result::Match;
 }
 
-Parser::CxxStmtDisambiguation Parser::classify_cxx_stmt_disambiguation() {
-    if (!is_cxx_mode_active()) {
-        return CxxStmtDisambiguation::Invalid;
-    }
-    if (!isTokenDeclarationSpec(current_token())) {
-        return CxxStmtDisambiguation::Expression;
-    }
-    // C++ [stmt.ambig]: if a statement can be parsed as either declaration
-    // or expression-statement, it is interpreted as a declaration.
-    auto start_idx = tok_mgnt.get_token_idx();
-    auto split_state = tok_mgnt.get_split_token_state();
-    auto syntax_result =
-        tentative_syntax_probe::probe_cxx_statement_disambiguation(
-            tok_mgnt,
-            syntax_probe_config());
-    tok_mgnt.set_token_idx(start_idx);
-    tok_mgnt.set_split_token_state(split_state);
+Parser::StmtDeclDisambiguation Parser::classify_stmt_or_decl() {
+    if (current().type == TokenType::IDENTIFIER && current().value == "__block") {
 
-    switch (syntax_result) {
-        case tentative_syntax_probe::CxxStatementDisambiguation::Declaration:
-            return CxxStmtDisambiguation::Declaration;
-        case tentative_syntax_probe::CxxStatementDisambiguation::Expression:
-            return CxxStmtDisambiguation::Expression;
-        case tentative_syntax_probe::CxxStatementDisambiguation::Ambiguous:
-            return CxxStmtDisambiguation::Ambiguous;
-        case tentative_syntax_probe::CxxStatementDisambiguation::Invalid:
-            return CxxStmtDisambiguation::Invalid;
+        return StmtDeclDisambiguation::Declaration;
     }
-    return CxxStmtDisambiguation::Invalid;
+    if (lang_opts_.is_objc() && current().type == TokenType::IDENTIFIER &&
+        (current().value == "__strong" || current().value == "__weak" ||
+         current().value == "__unsafe_unretained" ||
+         current().value == "__autoreleasing")) {
+
+        return StmtDeclDisambiguation::Declaration;
+    }
+    if (current().type == TokenType::EXTENSION_KW) {
+
+        size_t index = 1;
+        while (peek(index).type == TokenType::EXTENSION_KW) {
+            ++index;
+        }
+        if (peek(index).type == TokenType::LEFT_PAREN) {
+            return StmtDeclDisambiguation::Expression;
+        }
+    }
+    const bool can_parse_decl = probe_declaration_statement_start();
+    const bool can_parse_expr = probe_expression_statement_start();
+    if (can_parse_decl && can_parse_expr) {
+        if (lang_opts_.is_cxx_mode() &&
+            is_identifier_token(current().type)) {
+            std::optional<QualifiedTypeLookahead> qualified_type;
+            if (starts_cxx_qualified_name()) {
+                qualified_type = peek_cxx_qualified_type();
+            }
+
+            if (peek(1).type == TokenType::LEFT_BRACE ||
+                (qualified_type &&
+                 peek(qualified_type->tokens_to_consume).type ==
+                     TokenType::LEFT_BRACE)) {
+                return StmtDeclDisambiguation::Expression;
+            }
+            if (peek(1).type == TokenType::LESS_THAN &&
+                template_id_precedes_postfix(
+                    0, TokenType::LEFT_BRACE)) {
+
+                return StmtDeclDisambiguation::Expression;
+            }
+
+            size_t left_paren_offset = 0;
+            if (peek(1).type == TokenType::LEFT_PAREN) {
+                left_paren_offset = 1;
+            } else if (qualified_type &&
+                       peek(qualified_type->tokens_to_consume).type ==
+                           TokenType::LEFT_PAREN) {
+                left_paren_offset = qualified_type->tokens_to_consume;
+            } else if (peek(1).type == TokenType::LESS_THAN) {
+                int angle_depth = 0;
+                for (size_t offset = 1; offset < 4096; ++offset) {
+                    TokenType type = peek(offset).type;
+                    if (type == TokenType::LESS_THAN) {
+                        ++angle_depth;
+                        continue;
+                    }
+                    if (type == TokenType::GREATER_THAN) {
+                        --angle_depth;
+                    } else if (type == TokenType::RIGHT_SHIFT) {
+                        angle_depth -= 2;
+                    } else if (type == TokenType::SEMICOLON ||
+                               type == TokenType::Eof) {
+                        break;
+                    } else {
+                        continue;
+                    }
+                    if (angle_depth == 0) {
+                        if (peek(offset + 1).type ==
+                            TokenType::LEFT_PAREN) {
+                            left_paren_offset = offset + 1;
+                        }
+                        break;
+                    }
+                    if (angle_depth < 0) {
+                        break;
+                    }
+                }
+            }
+            if (left_paren_offset != 0) {
+
+                if (peek(left_paren_offset + 1).type ==
+                        TokenType::MULTIPLY &&
+                    peek(left_paren_offset + 2).type ==
+                        TokenType::THIS_KW &&
+                    peek(left_paren_offset + 3).type ==
+                        TokenType::RIGHT_PAREN) {
+                    return StmtDeclDisambiguation::Expression;
+                }
+                int paren_depth = 0;
+                for (size_t offset = left_paren_offset;
+                     offset < left_paren_offset + 4096;
+                     ++offset) {
+                    TokenType type = peek(offset).type;
+                    if (type == TokenType::LEFT_PAREN) {
+                        ++paren_depth;
+                        continue;
+                    }
+                    if (type == TokenType::COMMA &&
+                        paren_depth == 1) {
+
+                        return StmtDeclDisambiguation::Expression;
+                    }
+                    if (type != TokenType::RIGHT_PAREN) {
+                        if (type == TokenType::Eof) {
+                            break;
+                        }
+                        continue;
+                    }
+                    --paren_depth;
+                    if (paren_depth != 0) {
+                        continue;
+                    }
+                    TokenType next = peek(offset + 1).type;
+                    bool binary_expression_continuation =
+                        get_prec(next) != PrecLevel::UNKNOWN &&
+                        next != TokenType::ASSIGN &&
+                        next != TokenType::COMMA;
+                    if (offset == left_paren_offset + 1 ||
+                        next == TokenType::DOT ||
+                        next == TokenType::ARROW ||
+                        next == TokenType::DOT_STAR ||
+                        next == TokenType::ARROW_STAR ||
+                        next == TokenType::INCREMENT ||
+                        next == TokenType::DECREMENT ||
+                        binary_expression_continuation) {
+
+                        return StmtDeclDisambiguation::Expression;
+                    }
+                    break;
+                }
+            }
+        }
+        return lang_opts_.is_cxx_mode()
+            ? StmtDeclDisambiguation::Declaration
+            : StmtDeclDisambiguation::Declaration;
+    }
+    if (can_parse_decl) {
+        return StmtDeclDisambiguation::Declaration;
+    }
+    if (can_parse_expr) {
+        return StmtDeclDisambiguation::Expression;
+    }
+    return StmtDeclDisambiguation::Invalid;
 }
+
+} // namespace aburi::syntax

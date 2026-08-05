@@ -1,0 +1,166 @@
+#ifndef ADINKRA_COROUTINE
+#define ADINKRA_COROUTINE
+
+#include <__adinkra/config>
+#include <compare>
+#include <cstddef>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Result, class = void>
+struct __coroutine_traits_result {};
+
+template<class Result>
+struct __coroutine_traits_result<
+    Result, void_t<typename Result::promise_type>> {
+    using promise_type = typename Result::promise_type;
+};
+
+template<class Result, class... Arguments>
+struct coroutine_traits : __coroutine_traits_result<Result> {};
+
+template<class Promise = void>
+struct coroutine_handle;
+
+template<>
+struct coroutine_handle<void> {
+    constexpr coroutine_handle() noexcept = default;
+    constexpr coroutine_handle(nullptr_t) noexcept {}
+
+    constexpr coroutine_handle& operator=(nullptr_t) noexcept {
+        pointer_ = nullptr;
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr void* address() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD static constexpr coroutine_handle
+    from_address(void* address) noexcept {
+        coroutine_handle result;
+        result.pointer_ = address;
+        return result;
+    }
+
+    constexpr explicit operator bool() const noexcept {
+        return pointer_ != nullptr;
+    }
+
+    _ADINKRA_NODISCARD bool done() const {
+        return __builtin_coro_done(pointer_);
+    }
+
+    void operator()() const {
+        resume();
+    }
+
+    void resume() const {
+        __builtin_coro_resume(pointer_);
+    }
+
+    void destroy() const {
+        __builtin_coro_destroy(pointer_);
+    }
+
+private:
+    void* pointer_ = nullptr;
+};
+
+_ADINKRA_NODISCARD constexpr bool operator==(
+    coroutine_handle<> left, coroutine_handle<> right) noexcept {
+    return left.address() == right.address();
+}
+
+_ADINKRA_NODISCARD constexpr strong_ordering operator<=>(
+    coroutine_handle<> left, coroutine_handle<> right) noexcept {
+    return compare_three_way()(left.address(), right.address());
+}
+
+template<class Promise>
+struct coroutine_handle {
+    constexpr coroutine_handle() noexcept = default;
+    constexpr coroutine_handle(nullptr_t) noexcept {}
+
+    _ADINKRA_NODISCARD static coroutine_handle
+    from_promise(Promise& promise) {
+        using raw_promise = remove_cv_t<Promise>;
+        coroutine_handle result;
+        result.pointer_ = __builtin_coro_promise(
+            __builtin_addressof(
+                const_cast<raw_promise&>(promise)),
+            alignof(Promise), true);
+        return result;
+    }
+
+    constexpr coroutine_handle& operator=(nullptr_t) noexcept {
+        pointer_ = nullptr;
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr void* address() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD static constexpr coroutine_handle
+    from_address(void* address) noexcept {
+        coroutine_handle result;
+        result.pointer_ = address;
+        return result;
+    }
+
+    constexpr operator coroutine_handle<>() const noexcept {
+        return coroutine_handle<>::from_address(address());
+    }
+
+    constexpr explicit operator bool() const noexcept {
+        return pointer_ != nullptr;
+    }
+
+    _ADINKRA_NODISCARD bool done() const {
+        return __builtin_coro_done(pointer_);
+    }
+
+    void operator()() const {
+        resume();
+    }
+
+    void resume() const {
+        __builtin_coro_resume(pointer_);
+    }
+
+    void destroy() const {
+        __builtin_coro_destroy(pointer_);
+    }
+
+    _ADINKRA_NODISCARD Promise& promise() const {
+        return *static_cast<Promise*>(__builtin_coro_promise(
+            pointer_, alignof(Promise), false));
+    }
+
+private:
+    void* pointer_ = nullptr;
+};
+
+struct suspend_never {
+    constexpr bool await_ready() const noexcept {
+        return true;
+    }
+
+    constexpr void await_suspend(coroutine_handle<>) const noexcept {}
+    constexpr void await_resume() const noexcept {}
+};
+
+struct suspend_always {
+    constexpr bool await_ready() const noexcept {
+        return false;
+    }
+
+    constexpr void await_suspend(coroutine_handle<>) const noexcept {}
+    constexpr void await_resume() const noexcept {}
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

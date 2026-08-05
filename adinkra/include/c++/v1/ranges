@@ -1,0 +1,1337 @@
+#ifndef ADINKRA_RANGES
+#define ADINKRA_RANGES
+
+#include <__adinkra/config>
+#include <algorithm>
+#include <concepts>
+#include <functional>
+#include <iterator>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Element, size_t Extent>
+class span;
+
+namespace ranges {
+
+template<class Range>
+    requires requires(Range&& range) {
+        std::begin(std::forward<Range>(range));
+    }
+_ADINKRA_NODISCARD constexpr decltype(auto) begin(Range&& value) {
+    return std::begin(std::forward<Range>(value));
+}
+
+template<class Range>
+    requires requires(Range&& range) {
+        std::end(std::forward<Range>(range));
+    }
+_ADINKRA_NODISCARD constexpr decltype(auto) end(Range&& value) {
+    return std::end(std::forward<Range>(value));
+}
+
+template<class Range>
+using iterator_t = decltype(ranges::begin(declval<Range&>()));
+
+template<class Range>
+using sentinel_t = decltype(ranges::end(declval<Range&>()));
+
+template<class Range>
+using range_value_t =
+    remove_cvref_t<decltype(*ranges::begin(declval<Range&>()))>;
+
+template<class Range>
+concept range = requires(Range& value) {
+    ranges::begin(value);
+    ranges::end(value);
+};
+
+template<class Range>
+concept input_range = range<Range>;
+
+template<class Range>
+concept common_range =
+    range<Range> &&
+    same_as<iterator_t<Range>, sentinel_t<Range>>;
+
+template<class Range>
+concept sized_range =
+    range<Range> &&
+    requires(Range& value) {
+        std::size(value);
+    };
+
+template<class Range>
+concept random_access_range =
+    range<Range> &&
+    std::random_access_iterator<iterator_t<Range>>;
+
+template<class Range>
+concept contiguous_range =
+    random_access_range<Range> &&
+    std::contiguous_iterator<iterator_t<Range>>;
+
+template<class Iterator, class Sentinel = Iterator>
+class subrange {
+public:
+    constexpr subrange() = default;
+
+    constexpr subrange(Iterator first, Sentinel last)
+        : first_(std::move(first)), last_(std::move(last)) {}
+
+    _ADINKRA_NODISCARD constexpr Iterator begin() const {
+        return first_;
+    }
+
+    _ADINKRA_NODISCARD constexpr Sentinel end() const {
+        return last_;
+    }
+
+    _ADINKRA_NODISCARD constexpr bool empty() const {
+        return first_ == last_;
+    }
+
+    _ADINKRA_NODISCARD constexpr auto size() const {
+        auto first = first_;
+        iter_difference_t<Iterator> result = 0;
+        while (first != last_) {
+            ++first;
+            ++result;
+        }
+        return static_cast<make_unsigned_t<
+            iter_difference_t<Iterator>>>(result);
+    }
+
+private:
+    Iterator first_{};
+    Sentinel last_{};
+};
+
+template<class Iterator, class Sentinel>
+subrange(Iterator, Sentinel) -> subrange<Iterator, Sentinel>;
+
+template<class Type>
+inline constexpr bool enable_view = false;
+
+template<class Type>
+concept view =
+    range<Type> &&
+    movable<Type> &&
+    enable_view<Type>;
+
+template<class Type>
+inline constexpr bool enable_borrowed_range = false;
+
+template<class Iterator, class Sentinel>
+inline constexpr bool
+enable_borrowed_range<subrange<Iterator, Sentinel>> = true;
+
+template<class Element, size_t Extent>
+inline constexpr bool enable_borrowed_range<span<Element, Extent>> = true;
+
+template<class Range>
+concept borrowed_range =
+    range<Range> &&
+    (is_lvalue_reference_v<Range> ||
+     enable_borrowed_range<remove_cvref_t<Range>>);
+
+template<class Range>
+concept viewable_range =
+    range<Range> &&
+    (borrowed_range<Range> ||
+     view<remove_cvref_t<Range>> ||
+     (!is_const_v<remove_reference_t<Range>> &&
+      is_move_constructible_v<remove_reference_t<Range>>));
+
+struct less {
+    using is_transparent = void;
+
+    template<class Left, class Right>
+    constexpr bool operator()(Left&& left, Right&& right) const {
+        return std::forward<Left>(left) < std::forward<Right>(right);
+    }
+};
+
+struct greater {
+    using is_transparent = void;
+
+    template<class Left, class Right>
+    constexpr bool operator()(Left&& left, Right&& right) const {
+        return std::forward<Right>(right) < std::forward<Left>(left);
+    }
+};
+
+template<class Input, class Output>
+struct in_out_result {
+    Input in;
+    Output out;
+};
+
+template<class Range>
+_ADINKRA_NODISCARD constexpr auto size(Range&& value)
+    noexcept(noexcept(std::size(value))) {
+    return std::size(value);
+}
+
+template<class Iterator, class Sentinel>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr iter_difference_t<Iterator> distance(
+    Iterator first, Sentinel last) {
+    if constexpr (sized_sentinel_for<Sentinel, Iterator>) {
+        return last - first;
+    } else {
+        iter_difference_t<Iterator> result = 0;
+        while (first != last) {
+            ++first;
+            ++result;
+        }
+        return result;
+    }
+}
+
+template<class Range>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto distance(Range&& value) {
+    return ranges::distance(
+        std::begin(value), std::end(value));
+}
+
+template<class Iterator, class Sentinel, class Predicate,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr bool all_of(
+    Iterator first, Sentinel last, Predicate predicate,
+    Projection projection = {}) {
+    while (first != last) {
+        if (!std::invoke(predicate, std::invoke(projection, *first))) {
+            return false;
+        }
+        ++first;
+    }
+    return true;
+}
+
+template<class Range, class Predicate, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr bool all_of(
+    Range&& value, Predicate predicate, Projection projection = {}) {
+    return ranges::all_of(
+        std::begin(value), std::end(value),
+        std::move(predicate), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Predicate,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr bool any_of(
+    Iterator first, Sentinel last, Predicate predicate,
+    Projection projection = {}) {
+    while (first != last) {
+        if (std::invoke(predicate, std::invoke(projection, *first))) {
+            return true;
+        }
+        ++first;
+    }
+    return false;
+}
+
+template<class Range, class Predicate, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr bool any_of(
+    Range&& value, Predicate predicate, Projection projection = {}) {
+    return ranges::any_of(
+        std::begin(value), std::end(value),
+        std::move(predicate), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Predicate,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr bool none_of(
+    Iterator first, Sentinel last, Predicate predicate,
+    Projection projection = {}) {
+    return !ranges::any_of(
+        first, last, std::move(predicate), std::move(projection));
+}
+
+template<class Range, class Predicate, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr bool none_of(
+    Range&& value, Predicate predicate, Projection projection = {}) {
+    return !ranges::any_of(
+        std::forward<Range>(value),
+        std::move(predicate), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Type,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr Iterator find(
+    Iterator first, Sentinel last, const Type& value,
+    Projection projection = {}) {
+    while (first != last &&
+           !(std::invoke(projection, *first) == value)) {
+        ++first;
+    }
+    return first;
+}
+
+template<class Range, class Type, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto find(
+    Range&& value, const Type& searched, Projection projection = {}) {
+    return ranges::find(
+        std::begin(value), std::end(value), searched,
+        std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Predicate,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr Iterator find_if(
+    Iterator first, Sentinel last, Predicate predicate,
+    Projection projection = {}) {
+    while (first != last &&
+           !std::invoke(predicate, std::invoke(projection, *first))) {
+        ++first;
+    }
+    return first;
+}
+
+template<class Range, class Predicate, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto find_if(
+    Range&& value, Predicate predicate, Projection projection = {}) {
+    return ranges::find_if(
+        std::begin(value), std::end(value),
+        std::move(predicate), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Predicate,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr Iterator find_if_not(
+    Iterator first, Sentinel last, Predicate predicate,
+    Projection projection = {}) {
+    while (first != last &&
+           std::invoke(predicate, std::invoke(projection, *first))) {
+        ++first;
+    }
+    return first;
+}
+
+template<class Range, class Predicate, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto find_if_not(
+    Range&& value, Predicate predicate, Projection projection = {}) {
+    return ranges::find_if_not(
+        std::begin(value), std::end(value),
+        std::move(predicate), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Type,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr iter_difference_t<Iterator> count(
+    Iterator first, Sentinel last, const Type& value,
+    Projection projection = {}) {
+    iter_difference_t<Iterator> result = 0;
+    while (first != last) {
+        if (std::invoke(projection, *first) == value) {
+            ++result;
+        }
+        ++first;
+    }
+    return result;
+}
+
+template<class Range, class Type, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto count(
+    Range&& value, const Type& searched, Projection projection = {}) {
+    return ranges::count(
+        std::begin(value), std::end(value), searched,
+        std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Predicate,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr iter_difference_t<Iterator> count_if(
+    Iterator first, Sentinel last, Predicate predicate,
+    Projection projection = {}) {
+    iter_difference_t<Iterator> result = 0;
+    while (first != last) {
+        if (std::invoke(predicate, std::invoke(projection, *first))) {
+            ++result;
+        }
+        ++first;
+    }
+    return result;
+}
+
+template<class Range, class Predicate, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto count_if(
+    Range&& value, Predicate predicate, Projection projection = {}) {
+    return ranges::count_if(
+        std::begin(value), std::end(value),
+        std::move(predicate), std::move(projection));
+}
+
+template<class FirstIterator, class FirstSentinel,
+         class SecondIterator, class SecondSentinel,
+         class Predicate = std::equal_to<>,
+         class FirstProjection = identity,
+         class SecondProjection = identity>
+    requires (!range<remove_cvref_t<FirstIterator>>)
+_ADINKRA_NODISCARD constexpr bool equal(
+    FirstIterator first, FirstSentinel last,
+    SecondIterator second, SecondSentinel second_last,
+    Predicate predicate = {},
+    FirstProjection first_projection = {},
+    SecondProjection second_projection = {}) {
+    while (first != last && second != second_last) {
+        if (!std::invoke(
+                predicate,
+                std::invoke(first_projection, *first),
+                std::invoke(second_projection, *second))) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return first == last && second == second_last;
+}
+
+template<class FirstRange, class SecondRange,
+         class Predicate = std::equal_to<>,
+         class FirstProjection = identity,
+         class SecondProjection = identity>
+    requires (
+        range<remove_reference_t<FirstRange>> &&
+        range<remove_reference_t<SecondRange>>)
+_ADINKRA_NODISCARD constexpr bool equal(
+    FirstRange&& first, SecondRange&& second,
+    Predicate predicate = {},
+    FirstProjection first_projection = {},
+    SecondProjection second_projection = {}) {
+    return ranges::equal(
+        std::begin(first), std::end(first),
+        std::begin(second), std::end(second),
+        std::move(predicate),
+        std::move(first_projection),
+        std::move(second_projection));
+}
+
+template<class Iterator, class Sentinel, class Type>
+constexpr Iterator fill(Iterator first, Sentinel last, const Type& value) {
+    while (first != last) {
+        *first = value;
+        ++first;
+    }
+    return first;
+}
+
+template<class Range, class Type>
+constexpr auto fill(Range&& range_value, const Type& value) {
+    return ranges::fill(
+        std::begin(range_value), std::end(range_value), value);
+}
+
+template<class Iterator, class Sentinel, class Output>
+constexpr in_out_result<Iterator, Output>
+copy(Iterator first, Sentinel last, Output output) {
+    while (first != last) {
+        *output = *first;
+        ++first;
+        ++output;
+    }
+    return {first, output};
+}
+
+template<class Range, class Output>
+constexpr auto copy(Range&& value, Output output) {
+    return ranges::copy(
+        std::begin(value), std::end(value), std::move(output));
+}
+
+template<class Iterator, class Sentinel, class Output,
+         class Function, class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+constexpr in_out_result<Iterator, Output>
+transform(
+    Iterator first, Sentinel last, Output output,
+    Function function, Projection projection = {}) {
+    while (first != last) {
+        *output = std::invoke(
+            function, std::invoke(projection, *first));
+        ++first;
+        ++output;
+    }
+    return {std::move(first), std::move(output)};
+}
+
+template<class Range, class Output, class Function,
+         class Projection = identity>
+    requires range<remove_reference_t<Range>>
+constexpr auto transform(
+    Range&& value, Output output,
+    Function function, Projection projection = {}) {
+    return ranges::transform(
+        std::begin(value), std::end(value), std::move(output),
+        std::move(function), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Type>
+constexpr Iterator replace(
+    Iterator first, Sentinel last,
+    const Type& old_value, const Type& new_value) {
+    while (first != last) {
+        if (*first == old_value) {
+            *first = new_value;
+        }
+        ++first;
+    }
+    return first;
+}
+
+template<class Range, class Type>
+constexpr auto replace(
+    Range&& value, const Type& old_value, const Type& new_value) {
+    return ranges::replace(
+        std::begin(value), std::end(value), old_value, new_value);
+}
+
+template<class Iterator, class Sentinel>
+constexpr Iterator reverse(Iterator first, Sentinel last) {
+    Iterator result = first;
+    Iterator common_last = last;
+    std::reverse(first, common_last);
+    return common_last;
+}
+
+template<class Range>
+constexpr auto reverse(Range&& value) {
+    auto last = std::end(value);
+    std::reverse(std::begin(value), last);
+    return last;
+}
+
+template<class Iterator, class Sentinel, class Generator>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+Iterator shuffle(
+    Iterator first, Sentinel last, Generator&& generator) {
+    Iterator common_last = first;
+    while (common_last != last) {
+        ++common_last;
+    }
+    std::shuffle(
+        first, common_last, std::forward<Generator>(generator));
+    return common_last;
+}
+
+template<class Range, class Generator>
+    requires range<remove_reference_t<Range>>
+auto shuffle(Range&& value, Generator&& generator) {
+    return ranges::shuffle(
+        std::begin(value), std::end(value),
+        std::forward<Generator>(generator));
+}
+
+template<class Iterator, class Sentinel, class Compare = less,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+constexpr Iterator sort(
+    Iterator first, Sentinel last,
+    Compare compare = {}, Projection projection = {}) {
+    Iterator common_last = last;
+    std::sort(first, common_last, [&](const auto& left, const auto& right) {
+        return std::invoke(
+            compare,
+            std::invoke(projection, left),
+            std::invoke(projection, right));
+    });
+    return common_last;
+}
+
+template<class Range, class Compare = less, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+constexpr auto sort(
+    Range&& value, Compare compare = {}, Projection projection = {}) {
+    return ranges::sort(
+        std::begin(value), std::end(value),
+        std::move(compare), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Compare = less,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+constexpr Iterator stable_sort(
+    Iterator first, Sentinel last,
+    Compare compare = {}, Projection projection = {}) {
+    Iterator common_last = last;
+    std::stable_sort(
+        first, common_last,
+        [&](const auto& left, const auto& right) {
+            return std::invoke(
+                compare,
+                std::invoke(projection, left),
+                std::invoke(projection, right));
+        });
+    return common_last;
+}
+
+template<class Range, class Compare = less, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+constexpr auto stable_sort(
+    Range&& value, Compare compare = {}, Projection projection = {}) {
+    return ranges::stable_sort(
+        std::begin(value), std::end(value),
+        std::move(compare), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Compare = less,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr Iterator min_element(
+    Iterator first, Sentinel last,
+    Compare compare = {}, Projection projection = {}) {
+    if (first == last) {
+        return first;
+    }
+    Iterator result = first;
+    while (++first != last) {
+        if (std::invoke(
+                compare,
+                std::invoke(projection, *first),
+                std::invoke(projection, *result))) {
+            result = first;
+        }
+    }
+    return result;
+}
+
+template<class Range, class Compare = less, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto min_element(
+    Range&& value, Compare compare = {}, Projection projection = {}) {
+    return ranges::min_element(
+        std::begin(value), std::end(value),
+        std::move(compare), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Compare = less,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr Iterator max_element(
+    Iterator first, Sentinel last,
+    Compare compare = {}, Projection projection = {}) {
+    if (first == last) {
+        return first;
+    }
+    Iterator result = first;
+    while (++first != last) {
+        if (std::invoke(
+                compare,
+                std::invoke(projection, *result),
+                std::invoke(projection, *first))) {
+            result = first;
+        }
+    }
+    return result;
+}
+
+template<class Range, class Compare = less, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto max_element(
+    Range&& value, Compare compare = {}, Projection projection = {}) {
+    return ranges::max_element(
+        std::begin(value), std::end(value),
+        std::move(compare), std::move(projection));
+}
+
+template<class Type, class Compare = less, class Projection = identity>
+    requires (!range<const Type>)
+_ADINKRA_NODISCARD constexpr const Type& min(
+    const Type& left, const Type& right,
+    Compare compare = {}, Projection projection = {}) {
+    return std::invoke(
+               compare,
+               std::invoke(projection, right),
+               std::invoke(projection, left))
+        ? right
+        : left;
+}
+
+template<class Range, class Compare = less, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr range_value_t<Range> min(
+    Range&& value, Compare compare = {}, Projection projection = {}) {
+    auto first = std::begin(value);
+    const auto last = std::end(value);
+    range_value_t<Range> result = *first;
+    while (++first != last) {
+        if (std::invoke(
+                compare,
+                std::invoke(projection, *first),
+                std::invoke(projection, result))) {
+            result = *first;
+        }
+    }
+    return result;
+}
+
+template<class Type, class Compare = less, class Projection = identity>
+    requires (!range<const Type>)
+_ADINKRA_NODISCARD constexpr const Type& max(
+    const Type& left, const Type& right,
+    Compare compare = {}, Projection projection = {}) {
+    return std::invoke(
+               compare,
+               std::invoke(projection, left),
+               std::invoke(projection, right))
+        ? right
+        : left;
+}
+
+template<class Range, class Compare = less, class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr range_value_t<Range> max(
+    Range&& value, Compare compare = {}, Projection projection = {}) {
+    auto first = std::begin(value);
+    const auto last = std::end(value);
+    range_value_t<Range> result = *first;
+    while (++first != last) {
+        if (std::invoke(
+                compare,
+                std::invoke(projection, result),
+                std::invoke(projection, *first))) {
+            result = *first;
+        }
+    }
+    return result;
+}
+
+template<class Iterator, class Type, class Compare = less,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr Iterator lower_bound(
+    Iterator first, Iterator last, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        Iterator middle = first;
+        std::advance(middle, step);
+        if (std::invoke(
+                compare, std::invoke(projection, *middle), value)) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class Range, class Type, class Compare = less,
+         class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto lower_bound(
+    Range&& range_value, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    return ranges::lower_bound(
+        std::begin(range_value), std::end(range_value), value,
+        std::move(compare), std::move(projection));
+}
+
+template<class Iterator, class Type, class Compare = less,
+         class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>)
+_ADINKRA_NODISCARD constexpr Iterator upper_bound(
+    Iterator first, Iterator last, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        Iterator middle = first;
+        std::advance(middle, step);
+        if (!std::invoke(
+                compare, value, std::invoke(projection, *middle))) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class Range, class Type, class Compare = less,
+         class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto upper_bound(
+    Range&& range_value, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    return ranges::upper_bound(
+        std::begin(range_value), std::end(range_value), value,
+        std::move(compare), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Type,
+         class Compare = less, class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr subrange<Iterator>
+equal_range(
+    Iterator first, Sentinel last, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    Iterator common_last = first;
+    while (common_last != last) {
+        ++common_last;
+    }
+    Iterator lower = ranges::lower_bound(
+        first, common_last, value, compare, projection);
+    Iterator upper = ranges::upper_bound(
+        lower, common_last, value,
+        std::move(compare), std::move(projection));
+    return {std::move(lower), std::move(upper)};
+}
+
+template<class Range, class Type, class Compare = less,
+         class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr auto equal_range(
+    Range&& range_value, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    return ranges::equal_range(
+        std::begin(range_value), std::end(range_value), value,
+        std::move(compare), std::move(projection));
+}
+
+template<class Iterator, class Sentinel, class Type,
+         class Compare = less, class Projection = identity>
+    requires (!range<remove_cvref_t<Iterator>>) &&
+             sentinel_for<Sentinel, Iterator>
+_ADINKRA_NODISCARD constexpr bool binary_search(
+    Iterator first, Sentinel last, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    Iterator common_last = first;
+    while (common_last != last) {
+        ++common_last;
+    }
+    Iterator found = ranges::lower_bound(
+        first, common_last, value, compare, projection);
+    return found != common_last &&
+           !std::invoke(
+               compare, value, std::invoke(projection, *found));
+}
+
+template<class Range, class Type, class Compare = less,
+         class Projection = identity>
+    requires range<remove_reference_t<Range>>
+_ADINKRA_NODISCARD constexpr bool binary_search(
+    Range&& range_value, const Type& value,
+    Compare compare = {}, Projection projection = {}) {
+    return ranges::binary_search(
+        std::begin(range_value), std::end(range_value), value,
+        std::move(compare), std::move(projection));
+}
+
+namespace __view_detail {
+
+template<class Range, bool = is_lvalue_reference_v<Range>>
+class range_storage;
+
+template<class Range>
+class range_storage<Range, true> {
+public:
+    using stored_type = remove_reference_t<Range>;
+
+    constexpr explicit range_storage(Range value)
+        : value_(std::addressof(value)) {}
+
+    constexpr stored_type& get() const {
+        return *value_;
+    }
+
+private:
+    stored_type* value_;
+};
+
+template<class Range>
+class range_storage<Range, false> {
+public:
+    using stored_type = remove_cvref_t<Range>;
+
+    constexpr explicit range_storage(Range&& value)
+        : value_(std::forward<Range>(value)) {}
+
+    constexpr stored_type& get() {
+        return value_;
+    }
+
+    constexpr const stored_type& get() const {
+        return value_;
+    }
+
+private:
+    stored_type value_;
+};
+
+template<class Range>
+class reverse_view {
+public:
+    constexpr explicit reverse_view(Range&& value)
+        : range_(std::forward<Range>(value)) {}
+
+    constexpr auto begin() {
+        return std::make_reverse_iterator(std::end(range_.get()));
+    }
+
+    constexpr auto end() {
+        return std::make_reverse_iterator(std::begin(range_.get()));
+    }
+
+    constexpr auto begin() const {
+        return std::make_reverse_iterator(std::end(range_.get()));
+    }
+
+    constexpr auto end() const {
+        return std::make_reverse_iterator(std::begin(range_.get()));
+    }
+
+    constexpr auto size() const
+        requires requires(const range_storage<Range>& storage) {
+            std::size(storage.get());
+        } {
+        return std::size(range_.get());
+    }
+
+    constexpr bool empty() const {
+        return std::begin(range_.get()) == std::end(range_.get());
+    }
+
+private:
+    range_storage<Range> range_;
+};
+
+template<class Iterator, class Function>
+class transform_iterator {
+public:
+    using difference_type = iter_difference_t<Iterator>;
+    using reference = decltype(
+        std::invoke(declval<Function&>(), *declval<Iterator&>()));
+    using value_type = remove_cvref_t<reference>;
+    using pointer = void;
+    using iterator_category =
+        typename iterator_traits<Iterator>::iterator_category;
+
+    constexpr transform_iterator() : current_(), function_(nullptr) {}
+
+    constexpr transform_iterator(Iterator current, Function* function)
+        : current_(current), function_(function) {}
+
+    constexpr decltype(auto) operator*() const {
+        return std::invoke(*function_, *current_);
+    }
+
+    constexpr transform_iterator& operator++() {
+        ++current_;
+        return *this;
+    }
+
+    constexpr transform_iterator operator++(int) {
+        transform_iterator previous(*this);
+        ++*this;
+        return previous;
+    }
+
+    friend constexpr bool operator==(
+        const transform_iterator& left,
+        const transform_iterator& right) {
+        return left.current_ == right.current_;
+    }
+
+private:
+    Iterator current_;
+    Function* function_;
+};
+
+template<class Range, class Function>
+class transform_view {
+public:
+    constexpr transform_view(Range&& value, Function function)
+        : range_(std::forward<Range>(value)),
+          function_(std::move(function)) {}
+
+    constexpr auto begin() {
+        return transform_iterator<
+            decltype(std::begin(range_.get())), Function>(
+                std::begin(range_.get()), std::addressof(function_));
+    }
+
+    constexpr auto end() {
+        return transform_iterator<
+            decltype(std::end(range_.get())), Function>(
+                std::end(range_.get()), std::addressof(function_));
+    }
+
+    constexpr auto begin() const {
+        return transform_iterator<
+            decltype(std::begin(range_.get())), const Function>(
+                std::begin(range_.get()), std::addressof(function_));
+    }
+
+    constexpr auto end() const {
+        return transform_iterator<
+            decltype(std::end(range_.get())), const Function>(
+                std::end(range_.get()), std::addressof(function_));
+    }
+
+    constexpr auto size() const
+        requires requires(const range_storage<Range>& storage) {
+            std::size(storage.get());
+        } {
+        return std::size(range_.get());
+    }
+
+    constexpr bool empty() const {
+        return std::begin(range_.get()) == std::end(range_.get());
+    }
+
+private:
+    range_storage<Range> range_;
+    Function function_;
+};
+
+template<size_t Index>
+struct element_projection {
+    template<class TupleLike>
+    constexpr decltype(auto) operator()(TupleLike&& value) const {
+        return std::get<Index>(std::forward<TupleLike>(value));
+    }
+};
+
+template<class Function>
+class transform_closure {
+public:
+    constexpr explicit transform_closure(Function function)
+        : function_(std::move(function)) {}
+
+    template<class Range>
+    constexpr auto operator()(Range&& value) const {
+        return transform_view<Range, Function>(
+            std::forward<Range>(value), function_);
+    }
+
+    template<class Range>
+    friend constexpr auto operator|(
+        Range&& value, const transform_closure& closure) {
+        return closure(std::forward<Range>(value));
+    }
+
+private:
+    Function function_;
+};
+
+template<class Iterator, class Predicate>
+class filter_iterator {
+public:
+    using difference_type = iter_difference_t<Iterator>;
+    using reference = decltype(*declval<Iterator&>());
+    using value_type = remove_cvref_t<reference>;
+    using pointer = void;
+    using iterator_category = input_iterator_tag;
+
+    constexpr filter_iterator()
+        : current_(), last_(), predicate_(nullptr) {}
+
+    constexpr filter_iterator(
+        Iterator current, Iterator last, Predicate* predicate)
+        : current_(current), last_(last), predicate_(predicate) {
+        find_next();
+    }
+
+    constexpr decltype(auto) operator*() const {
+        return *current_;
+    }
+
+    constexpr filter_iterator& operator++() {
+        ++current_;
+        find_next();
+        return *this;
+    }
+
+    constexpr filter_iterator operator++(int) {
+        filter_iterator previous(*this);
+        ++*this;
+        return previous;
+    }
+
+    friend constexpr bool operator==(
+        const filter_iterator& left,
+        const filter_iterator& right) {
+        return left.current_ == right.current_;
+    }
+
+private:
+    constexpr void find_next() {
+        while (current_ != last_ &&
+               !std::invoke(*predicate_, *current_)) {
+            ++current_;
+        }
+    }
+
+    Iterator current_;
+    Iterator last_;
+    Predicate* predicate_;
+};
+
+template<class Range, class Predicate>
+class filter_view {
+public:
+    constexpr filter_view(Range&& value, Predicate predicate)
+        : range_(std::forward<Range>(value)),
+          predicate_(std::move(predicate)) {}
+
+    constexpr auto begin() {
+        using iterator = decltype(std::begin(range_.get()));
+        return filter_iterator<iterator, Predicate>(
+            std::begin(range_.get()), std::end(range_.get()),
+            std::addressof(predicate_));
+    }
+
+    constexpr auto end() {
+        using iterator = decltype(std::end(range_.get()));
+        return filter_iterator<iterator, Predicate>(
+            std::end(range_.get()), std::end(range_.get()),
+            std::addressof(predicate_));
+    }
+
+    constexpr auto begin() const {
+        using iterator = decltype(std::begin(range_.get()));
+        return filter_iterator<iterator, const Predicate>(
+            std::begin(range_.get()), std::end(range_.get()),
+            std::addressof(predicate_));
+    }
+
+    constexpr auto end() const {
+        using iterator = decltype(std::end(range_.get()));
+        return filter_iterator<iterator, const Predicate>(
+            std::end(range_.get()), std::end(range_.get()),
+            std::addressof(predicate_));
+    }
+
+    constexpr bool empty() const {
+        return begin() == end();
+    }
+
+private:
+    range_storage<Range> range_;
+    Predicate predicate_;
+};
+
+template<class Predicate>
+class filter_closure {
+public:
+    constexpr explicit filter_closure(Predicate predicate)
+        : predicate_(std::move(predicate)) {}
+
+    template<class Range>
+    constexpr auto operator()(Range&& value) const {
+        return filter_view<Range, Predicate>(
+            std::forward<Range>(value), predicate_);
+    }
+
+    template<class Range>
+    friend constexpr auto operator|(
+        Range&& value, const filter_closure& closure) {
+        return closure(std::forward<Range>(value));
+    }
+
+private:
+    Predicate predicate_;
+};
+
+template<class Value>
+class iota_iterator {
+public:
+    using difference_type = ptrdiff_t;
+    using value_type = Value;
+    using pointer = void;
+    using reference = Value;
+    using iterator_category = input_iterator_tag;
+
+    constexpr explicit iota_iterator(Value value) : value_(value) {}
+
+    constexpr Value operator*() const {
+        return value_;
+    }
+
+    constexpr iota_iterator& operator++() {
+        ++value_;
+        return *this;
+    }
+
+    constexpr iota_iterator operator++(int) {
+        iota_iterator previous(*this);
+        ++*this;
+        return previous;
+    }
+
+    friend constexpr bool operator==(
+        const iota_iterator&, const iota_iterator&) = default;
+
+private:
+    Value value_;
+};
+
+template<class Value>
+class iota_view {
+public:
+    constexpr iota_view(Value first, Value last)
+        : first_(first), last_(last) {}
+
+    constexpr auto begin() const {
+        return iota_iterator<Value>(first_);
+    }
+
+    constexpr auto end() const {
+        return iota_iterator<Value>(last_);
+    }
+
+    constexpr auto size() const
+        requires is_integral_v<Value> {
+        using Unsigned = make_unsigned_t<Value>;
+        if constexpr (is_signed_v<Value>) {
+            if (first_ < 0) {
+                const Unsigned first_magnitude =
+                    Unsigned(0) - static_cast<Unsigned>(first_);
+                if (last_ < 0) {
+                    return first_magnitude -
+                        (Unsigned(0) -
+                         static_cast<Unsigned>(last_));
+                }
+                return static_cast<Unsigned>(last_) +
+                    first_magnitude;
+            }
+        }
+        return static_cast<Unsigned>(last_) -
+            static_cast<Unsigned>(first_);
+    }
+
+private:
+    Value first_;
+    Value last_;
+};
+
+} // namespace __view_detail
+
+} // namespace ranges
+
+namespace views {
+
+struct reverse_fn {
+    template<class Range>
+    constexpr auto operator()(Range&& value) const {
+        return ranges::__view_detail::reverse_view<Range>(
+            std::forward<Range>(value));
+    }
+
+    template<class Range>
+    friend constexpr auto operator|(
+        Range&& value, reverse_fn adaptor) {
+        return adaptor(std::forward<Range>(value));
+    }
+};
+
+inline constexpr reverse_fn reverse{};
+
+struct transform_fn {
+    template<class Function>
+    constexpr auto operator()(Function&& function) const {
+        return ranges::__view_detail::transform_closure<
+            decay_t<Function>>(std::forward<Function>(function));
+    }
+
+    template<class Range, class Function>
+    constexpr auto operator()(Range&& value, Function&& function) const {
+        return ranges::__view_detail::transform_view<
+            Range, decay_t<Function>>(
+                std::forward<Range>(value),
+                std::forward<Function>(function));
+    }
+};
+
+inline constexpr transform_fn transform{};
+
+struct filter_fn {
+    template<class Predicate>
+    constexpr auto operator()(Predicate&& predicate) const {
+        return ranges::__view_detail::filter_closure<
+            decay_t<Predicate>>(std::forward<Predicate>(predicate));
+    }
+
+    template<class Range, class Predicate>
+    constexpr auto operator()(
+        Range&& value, Predicate&& predicate) const {
+        return ranges::__view_detail::filter_view<
+            Range, decay_t<Predicate>>(
+                std::forward<Range>(value),
+                std::forward<Predicate>(predicate));
+    }
+};
+
+inline constexpr filter_fn filter{};
+
+template<size_t Index>
+inline constexpr auto elements =
+    transform(ranges::__view_detail::element_projection<Index>{});
+
+inline constexpr auto keys = elements<0>;
+inline constexpr auto values = elements<1>;
+
+struct iota_fn {
+    template<class Value>
+    constexpr auto operator()(Value first, Value last) const {
+        return ranges::__view_detail::iota_view<Value>(first, last);
+    }
+};
+
+inline constexpr iota_fn iota{};
+
+} // namespace views
+
+namespace ranges {
+
+template<class Range, size_t Index>
+using elements_view = __view_detail::transform_view<
+    Range, __view_detail::element_projection<Index>>;
+
+template<class Range>
+using keys_view = elements_view<Range, 0>;
+
+template<class Range>
+using values_view = elements_view<Range, 1>;
+
+namespace views = std::views;
+
+} // namespace ranges
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

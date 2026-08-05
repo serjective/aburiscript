@@ -6,7 +6,6 @@
 #include <unordered_map>
 
 enum class BuiltinKind {
-    // Tier 1: Critical kernel builtins
     EXPECT,
     CONSTANT_P,
     UNREACHABLE,
@@ -15,6 +14,7 @@ enum class BuiltinKind {
     CHOOSE_EXPR,
     OBJECT_SIZE,
     DYNAMIC_OBJECT_SIZE,
+    OFFSETOF,
     AVAILABLE,
     IS_CONSTANT_EVALUATED,
     IS_SAME,
@@ -33,7 +33,12 @@ enum class BuiltinKind {
     IS_ENUM,
     IS_SCOPED_ENUM,
     IS_FUNDAMENTAL,
+    IS_VOID,
     IS_INTEGRAL,
+    IS_FLOATING_POINT,
+    IS_ARITHMETIC,
+    IS_SCALAR,
+    IS_COMPOUND,
     IS_UNSIGNED,
     IS_ASSIGNABLE,
     IS_TRIVIALLY_ASSIGNABLE,
@@ -41,6 +46,7 @@ enum class BuiltinKind {
     IS_BASE_OF,
     IS_CLASS,
     IS_FINAL,
+    IS_AGGREGATE,
     IS_MEMBER_POINTER,
     IS_MEMBER_OBJECT_POINTER,
     IS_MEMBER_FUNCTION_POINTER,
@@ -60,19 +66,32 @@ enum class BuiltinKind {
     IS_CONVERTIBLE,
     IS_CORE_CONVERTIBLE,
     IS_NOTHROW_CONVERTIBLE,
+    REFERENCE_BINDS_TO_TEMPORARY,
     IS_DESTRUCTIBLE,
+    IS_NOTHROW_DESTRUCTIBLE,
     IS_TRIVIALLY_DESTRUCTIBLE,
     HAS_TRIVIAL_DESTRUCTOR,
+    IS_LITERAL_TYPE,
     INTEGER_PACK,
+    MAKE_INTEGER_SEQ,
+    REMOVE_CONST,
+    REMOVE_VOLATILE,
+    REMOVE_CV,
+    REMOVE_CVREF,
+    REMOVE_REFERENCE,
+    UNDERLYING_TYPE,
+    REMOVE_EXTENT,
+    REMOVE_ALL_EXTENTS,
+    ADD_LVALUE_REFERENCE,
+    ADD_RVALUE_REFERENCE,
+    ADD_POINTER,
+    DECAY,
 
-    // Tier 2: Overflow builtins
     ADD_OVERFLOW,
     SUB_OVERFLOW,
     MUL_OVERFLOW,
     ADD_OVERFLOW_P,
     SUB_OVERFLOW_P,
-
-    // Tier 2: Bit manipulation
     CLZ,
     CLZL,
     CLZLL,
@@ -89,8 +108,6 @@ enum class BuiltinKind {
     BSWAP32,
     BSWAP64,
     IA32_BZHI_SI,
-
-    // Tier 2: Memory/string
     ADDRESSOF,
     STPCPY,
     MEMPCPY,
@@ -119,7 +136,6 @@ enum class BuiltinKind {
     STRNDUP,
     STRNCASECMP,
 
-    // Fortified (_chk) variants — ignore the extra object-size argument
     MEMCPY_CHK,
     MEMMOVE_CHK,
     MEMSET_CHK,
@@ -133,7 +149,6 @@ enum class BuiltinKind {
     VSPRINTF_CHK,
     VSNPRINTF_CHK,
 
-    // Tier 2: Stack/cache
     CLEAR_CACHE,
     CLEAR_PADDING,
     PREFETCH,
@@ -143,8 +158,7 @@ enum class BuiltinKind {
     ALLOCA,
     STACK_SAVE,
     STACK_RESTORE,
-
-    // Tier 3: Float builtins
+    FLT_ROUNDS,
     ISNAN,
     ISINF,
     ISINF_SIGN,
@@ -175,8 +189,6 @@ enum class BuiltinKind {
     ILOGB,
     ILOGBF,
     ILOGBL,
-
-    // Math builtins
     POW,
     POWF,
     POWL,
@@ -347,7 +359,6 @@ enum class BuiltinKind {
     SIGNBITF,
     SIGNBITL,
 
-    // Tier 3: Misc
     ASSUME_ALIGNED,
     CLASSIFY_TYPE,
     EXPECT_WITH_PROBABILITY,
@@ -362,9 +373,11 @@ enum class BuiltinKind {
     PARITYLL,
     CONVERTVECTOR,
     SHUFFLEVECTOR,
+    VA_START,
+    VA_ARG,
+    VA_END,
+    VA_COPY,
     VA_ARG_PACK,
-
-    // Tier 4: Atomic builtins
     ATOMIC_LOAD_N,
     ATOMIC_STORE_N,
     ATOMIC_EXCHANGE_N,
@@ -391,7 +404,6 @@ enum class BuiltinKind {
     ATOMIC_TEST_AND_SET,
     ATOMIC_CLEAR,
 
-    // Legacy __sync_* builtins
     SYNC_FETCH_AND_ADD,
     SYNC_FETCH_AND_SUB,
     SYNC_FETCH_AND_OR,
@@ -410,15 +422,12 @@ enum class BuiltinKind {
     SYNC_LOCK_TEST_AND_SET,
     SYNC_LOCK_RELEASE,
 
-    // I/O builtins
     PRINTF,
     PUTS,
     PUTCHAR,
     FPRINTF,
     SPRINTF,
     SNPRINTF,
-
-    // Floating-point comparison builtins
     ISUNORDERED,
     ISLESS,
     ISLESSEQUAL,
@@ -426,27 +435,74 @@ enum class BuiltinKind {
     ISGREATEREQUAL,
     ISLESSGREATER,
 
-    // Memory allocation
     MALLOC,
     CALLOC,
     REALLOC,
     FREE,
     OPERATOR_NEW,
     OPERATOR_DELETE,
+    METAFN_QUERY_INT,
+    METAFN_QUERY_INFO,
+    METAFN_NAME_DATA,
+    METAFN_NAME_SIZE,
+    METAFN_RANGE_COUNT,
+    METAFN_RANGE_AT,
 
-    // Process control
     ABORT,
     EXIT,
+
+    // The coroutine ABI must expose resume, destroy, promise, and state through
+    // ordinary CIR so backends never depend on coroutine-specific operations.
+    CORO_DONE,
+    CORO_RESUME,
+    CORO_DESTROY,
+    CORO_PROMISE,
+
+    BIT_CAST,
+    TYPE_PACK_ELEMENT,
+
+    REDUCE_AND,
+    CLZG,
+    CTZG,
+
+    POPCOUNTG,
+
+    SOURCE_LOCATION,
+    LAUNDER,
+};
+
+enum class BuiltinSyntaxKind {
+    Call,
+    TypePredicate,
+    TypeTrait,
+    TypeTransform,
+    IntegerSequenceType,
+    ChooseExpr,
+    Offsetof,
+    VaArg,
+    BitCast,
+    ConvertVector,
+    Available,
+    PackElementType
 };
 
 struct BuiltinInfo {
     std::string_view name;
     BuiltinKind kind;
     int min_args;
-    int max_args;        // -1 for unlimited
-    bool takes_type_arg; // needs parser-level handling (parses types instead of expressions)
-    bool is_compile_time_const; // evaluable by constexpr compatibility checks
+    int max_args;
+    bool takes_type_arg;
+    bool is_compile_time_const;
+    BuiltinSyntaxKind syntax = BuiltinSyntaxKind::Call;
+    bool supported = false;
 };
+
+struct BuiltinLibcall {
+    const char* callee;
+    const char* signature;
+};
+
+const BuiltinLibcall* builtin_libcall(BuiltinKind kind);
 
 class BuiltinRegistry {
 public:
@@ -454,6 +510,7 @@ public:
 
     const BuiltinInfo* lookup(std::string_view name) const;
     bool is_builtin(std::string_view name) const;
+    bool is_supported(std::string_view name) const;
 
 private:
     BuiltinRegistry();
@@ -463,5 +520,7 @@ private:
 };
 
 bool is_builtin_type_trait_kind(BuiltinKind kind);
+BuiltinSyntaxKind builtin_syntax_kind(BuiltinKind kind);
+bool is_supported_builtin_kind(BuiltinKind kind);
 
 #endif //ABURI_BUILTIN_REGISTRY_H

@@ -1,0 +1,684 @@
+#ifndef ADINKRA_FUTURE
+#define ADINKRA_FUTURE
+
+#include <__adinkra/config>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+enum class future_status {
+    ready,
+    timeout,
+    deferred
+};
+
+enum class launch {
+    async = 1,
+    deferred = 2
+};
+
+constexpr launch operator|(launch left, launch right) noexcept {
+    return static_cast<launch>(
+        static_cast<int>(left) | static_cast<int>(right));
+}
+
+constexpr launch operator&(launch left, launch right) noexcept {
+    return static_cast<launch>(
+        static_cast<int>(left) & static_cast<int>(right));
+}
+
+enum class future_errc {
+    broken_promise = 1,
+    future_already_retrieved,
+    promise_already_satisfied,
+    no_state
+};
+
+class future_error : public logic_error {
+public:
+    explicit future_error(future_errc value)
+        : logic_error(message(value)), value_(value) {}
+
+    future_errc code() const noexcept {
+        return value_;
+    }
+
+private:
+    future_errc value_;
+
+    static const char* message(future_errc value) noexcept {
+        switch (value) {
+        case future_errc::broken_promise:
+            return "broken promise";
+        case future_errc::future_already_retrieved:
+            return "future already retrieved";
+        case future_errc::promise_already_satisfied:
+            return "promise already satisfied";
+        case future_errc::no_state:
+            return "future has no state";
+        }
+        return "future error";
+    }
+};
+
+namespace __future_detail {
+
+class state_base {
+public:
+    mutable mutex mutex_value;
+    mutable condition_variable condition;
+    bool ready = false;
+    exception_ptr exception;
+
+    virtual ~state_base() = default;
+
+    void wait() const {
+        unique_lock<mutex> lock(mutex_value);
+        condition.wait(lock, [this] {
+            return ready;
+        });
+    }
+
+    template<class Representation, class Period>
+    future_status wait_for(
+        const chrono::duration<Representation, Period>& duration) const {
+        unique_lock<mutex> lock(mutex_value);
+        return condition.wait_for(lock, duration, [this] {
+            return ready;
+        }) ? future_status::ready : future_status::timeout;
+    }
+
+    void set_exception(exception_ptr value) {
+        lock_guard<mutex> lock(mutex_value);
+        if (ready) {
+            throw future_error(future_errc::promise_already_satisfied);
+        }
+        exception = value;
+        ready = true;
+        condition.notify_all();
+    }
+};
+
+template<class Type>
+class state final : public state_base {
+public:
+    alignas(Type) unsigned char storage[sizeof(Type)];
+    bool engaged = false;
+
+    ~state() override {
+        if (engaged) {
+            value().~Type();
+        }
+    }
+
+    Type& value() noexcept {
+        return *std::launder(reinterpret_cast<Type*>(storage));
+    }
+
+    template<class Value>
+    void set_value(Value&& input) {
+        lock_guard<mutex> lock(this->mutex_value);
+        if (this->ready) {
+            throw future_error(future_errc::promise_already_satisfied);
+        }
+        ::new (static_cast<void*>(storage))
+            Type(std::forward<Value>(input));
+        engaged = true;
+        this->ready = true;
+        this->condition.notify_all();
+    }
+};
+
+template<>
+class state<void> final : public state_base {
+public:
+    void set_value() {
+        lock_guard<mutex> lock(mutex_value);
+        if (ready) {
+            throw future_error(future_errc::promise_already_satisfied);
+        }
+        ready = true;
+        condition.notify_all();
+    }
+};
+
+} // namespace __future_detail
+
+template<class Type>
+class promise;
+
+template<class Type>
+class shared_future;
+
+template<class Signature>
+class packaged_task;
+
+template<class Type>
+class future {
+public:
+    constexpr future() noexcept = default;
+
+    future(future&&) noexcept = default;
+    future& operator=(future&&) noexcept = default;
+
+    future(const future&) = delete;
+    future& operator=(const future&) = delete;
+
+    bool valid() const noexcept {
+        return static_cast<bool>(state_);
+    }
+
+    Type get() {
+        require_state();
+        shared_ptr<__future_detail::state<Type>> state =
+            std::move(state_);
+        state->wait();
+        if (state->exception) {
+            rethrow_exception(state->exception);
+        }
+        return std::move(state->value());
+    }
+
+    void wait() const {
+        require_state();
+        state_->wait();
+    }
+
+    template<class Representation, class Period>
+    future_status wait_for(
+        const chrono::duration<Representation, Period>& duration) const {
+        require_state();
+        return state_->wait_for(duration);
+    }
+
+    template<class Clock, class Duration>
+    future_status wait_until(
+        const chrono::time_point<Clock, Duration>& deadline) const {
+        return wait_for(deadline - Clock::now());
+    }
+
+    shared_future<Type> share() noexcept;
+
+private:
+    explicit future(
+        shared_ptr<__future_detail::state<Type>> state) noexcept
+        : state_(std::move(state)) {}
+
+    shared_ptr<__future_detail::state<Type>> state_;
+
+    void require_state() const {
+        if (!state_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+
+    friend class promise<Type>;
+    friend class shared_future<Type>;
+};
+
+template<>
+class future<void> {
+public:
+    constexpr future() noexcept = default;
+
+    future(future&&) noexcept = default;
+    future& operator=(future&&) noexcept = default;
+
+    future(const future&) = delete;
+    future& operator=(const future&) = delete;
+
+    bool valid() const noexcept {
+        return static_cast<bool>(state_);
+    }
+
+    void get() {
+        require_state();
+        shared_ptr<__future_detail::state<void>> state =
+            std::move(state_);
+        state->wait();
+        if (state->exception) {
+            rethrow_exception(state->exception);
+        }
+    }
+
+    void wait() const {
+        require_state();
+        state_->wait();
+    }
+
+    template<class Representation, class Period>
+    future_status wait_for(
+        const chrono::duration<Representation, Period>& duration) const {
+        require_state();
+        return state_->wait_for(duration);
+    }
+
+    template<class Clock, class Duration>
+    future_status wait_until(
+        const chrono::time_point<Clock, Duration>& deadline) const {
+        return wait_for(deadline - Clock::now());
+    }
+
+    shared_future<void> share() noexcept;
+
+private:
+    explicit future(
+        shared_ptr<__future_detail::state<void>> state) noexcept
+        : state_(std::move(state)) {}
+
+    shared_ptr<__future_detail::state<void>> state_;
+
+    void require_state() const {
+        if (!state_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+
+    friend class promise<void>;
+    friend class shared_future<void>;
+};
+
+template<class Type>
+class shared_future {
+public:
+    constexpr shared_future() noexcept = default;
+
+    shared_future(const shared_future&) noexcept = default;
+    shared_future(shared_future&&) noexcept = default;
+    shared_future& operator=(const shared_future&) noexcept = default;
+    shared_future& operator=(shared_future&&) noexcept = default;
+
+    shared_future(future<Type>&& other) noexcept
+        : state_(std::move(other.state_)) {}
+
+    bool valid() const noexcept {
+        return static_cast<bool>(state_);
+    }
+
+    const Type& get() const {
+        wait();
+        if (state_->exception) {
+            rethrow_exception(state_->exception);
+        }
+        return state_->value();
+    }
+
+    void wait() const {
+        require_state();
+        state_->wait();
+    }
+
+    template<class Representation, class Period>
+    future_status wait_for(
+        const chrono::duration<Representation, Period>& duration) const {
+        require_state();
+        return state_->wait_for(duration);
+    }
+
+    template<class Clock, class Duration>
+    future_status wait_until(
+        const chrono::time_point<Clock, Duration>& deadline) const {
+        return wait_for(deadline - Clock::now());
+    }
+
+private:
+    explicit shared_future(
+        shared_ptr<__future_detail::state<Type>> state) noexcept
+        : state_(std::move(state)) {}
+
+    shared_ptr<__future_detail::state<Type>> state_;
+
+    void require_state() const {
+        if (!state_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+
+    friend class future<Type>;
+};
+
+template<>
+class shared_future<void> {
+public:
+    constexpr shared_future() noexcept = default;
+
+    shared_future(const shared_future&) noexcept = default;
+    shared_future(shared_future&&) noexcept = default;
+    shared_future& operator=(const shared_future&) noexcept = default;
+    shared_future& operator=(shared_future&&) noexcept = default;
+
+    shared_future(future<void>&& other) noexcept
+        : state_(std::move(other.state_)) {}
+
+    bool valid() const noexcept {
+        return static_cast<bool>(state_);
+    }
+
+    void get() const {
+        wait();
+        if (state_->exception) {
+            rethrow_exception(state_->exception);
+        }
+    }
+
+    void wait() const {
+        require_state();
+        state_->wait();
+    }
+
+    template<class Representation, class Period>
+    future_status wait_for(
+        const chrono::duration<Representation, Period>& duration) const {
+        require_state();
+        return state_->wait_for(duration);
+    }
+
+    template<class Clock, class Duration>
+    future_status wait_until(
+        const chrono::time_point<Clock, Duration>& deadline) const {
+        return wait_for(deadline - Clock::now());
+    }
+
+private:
+    explicit shared_future(
+        shared_ptr<__future_detail::state<void>> state) noexcept
+        : state_(std::move(state)) {}
+
+    shared_ptr<__future_detail::state<void>> state_;
+
+    void require_state() const {
+        if (!state_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+
+    friend class future<void>;
+};
+
+template<class Type>
+shared_future<Type> future<Type>::share() noexcept {
+    return shared_future<Type>(std::move(state_));
+}
+
+inline shared_future<void> future<void>::share() noexcept {
+    return shared_future<void>(std::move(state_));
+}
+
+template<class Type>
+class promise {
+public:
+    promise()
+        : state_(make_shared<__future_detail::state<Type>>()) {}
+
+    template<class Allocator>
+    promise(allocator_arg_t, const Allocator&)
+        : promise() {}
+
+    promise(promise&&) noexcept = default;
+    promise& operator=(promise&&) noexcept = default;
+
+    promise(const promise&) = delete;
+    promise& operator=(const promise&) = delete;
+
+    ~promise() {
+        abandon();
+    }
+
+    future<Type> get_future() {
+        require_state();
+        if (retrieved_) {
+            throw future_error(future_errc::future_already_retrieved);
+        }
+        retrieved_ = true;
+        return future<Type>(state_);
+    }
+
+    void set_value(const Type& value) {
+        require_state();
+        state_->set_value(value);
+    }
+
+    void set_value(Type&& value) {
+        require_state();
+        state_->set_value(std::move(value));
+    }
+
+    void set_exception(exception_ptr value) {
+        require_state();
+        state_->set_exception(value);
+    }
+
+    void swap(promise& other) noexcept {
+        state_.swap(other.state_);
+        std::swap(retrieved_, other.retrieved_);
+    }
+
+private:
+    shared_ptr<__future_detail::state<Type>> state_;
+    bool retrieved_ = false;
+
+    void require_state() const {
+        if (!state_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+
+    void abandon() noexcept {
+        if (!state_) {
+            return;
+        }
+        try {
+            lock_guard<mutex> lock(state_->mutex_value);
+            if (!state_->ready) {
+                state_->exception = make_exception_ptr(
+                    future_error(future_errc::broken_promise));
+                state_->ready = true;
+                state_->condition.notify_all();
+            }
+        } catch (...) {
+        }
+    }
+};
+
+template<>
+class promise<void> {
+public:
+    promise()
+        : state_(make_shared<__future_detail::state<void>>()) {}
+
+    template<class Allocator>
+    promise(allocator_arg_t, const Allocator&)
+        : promise() {}
+
+    promise(promise&&) noexcept = default;
+    promise& operator=(promise&&) noexcept = default;
+
+    promise(const promise&) = delete;
+    promise& operator=(const promise&) = delete;
+
+    ~promise() {
+        abandon();
+    }
+
+    future<void> get_future() {
+        require_state();
+        if (retrieved_) {
+            throw future_error(future_errc::future_already_retrieved);
+        }
+        retrieved_ = true;
+        return future<void>(state_);
+    }
+
+    void set_value() {
+        require_state();
+        state_->set_value();
+    }
+
+    void set_exception(exception_ptr value) {
+        require_state();
+        state_->set_exception(value);
+    }
+
+    void swap(promise& other) noexcept {
+        state_.swap(other.state_);
+        std::swap(retrieved_, other.retrieved_);
+    }
+
+private:
+    shared_ptr<__future_detail::state<void>> state_;
+    bool retrieved_ = false;
+
+    void require_state() const {
+        if (!state_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+
+    void abandon() noexcept {
+        if (!state_) {
+            return;
+        }
+        try {
+            lock_guard<mutex> lock(state_->mutex_value);
+            if (!state_->ready) {
+                state_->exception = make_exception_ptr(
+                    future_error(future_errc::broken_promise));
+                state_->ready = true;
+                state_->condition.notify_all();
+            }
+        } catch (...) {
+        }
+    }
+};
+
+template<class Type>
+void swap(promise<Type>& left, promise<Type>& right) noexcept {
+    left.swap(right);
+}
+
+template<class Result, class... Arguments>
+class packaged_task<Result(Arguments...)> {
+    class callable_base {
+    public:
+        virtual ~callable_base() = default;
+        virtual Result invoke(Arguments&&... arguments) = 0;
+    };
+
+    template<class Function>
+    class callable final : public callable_base {
+    public:
+        explicit callable(Function&& function)
+            : function_(std::move(function)) {}
+
+        Result invoke(Arguments&&... arguments) override {
+            if constexpr (is_void_v<Result>) {
+                std::invoke(
+                    function_,
+                    std::forward<Arguments>(arguments)...);
+            } else {
+                return std::invoke(
+                    function_,
+                    std::forward<Arguments>(arguments)...);
+            }
+        }
+
+    private:
+        Function function_;
+    };
+
+public:
+    packaged_task() noexcept = default;
+
+    template<class Function>
+        requires (!is_same_v<remove_cvref_t<Function>, packaged_task>)
+    explicit packaged_task(Function&& function)
+        : callable_(make_unique<callable<decay_t<Function>>>(
+              std::forward<Function>(function))) {}
+
+    packaged_task(packaged_task&&) noexcept = default;
+    packaged_task& operator=(packaged_task&&) noexcept = default;
+
+    packaged_task(const packaged_task&) = delete;
+    packaged_task& operator=(const packaged_task&) = delete;
+
+    bool valid() const noexcept {
+        return static_cast<bool>(callable_);
+    }
+
+    future<Result> get_future() {
+        require_state();
+        return promise_.get_future();
+    }
+
+    void operator()(Arguments... arguments) {
+        require_state();
+        try {
+            if constexpr (is_void_v<Result>) {
+                callable_->invoke(
+                    std::forward<Arguments>(arguments)...);
+                promise_.set_value();
+            } else {
+                promise_.set_value(callable_->invoke(
+                    std::forward<Arguments>(arguments)...));
+            }
+        } catch (...) {
+            promise_.set_exception(current_exception());
+        }
+    }
+
+private:
+    unique_ptr<callable_base> callable_;
+    promise<Result> promise_;
+
+    void require_state() const {
+        if (!callable_) {
+            throw future_error(future_errc::no_state);
+        }
+    }
+};
+
+template<class Function, class... Arguments>
+auto async(launch, Function&& function, Arguments&&... arguments)
+    -> future<invoke_result_t<decay_t<Function>, decay_t<Arguments>...>> {
+    using Result =
+        invoke_result_t<decay_t<Function>, decay_t<Arguments>...>;
+    packaged_task<Result()> task(
+        [
+            function_value = decay_t<Function>(
+                std::forward<Function>(function)),
+            arguments_value = tuple<decay_t<Arguments>...>(
+                std::forward<Arguments>(arguments)...)
+        ]() mutable -> Result {
+            return std::apply(
+                [&function_value](auto&... values) -> Result {
+                    return std::invoke(
+                        function_value, std::move(values)...);
+                },
+                arguments_value);
+        });
+    future<Result> result = task.get_future();
+    thread(std::move(task)).detach();
+    return result;
+}
+
+template<class Function, class... Arguments>
+auto async(Function&& function, Arguments&&... arguments)
+    -> future<invoke_result_t<decay_t<Function>, decay_t<Arguments>...>> {
+    return std::async(
+        launch::async,
+        std::forward<Function>(function),
+        std::forward<Arguments>(arguments)...);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,206 @@
+#ifndef ADINKRA_CODECVT
+#define ADINKRA_CODECVT
+
+#include <locale>
+#include <stdexcept>
+#include <string>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+enum codecvt_mode {
+    consume_header = 4,
+    generate_header = 2,
+    little_endian = 1
+};
+
+template<class Element, unsigned long Maximum = 0x10ffff,
+         codecvt_mode Mode = static_cast<codecvt_mode>(0)>
+class codecvt_utf8
+    : public codecvt<Element, char, mbstate_t> {
+public:
+    inline static constexpr unsigned long __adinkra_maximum =
+        Maximum;
+    inline static constexpr codecvt_mode __adinkra_mode = Mode;
+
+    explicit codecvt_utf8(size_t references = 0)
+        : codecvt<Element, char, mbstate_t>(references) {}
+
+    ~codecvt_utf8() override = default;
+};
+
+template<class Element, unsigned long Maximum = 0x10ffff,
+         codecvt_mode Mode = static_cast<codecvt_mode>(0)>
+class codecvt_utf8_utf16
+    : public codecvt_utf8<Element, Maximum, Mode> {
+public:
+    inline static constexpr unsigned long __adinkra_maximum =
+        Maximum;
+    inline static constexpr codecvt_mode __adinkra_mode = Mode;
+
+    explicit codecvt_utf8_utf16(size_t references = 0)
+        : codecvt_utf8<Element, Maximum, Mode>(references) {}
+
+    ~codecvt_utf8_utf16() override = default;
+};
+
+template<class Converter, class Element = wchar_t,
+         class WideAllocator = allocator<Element>,
+         class ByteAllocator = allocator<char>>
+class wstring_convert {
+public:
+    using byte_string =
+        basic_string<char, char_traits<char>, ByteAllocator>;
+    using wide_string =
+        basic_string<Element, char_traits<Element>, WideAllocator>;
+    using state_type = typename Converter::state_type;
+    using int_type = typename wide_string::traits_type::int_type;
+
+    wstring_convert() = default;
+
+    byte_string to_bytes(const Element* first, const Element* last) {
+        byte_string result;
+        if ((mode() & generate_header) != 0) {
+            result.append("\xef\xbb\xbf", 3);
+        }
+        converted_ = 0;
+        while (first != last) {
+            const unsigned long value =
+                static_cast<unsigned long>(*first);
+            if (value > maximum() ||
+                value > 0x10ffffUL ||
+                (value >= 0xd800UL && value <= 0xdfffUL)) {
+                throw range_error("invalid wide character");
+            }
+            append_utf8(result, value);
+            ++first;
+            ++converted_;
+        }
+        return result;
+    }
+
+    byte_string to_bytes(const wide_string& value) {
+        return to_bytes(value.data(), value.data() + value.size());
+    }
+
+    byte_string to_bytes(Element value) {
+        return to_bytes(&value, &value + 1);
+    }
+
+    wide_string from_bytes(const char* first, const char* last) {
+        wide_string result;
+        converted_ = 0;
+        if ((mode() & consume_header) != 0 &&
+            last - first >= 3 &&
+            static_cast<unsigned char>(first[0]) == 0xefU &&
+            static_cast<unsigned char>(first[1]) == 0xbbU &&
+            static_cast<unsigned char>(first[2]) == 0xbfU) {
+            first += 3;
+        }
+
+        while (first != last) {
+            const unsigned char lead =
+                static_cast<unsigned char>(*first++);
+            unsigned long value = 0;
+            size_t continuations = 0;
+            unsigned long minimum = 0;
+            if (lead < 0x80U) {
+                value = lead;
+            } else if ((lead & 0xe0U) == 0xc0U) {
+                value = lead & 0x1fU;
+                continuations = 1;
+                minimum = 0x80UL;
+            } else if ((lead & 0xf0U) == 0xe0U) {
+                value = lead & 0x0fU;
+                continuations = 2;
+                minimum = 0x800UL;
+            } else if ((lead & 0xf8U) == 0xf0U) {
+                value = lead & 0x07U;
+                continuations = 3;
+                minimum = 0x10000UL;
+            } else {
+                throw range_error("invalid UTF-8 lead byte");
+            }
+
+            for (size_t index = 0; index < continuations; ++index) {
+                if (first == last) {
+                    throw range_error("incomplete UTF-8 sequence");
+                }
+                const unsigned char next =
+                    static_cast<unsigned char>(*first++);
+                if ((next & 0xc0U) != 0x80U) {
+                    throw range_error("invalid UTF-8 continuation");
+                }
+                value = (value << 6U) | (next & 0x3fU);
+            }
+
+            if (value < minimum || value > maximum() ||
+                value > 0x10ffffUL ||
+                (value >= 0xd800UL && value <= 0xdfffUL)) {
+                throw range_error("invalid UTF-8 code point");
+            }
+            result.push_back(static_cast<Element>(value));
+            converted_ += continuations + 1;
+        }
+        return result;
+    }
+
+    wide_string from_bytes(const byte_string& value) {
+        return from_bytes(value.data(), value.data() + value.size());
+    }
+
+    wide_string from_bytes(const char* value) {
+        return from_bytes(
+            value, value + char_traits<char>::length(value));
+    }
+
+    size_t converted() const noexcept {
+        return converted_;
+    }
+
+    state_type state() const {
+        return state_type();
+    }
+
+private:
+    size_t converted_ = 0;
+
+    static constexpr unsigned long maximum() {
+        return Converter::__adinkra_maximum;
+    }
+
+    static constexpr codecvt_mode mode() {
+        return Converter::__adinkra_mode;
+    }
+
+    static void append_utf8(
+        byte_string& result, unsigned long value) {
+        if (value < 0x80UL) {
+            result.push_back(static_cast<char>(value));
+        } else if (value < 0x800UL) {
+            result.push_back(static_cast<char>(
+                0xc0U | (value >> 6U)));
+            result.push_back(static_cast<char>(
+                0x80U | (value & 0x3fU)));
+        } else if (value < 0x10000UL) {
+            result.push_back(static_cast<char>(
+                0xe0U | (value >> 12U)));
+            result.push_back(static_cast<char>(
+                0x80U | ((value >> 6U) & 0x3fU)));
+            result.push_back(static_cast<char>(
+                0x80U | (value & 0x3fU)));
+        } else {
+            result.push_back(static_cast<char>(
+                0xf0U | (value >> 18U)));
+            result.push_back(static_cast<char>(
+                0x80U | ((value >> 12U) & 0x3fU)));
+            result.push_back(static_cast<char>(
+                0x80U | ((value >> 6U) & 0x3fU)));
+            result.push_back(static_cast<char>(
+                0x80U | (value & 0x3fU)));
+        }
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,102 @@
+#ifndef ADINKRA_NEW
+#define ADINKRA_NEW
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <exception>
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+
+class _ADINKRA_EXPORT bad_alloc : public exception {
+public:
+    bad_alloc() noexcept = default;
+    bad_alloc(const bad_alloc&) noexcept = default;
+    bad_alloc& operator=(const bad_alloc&) noexcept = default;
+    ~bad_alloc() noexcept override;
+    const char* what() const noexcept override;
+};
+
+class _ADINKRA_EXPORT bad_array_new_length : public bad_alloc {
+public:
+    bad_array_new_length() noexcept = default;
+    ~bad_array_new_length() noexcept override;
+    const char* what() const noexcept override;
+};
+
+enum class align_val_t : size_t {};
+
+struct destroying_delete_t {
+    explicit destroying_delete_t() = default;
+};
+
+inline constexpr destroying_delete_t destroying_delete{};
+
+struct nothrow_t {
+    explicit nothrow_t() = default;
+};
+
+extern _ADINKRA_EXPORT const nothrow_t nothrow;
+
+using new_handler = void (*)();
+
+_ADINKRA_EXPORT new_handler set_new_handler(new_handler handler) noexcept;
+_ADINKRA_EXPORT new_handler get_new_handler() noexcept;
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type* launder(Type* pointer) noexcept {
+    return __builtin_launder(pointer);
+}
+
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+_ADINKRA_NODISCARD void* operator new(std::size_t size);
+_ADINKRA_NODISCARD void* operator new[](std::size_t size);
+_ADINKRA_NODISCARD void* operator new(
+    std::size_t size, std::align_val_t alignment);
+_ADINKRA_NODISCARD void* operator new[](
+    std::size_t size, std::align_val_t alignment);
+
+_ADINKRA_NODISCARD void* operator new(
+    std::size_t size, const std::nothrow_t&) noexcept;
+_ADINKRA_NODISCARD void* operator new[](
+    std::size_t size, const std::nothrow_t&) noexcept;
+_ADINKRA_NODISCARD void* operator new(
+    std::size_t size, std::align_val_t alignment,
+    const std::nothrow_t&) noexcept;
+_ADINKRA_NODISCARD void* operator new[](
+    std::size_t size, std::align_val_t alignment,
+    const std::nothrow_t&) noexcept;
+
+void operator delete(void* pointer) noexcept;
+void operator delete[](void* pointer) noexcept;
+void operator delete(void* pointer, std::size_t size) noexcept;
+void operator delete[](void* pointer, std::size_t size) noexcept;
+void operator delete(void* pointer, std::align_val_t alignment) noexcept;
+void operator delete[](void* pointer, std::align_val_t alignment) noexcept;
+void operator delete(
+    void* pointer, std::size_t size, std::align_val_t alignment) noexcept;
+void operator delete[](
+    void* pointer, std::size_t size, std::align_val_t alignment) noexcept;
+void operator delete(void* pointer, const std::nothrow_t&) noexcept;
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept;
+void operator delete(
+    void* pointer, std::align_val_t alignment,
+    const std::nothrow_t&) noexcept;
+void operator delete[](
+    void* pointer, std::align_val_t alignment,
+    const std::nothrow_t&) noexcept;
+
+_ADINKRA_NODISCARD inline void*
+operator new(std::size_t, void* pointer) noexcept {
+    return pointer;
+}
+
+_ADINKRA_NODISCARD inline void*
+operator new[](std::size_t, void* pointer) noexcept {
+    return pointer;
+}
+
+inline void operator delete(void*, void*) noexcept {}
+inline void operator delete[](void*, void*) noexcept {}
+
+#endif

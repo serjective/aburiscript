@@ -1,0 +1,391 @@
+#ifndef ADINKRA_FSTREAM
+#define ADINKRA_FSTREAM
+
+#include <__adinkra/fstream>
+#include <filesystem>
+#include <istream>
+#include <iostream>
+#include <ostream>
+#include <string>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits>
+class basic_filebuf : public basic_streambuf<Character, Traits> {
+public:
+    using int_type = typename Traits::int_type;
+    using pos_type = typename Traits::pos_type;
+    using off_type = typename Traits::off_type;
+
+    basic_filebuf() noexcept : stream_(nullptr) {}
+
+    void __set_stream(void* stream) noexcept {
+        stream_ = stream;
+    }
+
+    int_type sgetc() override {
+        const int value = __io::get(stream_);
+        if (value < 0) {
+            return Traits::eof();
+        }
+        __io::unget(stream_, static_cast<char>(value));
+        return Traits::to_int_type(static_cast<Character>(value));
+    }
+
+    int_type sbumpc() override {
+        const int value = __io::get(stream_);
+        return value < 0
+                   ? Traits::eof()
+                   : Traits::to_int_type(
+                         static_cast<Character>(value));
+    }
+
+    int_type sputbackc(Character value) override {
+        return __io::unget(stream_, static_cast<char>(value))
+                   ? Traits::to_int_type(value)
+                   : Traits::eof();
+    }
+
+    streamsize sgetn(
+        Character* destination, streamsize count) override {
+        streamsize read = 0;
+        while (read < count) {
+            const int_type value = sbumpc();
+            if (Traits::eq_int_type(value, Traits::eof())) {
+                break;
+            }
+            destination[read++] = Traits::to_char_type(value);
+        }
+        return read;
+    }
+
+    int_type sputc(Character value) override {
+        return __io::put(stream_, static_cast<char>(value))
+                   ? Traits::to_int_type(value)
+                   : Traits::eof();
+    }
+
+    streamsize sputn(
+        const Character* source, streamsize count) override {
+        if constexpr (is_same_v<Character, char>) {
+            if (count < 0 ||
+                !__io::write(
+                    stream_, source, static_cast<size_t>(count))) {
+                return 0;
+            }
+            return count;
+        } else {
+            (void)source;
+            (void)count;
+            return 0;
+        }
+    }
+
+    pos_type pubseekoff(
+        off_type offset, ios_base::seekdir direction,
+        ios_base::openmode = ios_base::in | ios_base::out) override {
+        if (!__io::seek(stream_, offset, direction)) {
+            return pos_type(-1);
+        }
+        return static_cast<pos_type>(__io::tell(stream_));
+    }
+
+private:
+    void* stream_;
+};
+
+template<class Character, class Traits>
+class basic_ifstream : public basic_istream<Character, Traits> {
+public:
+    using base_type = basic_istream<Character, Traits>;
+
+    basic_ifstream() noexcept
+        : base_type(static_cast<void*>(nullptr)),
+          stream_(nullptr), buffer_() {
+        require_narrow();
+    }
+
+    explicit basic_ifstream(
+        const char* filename,
+        ios_base::openmode mode = ios_base::in)
+        : basic_ifstream() {
+        open(filename, mode);
+    }
+
+    explicit basic_ifstream(
+        const basic_string<Character, Traits>& filename,
+        ios_base::openmode mode = ios_base::in)
+        : basic_ifstream(filename.c_str(), mode) {}
+
+    explicit basic_ifstream(
+        const filesystem::path& filename,
+        ios_base::openmode mode = ios_base::in)
+        : basic_ifstream(filename.c_str(), mode) {}
+
+    basic_ifstream(const basic_ifstream&) = delete;
+    basic_ifstream& operator=(const basic_ifstream&) = delete;
+
+    ~basic_ifstream() {
+        if (stream_ != nullptr) {
+            __fstream::close(stream_);
+        }
+    }
+
+    bool is_open() const noexcept {
+        return stream_ != nullptr;
+    }
+
+    basic_filebuf<Character, Traits>* rdbuf() noexcept {
+        return &buffer_;
+    }
+
+    void open(
+        const char* filename,
+        ios_base::openmode mode = ios_base::in) {
+        if (is_open()) {
+            this->setstate(ios_base::failbit);
+            return;
+        }
+        stream_ = __fstream::open(filename, mode | ios_base::in);
+        buffer_.__set_stream(stream_);
+        this->set_streambuf(&buffer_);
+        if (stream_ == nullptr) {
+            this->setstate(ios_base::failbit);
+        } else {
+            this->clear();
+        }
+    }
+
+    void open(
+        const basic_string<Character, Traits>& filename,
+        ios_base::openmode mode = ios_base::in) {
+        open(filename.c_str(), mode);
+    }
+
+    void open(
+        const filesystem::path& filename,
+        ios_base::openmode mode = ios_base::in) {
+        open(filename.c_str(), mode);
+    }
+
+    void close() {
+        if (stream_ == nullptr) {
+            this->setstate(ios_base::failbit);
+            return;
+        }
+        if (!__fstream::close(stream_)) {
+            this->setstate(ios_base::failbit);
+        }
+        stream_ = nullptr;
+        buffer_.__set_stream(nullptr);
+        this->set_streambuf(nullptr);
+    }
+
+private:
+    void* stream_;
+    basic_filebuf<Character, Traits> buffer_;
+
+    static constexpr void require_narrow() {
+
+    }
+};
+
+template<class Character, class Traits>
+class basic_ofstream : public basic_ostream<Character, Traits> {
+public:
+    using base_type = basic_ostream<Character, Traits>;
+
+    basic_ofstream() noexcept
+        : base_type(static_cast<void*>(nullptr)),
+          stream_(nullptr), buffer_() {
+        require_narrow();
+    }
+
+    explicit basic_ofstream(
+        const char* filename,
+        ios_base::openmode mode = ios_base::out)
+        : basic_ofstream() {
+        open(filename, mode);
+    }
+
+    explicit basic_ofstream(
+        const basic_string<Character, Traits>& filename,
+        ios_base::openmode mode = ios_base::out)
+        : basic_ofstream(filename.c_str(), mode) {}
+
+    explicit basic_ofstream(
+        const filesystem::path& filename,
+        ios_base::openmode mode = ios_base::out)
+        : basic_ofstream(filename.c_str(), mode) {}
+
+    basic_ofstream(const basic_ofstream&) = delete;
+    basic_ofstream& operator=(const basic_ofstream&) = delete;
+
+    ~basic_ofstream() {
+        if (stream_ != nullptr) {
+            __fstream::close(stream_);
+        }
+    }
+
+    bool is_open() const noexcept {
+        return stream_ != nullptr;
+    }
+
+    basic_filebuf<Character, Traits>* rdbuf() noexcept {
+        return &buffer_;
+    }
+
+    void open(
+        const char* filename,
+        ios_base::openmode mode = ios_base::out) {
+        if (is_open()) {
+            this->setstate(ios_base::failbit);
+            return;
+        }
+        stream_ = __fstream::open(filename, mode | ios_base::out);
+        buffer_.__set_stream(stream_);
+        this->set_native_stream(stream_);
+        if (stream_ == nullptr) {
+            this->setstate(ios_base::failbit);
+        } else {
+            this->clear();
+        }
+    }
+
+    void open(
+        const basic_string<Character, Traits>& filename,
+        ios_base::openmode mode = ios_base::out) {
+        open(filename.c_str(), mode);
+    }
+
+    void open(
+        const filesystem::path& filename,
+        ios_base::openmode mode = ios_base::out) {
+        open(filename.c_str(), mode);
+    }
+
+    void close() {
+        if (stream_ == nullptr) {
+            this->setstate(ios_base::failbit);
+            return;
+        }
+        if (!__fstream::close(stream_)) {
+            this->setstate(ios_base::failbit);
+        }
+        stream_ = nullptr;
+        buffer_.__set_stream(nullptr);
+        this->set_native_stream(nullptr);
+    }
+
+private:
+    void* stream_;
+    basic_filebuf<Character, Traits> buffer_;
+
+    static constexpr void require_narrow() {
+
+    }
+};
+
+template<class Character, class Traits>
+class basic_fstream : public basic_iostream<Character, Traits> {
+public:
+    using base_type = basic_iostream<Character, Traits>;
+    using input_type = basic_istream<Character, Traits>;
+    using output_type = basic_ostream<Character, Traits>;
+
+    basic_fstream() noexcept
+        : base_type(static_cast<void*>(nullptr)),
+          stream_(nullptr), buffer_() {}
+
+    explicit basic_fstream(
+        const char* filename,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : basic_fstream() {
+        open(filename, mode);
+    }
+
+    explicit basic_fstream(
+        const basic_string<Character, Traits>& filename,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : basic_fstream(filename.c_str(), mode) {}
+
+    explicit basic_fstream(
+        const filesystem::path& filename,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : basic_fstream(filename.c_str(), mode) {}
+
+    basic_fstream(const basic_fstream&) = delete;
+    basic_fstream& operator=(const basic_fstream&) = delete;
+
+    ~basic_fstream() {
+        if (stream_ != nullptr) {
+            __fstream::close(stream_);
+        }
+    }
+
+    bool is_open() const noexcept {
+        return stream_ != nullptr;
+    }
+
+    basic_filebuf<Character, Traits>* rdbuf() noexcept {
+        return &buffer_;
+    }
+
+    void open(
+        const char* filename,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out) {
+        if (is_open()) {
+            this->setstate(ios_base::failbit);
+            return;
+        }
+        stream_ = __fstream::open(filename, mode);
+        buffer_.__set_stream(stream_);
+        input_type::set_streambuf(&buffer_);
+        output_type::set_streambuf(&buffer_);
+        if (stream_ == nullptr) {
+            this->setstate(ios_base::failbit);
+        } else {
+            this->clear();
+        }
+    }
+
+    void open(
+        const basic_string<Character, Traits>& filename,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out) {
+        open(filename.c_str(), mode);
+    }
+
+    void open(
+        const filesystem::path& filename,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out) {
+        open(filename.c_str(), mode);
+    }
+
+    void close() {
+        if (stream_ == nullptr) {
+            this->setstate(ios_base::failbit);
+            return;
+        }
+        if (!__fstream::close(stream_)) {
+            this->setstate(ios_base::failbit);
+        }
+        stream_ = nullptr;
+        buffer_.__set_stream(nullptr);
+        input_type::set_streambuf(nullptr);
+        output_type::set_streambuf(nullptr);
+    }
+
+private:
+    void* stream_;
+    basic_filebuf<Character, Traits> buffer_;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

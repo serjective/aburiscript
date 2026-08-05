@@ -1,0 +1,1397 @@
+#ifndef ADINKRA_VECTOR
+#define ADINKRA_VECTOR
+
+#include <__adinkra/config>
+#include <__adinkra/storage>
+#include <algorithm>
+#include <compare>
+#include <cstddef>
+#include <initializer_list>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+#ifndef __cpp_lib_constexpr_vector
+#define __cpp_lib_constexpr_vector 201907L
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type>
+struct hash;
+
+template<class Type>
+class __vector_iterator {
+    template<class>
+    friend class __vector_iterator;
+
+public:
+    using iterator_category = random_access_iterator_tag;
+    using iterator_concept = contiguous_iterator_tag;
+    using value_type = remove_cv_t<Type>;
+    using difference_type = ptrdiff_t;
+    using pointer = Type*;
+    using reference = Type&;
+
+    constexpr __vector_iterator() noexcept : pointer_(nullptr) {}
+
+    explicit constexpr __vector_iterator(pointer value) noexcept
+        : pointer_(value) {}
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    constexpr __vector_iterator(
+        const __vector_iterator<Other>& other) noexcept
+        : pointer_(other.pointer_) {}
+
+    _ADINKRA_NODISCARD constexpr pointer base() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference operator*() const noexcept {
+        return *pointer_;
+    }
+
+    _ADINKRA_NODISCARD constexpr pointer operator->() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](difference_type index) const noexcept {
+        return pointer_[index];
+    }
+
+    constexpr __vector_iterator& operator++() noexcept {
+        ++pointer_;
+        return *this;
+    }
+
+    constexpr __vector_iterator operator++(int) noexcept {
+        __vector_iterator result(*this);
+        ++pointer_;
+        return result;
+    }
+
+    constexpr __vector_iterator& operator--() noexcept {
+        --pointer_;
+        return *this;
+    }
+
+    constexpr __vector_iterator operator--(int) noexcept {
+        __vector_iterator result(*this);
+        --pointer_;
+        return result;
+    }
+
+    constexpr __vector_iterator&
+    operator+=(difference_type count) noexcept {
+        pointer_ += count;
+        return *this;
+    }
+
+    constexpr __vector_iterator&
+    operator-=(difference_type count) noexcept {
+        pointer_ -= count;
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr __vector_iterator
+    operator+(difference_type count) const noexcept {
+        return __vector_iterator(
+            count == 0 ? pointer_ : pointer_ + count);
+    }
+
+    _ADINKRA_NODISCARD constexpr __vector_iterator
+    operator-(difference_type count) const noexcept {
+        return __vector_iterator(
+            count == 0 ? pointer_ : pointer_ - count);
+    }
+
+private:
+    pointer pointer_;
+};
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool operator==(
+    const __vector_iterator<Left>& left,
+    const __vector_iterator<Right>& right) noexcept {
+    return left.base() == right.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr auto operator<=>(
+    const __vector_iterator<Left>& left,
+    const __vector_iterator<Right>& right) noexcept {
+    return left.base() <=> right.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr ptrdiff_t operator-(
+    const __vector_iterator<Left>& left,
+    const __vector_iterator<Right>& right) noexcept {
+    return left.base() == right.base()
+        ? 0
+        : left.base() - right.base();
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr __vector_iterator<Type> operator+(
+    ptrdiff_t count,
+    const __vector_iterator<Type>& iterator) noexcept {
+    return iterator + count;
+}
+
+template<class Type, class Allocator = allocator<Type>>
+class vector {
+public:
+    using value_type = Type;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+    using iterator = __vector_iterator<value_type>;
+    using const_iterator = __vector_iterator<const value_type>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    constexpr vector() noexcept(noexcept(Allocator()))
+        : data_(nullptr), size_(0), capacity_(0), allocator_() {}
+
+    constexpr explicit vector(const Allocator& allocator_value) noexcept
+        : data_(nullptr), size_(0), capacity_(0),
+          allocator_(allocator_value) {}
+
+    constexpr explicit vector(
+        size_type count,
+        const Allocator& allocator_value = Allocator())
+        : vector(allocator_value) {
+        resize(count);
+    }
+
+    constexpr vector(
+        size_type count, const Type& value,
+        const Allocator& allocator_value = Allocator())
+        : vector(allocator_value) {
+        assign(count, value);
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    constexpr vector(
+        InputIterator first, InputIterator last,
+        const Allocator& allocator_value = Allocator())
+        : vector(allocator_value) {
+        assign(first, last);
+    }
+
+    constexpr vector(
+        initializer_list<Type> values,
+        const Allocator& allocator_value = Allocator())
+        : vector(values.begin(), values.end(), allocator_value) {}
+
+    constexpr vector(const vector& other)
+        : vector(allocator_traits<Allocator>::
+                     select_on_container_copy_construction(
+                         other.allocator_)) {
+        assign(other.begin(), other.end());
+    }
+
+    constexpr vector(
+        const vector& other, const Allocator& allocator_value)
+        : vector(allocator_value) {
+        assign(other.begin(), other.end());
+    }
+
+    constexpr vector(vector&& other) noexcept
+        : data_(std::exchange(other.data_, nullptr)),
+          size_(std::exchange(other.size_, 0)),
+          capacity_(std::exchange(other.capacity_, 0)),
+          allocator_(std::move(other.allocator_)) {}
+
+    constexpr vector(
+        vector&& other, const Allocator& allocator_value)
+        : vector(allocator_value) {
+        if (allocator_ == other.allocator_) {
+            take_storage(other);
+        } else {
+            assign_move(other.begin(), other.end());
+            other.clear();
+        }
+    }
+
+    constexpr ~vector() {
+        release();
+    }
+
+    constexpr vector& operator=(const vector& other) {
+        if (this != std::addressof(other)) {
+            if constexpr (allocator_traits<Allocator>::
+                              propagate_on_container_copy_assignment::
+                                  value) {
+                if (allocator_ != other.allocator_) {
+                    release();
+                    allocator_ = other.allocator_;
+                }
+            }
+            assign(other.begin(), other.end());
+        }
+        return *this;
+    }
+
+    constexpr vector& operator=(vector&& other)
+        noexcept(allocator_traits<Allocator>::
+                     propagate_on_container_move_assignment::value ||
+                 allocator_traits<Allocator>::is_always_equal::value) {
+        if (this == std::addressof(other)) {
+            return *this;
+        }
+
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_move_assignment::value) {
+            release();
+            allocator_ = std::move(other.allocator_);
+            take_storage(other);
+        } else if (allocator_ == other.allocator_) {
+            release();
+            take_storage(other);
+        } else {
+            assign_move(other.begin(), other.end());
+            other.clear();
+        }
+        return *this;
+    }
+
+    constexpr vector& operator=(initializer_list<Type> values) {
+        assign(values.begin(), values.end());
+        return *this;
+    }
+
+    constexpr void assign(size_type count, const Type& value) {
+        clear();
+        if (count > capacity_) {
+            reallocate_exact(count);
+        }
+        pointer current = data_;
+        try {
+            for (; size_ < count; ++size_, ++current) {
+                allocator_traits<Allocator>::construct(
+                    allocator_, current, value);
+            }
+        } catch (...) {
+            clear();
+            throw;
+        }
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    constexpr void assign(InputIterator first, InputIterator last) {
+        clear();
+        using Category =
+            typename iterator_traits<InputIterator>::iterator_category;
+        if constexpr (is_base_of_v<forward_iterator_tag, Category>) {
+            const size_type count =
+                static_cast<size_type>(std::distance(first, last));
+            if (count > capacity_) {
+                reallocate_exact(count);
+            }
+            try {
+                for (; first != last; ++first, ++size_) {
+                    allocator_traits<Allocator>::construct(
+                        allocator_, data_ + size_, *first);
+                }
+            } catch (...) {
+                clear();
+                throw;
+            }
+        } else {
+            for (; first != last; ++first) {
+                emplace_back(*first);
+            }
+        }
+    }
+
+    constexpr void assign(initializer_list<Type> values) {
+        assign(values.begin(), values.end());
+    }
+
+    _ADINKRA_NODISCARD constexpr allocator_type
+    get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference at(size_type position) {
+        check_index(position);
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reference
+    at(size_type position) const {
+        check_index(position);
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](size_type position) noexcept {
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reference
+    operator[](size_type position) const noexcept {
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD constexpr reference front() noexcept {
+        return data_[0];
+    }
+    _ADINKRA_NODISCARD constexpr const_reference front() const noexcept {
+        return data_[0];
+    }
+    _ADINKRA_NODISCARD constexpr reference back() noexcept {
+        return data_[size_ - 1];
+    }
+    _ADINKRA_NODISCARD constexpr const_reference back() const noexcept {
+        return data_[size_ - 1];
+    }
+    _ADINKRA_NODISCARD constexpr pointer data() noexcept { return data_; }
+    _ADINKRA_NODISCARD constexpr const_pointer data() const noexcept {
+        return data_;
+    }
+
+    _ADINKRA_NODISCARD constexpr iterator begin() noexcept {
+        return iterator(data_);
+    }
+    _ADINKRA_NODISCARD constexpr const_iterator begin() const noexcept {
+        return const_iterator(data_);
+    }
+    _ADINKRA_NODISCARD constexpr const_iterator cbegin() const noexcept {
+        return const_iterator(data_);
+    }
+    _ADINKRA_NODISCARD constexpr iterator end() noexcept {
+        return iterator(size_ == 0 ? data_ : data_ + size_);
+    }
+    _ADINKRA_NODISCARD constexpr const_iterator end() const noexcept {
+        return const_iterator(
+            size_ == 0 ? data_ : data_ + size_);
+    }
+    _ADINKRA_NODISCARD constexpr const_iterator cend() const noexcept {
+        return end();
+    }
+    _ADINKRA_NODISCARD constexpr reverse_iterator rbegin() noexcept {
+        return reverse_iterator(end());
+    }
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    crbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    _ADINKRA_NODISCARD constexpr reverse_iterator rend() noexcept {
+        return reverse_iterator(begin());
+    }
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    crend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD constexpr bool empty() const noexcept {
+        return size_ == 0;
+    }
+    _ADINKRA_NODISCARD constexpr size_type size() const noexcept {
+        return size_;
+    }
+    _ADINKRA_NODISCARD constexpr size_type capacity() const noexcept {
+        return capacity_;
+    }
+    _ADINKRA_NODISCARD constexpr size_type max_size() const noexcept {
+        const size_type allocation_max =
+            allocator_traits<Allocator>::max_size(allocator_);
+        const size_type difference_max =
+            static_cast<size_type>(
+                (numeric_limits<difference_type>::max)());
+        return std::min(allocation_max, difference_max);
+    }
+
+    constexpr void reserve(size_type requested) {
+        if (requested > capacity_) {
+            if (requested > max_size()) {
+                throw length_error("vector::reserve");
+            }
+            reallocate_exact(requested);
+        }
+    }
+
+    constexpr void shrink_to_fit() {
+        if (size_ < capacity_) {
+            reallocate_exact(size_);
+        }
+    }
+
+    constexpr void clear() noexcept {
+        destroy_range(data_, end_pointer());
+        size_ = 0;
+    }
+
+    constexpr iterator insert(
+        const_iterator position, const Type& value) {
+        return emplace(position, value);
+    }
+
+    constexpr iterator insert(const_iterator position, Type&& value) {
+        return emplace(position, std::move(value));
+    }
+
+    constexpr iterator insert(
+        const_iterator position, size_type count, const Type& value) {
+        const size_type offset = offset_of(position);
+        for (size_type index = 0; index < count; ++index) {
+            emplace(begin() + offset + index, value);
+        }
+        return begin() + offset;
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    constexpr iterator insert(
+        const_iterator position, InputIterator first, InputIterator last) {
+        const size_type offset = offset_of(position);
+        size_type inserted = 0;
+        for (; first != last; ++first, ++inserted) {
+            emplace(begin() + offset + inserted, *first);
+        }
+        return begin() + offset;
+    }
+
+    constexpr iterator insert(
+        const_iterator position, initializer_list<Type> values) {
+        return insert(position, values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    constexpr iterator emplace(
+        const_iterator position, Arguments&&... arguments) {
+        const size_type offset = offset_of(position);
+        if (offset == size_) {
+            emplace_back(std::forward<Arguments>(arguments)...);
+            return begin() + offset;
+        }
+
+        Type temporary(std::forward<Arguments>(arguments)...);
+        ensure_extra_capacity(1);
+        pointer location = data_ + offset;
+        allocator_traits<Allocator>::construct(
+            allocator_, data_ + size_, std::move(data_[size_ - 1]));
+        ++size_;
+        std::move_backward(location, data_ + size_ - 2, data_ + size_ - 1);
+        *location = std::move(temporary);
+        return iterator(location);
+    }
+
+    constexpr iterator erase(const_iterator position) {
+        return erase(position, position + 1);
+    }
+
+    constexpr iterator erase(
+        const_iterator first, const_iterator last) {
+        const size_type offset = offset_of(first);
+        const size_type count = static_cast<size_type>(last - first);
+        if (count == 0) {
+            return begin() + offset;
+        }
+        pointer destination = data_ + offset;
+        pointer source = destination + count;
+        std::move(source, data_ + size_, destination);
+        destroy_range(data_ + size_ - count, data_ + size_);
+        size_ -= count;
+        return iterator(data_ + offset);
+    }
+
+    constexpr void push_back(const Type& value) {
+        emplace_back(value);
+    }
+
+    constexpr void push_back(Type&& value) {
+        emplace_back(std::move(value));
+    }
+
+    template<class... Arguments>
+    constexpr reference emplace_back(Arguments&&... arguments) {
+        if (size_ == capacity_) {
+            grow_and_emplace(std::forward<Arguments>(arguments)...);
+        } else {
+            allocator_traits<Allocator>::construct(
+                allocator_, data_ + size_,
+                std::forward<Arguments>(arguments)...);
+            ++size_;
+        }
+        return back();
+    }
+
+    constexpr void pop_back() {
+        --size_;
+        allocator_traits<Allocator>::destroy(allocator_, data_ + size_);
+    }
+
+    constexpr void resize(size_type count) {
+        resize_with(count, [](
+            Allocator& allocator_value, pointer location) {
+            allocator_traits<Allocator>::construct(
+                allocator_value, location);
+        });
+    }
+
+    constexpr void resize(size_type count, const value_type& value) {
+        resize_with(count, [&value](
+            Allocator& allocator_value, pointer location) {
+            allocator_traits<Allocator>::construct(
+                allocator_value, location, value);
+        });
+    }
+
+    constexpr void swap(vector& other)
+        noexcept(allocator_traits<Allocator>::
+                     propagate_on_container_swap::value ||
+                 allocator_traits<Allocator>::is_always_equal::value) {
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_swap::value) {
+            std::swap(allocator_, other.allocator_);
+        }
+        std::swap(data_, other.data_);
+        std::swap(size_, other.size_);
+        std::swap(capacity_, other.capacity_);
+    }
+
+private:
+    pointer data_;
+    size_type size_;
+    size_type capacity_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+
+    _ADINKRA_NODISCARD constexpr pointer end_pointer() noexcept {
+        return size_ == 0 ? data_ : data_ + size_;
+    }
+
+    _ADINKRA_NODISCARD constexpr size_type
+    offset_of(const_iterator position) const noexcept {
+        return position.base() == data_
+            ? 0
+            : static_cast<size_type>(position.base() - data_);
+    }
+
+    constexpr void check_index(size_type position) const {
+        if (position >= size_) {
+            throw out_of_range("vector::at");
+        }
+    }
+
+    constexpr void destroy_range(pointer first, pointer last) noexcept {
+        if constexpr (!is_trivially_destructible_v<Type>) {
+            while (first != last) {
+                allocator_traits<Allocator>::destroy(
+                    allocator_, --last);
+            }
+        }
+    }
+
+    constexpr void release() noexcept {
+        clear();
+        if (data_ != nullptr) {
+            allocator_traits<Allocator>::deallocate(
+                allocator_, data_, capacity_);
+        }
+        data_ = nullptr;
+        capacity_ = 0;
+    }
+
+    constexpr void take_storage(vector& other) noexcept {
+        data_ = std::exchange(other.data_, nullptr);
+        size_ = std::exchange(other.size_, 0);
+        capacity_ = std::exchange(other.capacity_, 0);
+    }
+
+    constexpr void reallocate_exact(size_type requested) {
+        if (requested == capacity_) {
+            return;
+        }
+        if (requested == 0) {
+            release();
+            return;
+        }
+
+        pointer replacement =
+            allocator_traits<Allocator>::allocate(allocator_, requested);
+        size_type constructed = 0;
+        try {
+            if constexpr (is_trivially_copyable_v<Type>) {
+                if (std::is_constant_evaluated()) {
+                    if constexpr (
+                        is_move_constructible_v<Type> ||
+                        is_copy_constructible_v<Type>) {
+                        for (; constructed < size_; ++constructed) {
+                            allocator_traits<Allocator>::construct(
+                                allocator_, replacement + constructed,
+                                std::move_if_noexcept(
+                                    data_[constructed]));
+                        }
+                    } else if (size_ != 0) {
+                        throw length_error(
+                            "vector cannot relocate this element type");
+                    }
+                } else {
+                    __storage::copy_bytes(
+                        replacement, data_, size_ * sizeof(Type));
+                    constructed = size_;
+                }
+            } else if constexpr (
+                is_move_constructible_v<Type> ||
+                is_copy_constructible_v<Type>) {
+                for (; constructed < size_; ++constructed) {
+                    allocator_traits<Allocator>::construct(
+                        allocator_, replacement + constructed,
+                        std::move_if_noexcept(data_[constructed]));
+                }
+            } else if (size_ != 0) {
+                throw length_error(
+                    "vector cannot relocate this element type");
+            }
+        } catch (...) {
+            destroy_range(replacement, replacement + constructed);
+            allocator_traits<Allocator>::deallocate(
+                allocator_, replacement, requested);
+            throw;
+        }
+
+        destroy_range(data_, end_pointer());
+        if (data_ != nullptr) {
+            allocator_traits<Allocator>::deallocate(
+                allocator_, data_, capacity_);
+        }
+        data_ = replacement;
+        capacity_ = requested;
+    }
+
+    constexpr void ensure_extra_capacity(size_type extra) {
+        if (extra > max_size() - size_) {
+            throw length_error("vector capacity exceeds max_size");
+        }
+        const size_type required = size_ + extra;
+        if (required > capacity_) {
+            reallocate_exact(recommended_capacity(required));
+        }
+    }
+
+    template<class... Arguments>
+    constexpr void grow_and_emplace(Arguments&&... arguments) {
+        const size_type requested =
+            recommended_capacity(size_ + 1);
+        Type temporary(std::forward<Arguments>(arguments)...);
+        reallocate_exact(requested);
+        allocator_traits<Allocator>::construct(
+            allocator_, data_ + size_, std::move(temporary));
+        ++size_;
+    }
+
+    template<class Construct>
+    constexpr void resize_with(size_type count, Construct construct) {
+        if (count < size_) {
+            destroy_range(data_ + count, data_ + size_);
+            size_ = count;
+            return;
+        }
+        if (count == size_) {
+            return;
+        }
+        ensure_extra_capacity(count - size_);
+        const size_type old_size = size_;
+        try {
+            while (size_ < count) {
+                construct(allocator_, data_ + size_);
+                ++size_;
+            }
+        } catch (...) {
+            destroy_range(data_ + old_size, data_ + size_);
+            size_ = old_size;
+            throw;
+        }
+    }
+
+    constexpr size_type recommended_capacity(size_type minimum) const {
+        const size_type maximum = max_size();
+        if (minimum > maximum) {
+            throw length_error("vector capacity exceeds max_size");
+        }
+        const size_type grown =
+            capacity_ > maximum - capacity_
+                ? maximum
+                : capacity_ * 2;
+        return grown < minimum ? minimum : grown;
+    }
+
+    template<class InputIterator>
+    constexpr void assign_move(InputIterator first, InputIterator last) {
+        clear();
+        for (; first != last; ++first) {
+            emplace_back(std::move(*first));
+        }
+    }
+};
+
+template<class Allocator>
+class vector<bool, Allocator> {
+    using byte_type = unsigned char;
+    using byte_allocator =
+        typename allocator_traits<Allocator>::template rebind_alloc<
+            byte_type>;
+    using storage_type = vector<byte_type, byte_allocator>;
+
+public:
+    using value_type = bool;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using const_reference = bool;
+
+    class reference {
+        friend class vector;
+
+    public:
+        constexpr reference(const reference&) noexcept = default;
+        constexpr ~reference() = default;
+
+        constexpr reference& operator=(bool value) noexcept {
+            *value_ = value ? 1 : 0;
+            return *this;
+        }
+
+        constexpr reference& operator=(
+            const reference& other) noexcept {
+            return *this = static_cast<bool>(other);
+        }
+
+        constexpr const reference& operator=(bool value) const noexcept {
+            *value_ = value ? 1 : 0;
+            return *this;
+        }
+
+        constexpr operator bool() const noexcept {
+            return *value_ != 0;
+        }
+
+        constexpr void flip() noexcept {
+            *value_ = *value_ == 0 ? 1 : 0;
+        }
+
+        friend constexpr void swap(
+            reference left, reference right) noexcept {
+            const bool temporary = left;
+            left = right;
+            right = temporary;
+        }
+
+        friend constexpr void swap(
+            reference left, bool& right) noexcept {
+            const bool temporary = left;
+            left = right;
+            right = temporary;
+        }
+
+        friend constexpr void swap(
+            bool& left, reference right) noexcept {
+            const bool temporary = left;
+            left = right;
+            right = temporary;
+        }
+
+    private:
+        byte_type* value_;
+
+        explicit constexpr reference(byte_type* value) noexcept
+            : value_(value) {}
+    };
+
+private:
+    template<bool Constant>
+    class __iterator {
+        template<bool>
+        friend class __iterator;
+        friend class vector;
+
+        using byte_pointer =
+            conditional_t<Constant, const byte_type*, byte_type*>;
+
+    public:
+        using iterator_category = random_access_iterator_tag;
+        using iterator_concept = random_access_iterator_tag;
+        using value_type = bool;
+        using difference_type = ptrdiff_t;
+        using pointer = void;
+        using reference =
+            conditional_t<Constant, bool, typename vector::reference>;
+
+        constexpr __iterator() noexcept : pointer_(nullptr) {}
+
+        template<bool Other>
+            requires (Constant && !Other)
+        constexpr __iterator(const __iterator<Other>& other) noexcept
+            : pointer_(other.pointer_) {}
+
+        _ADINKRA_NODISCARD constexpr reference
+        operator*() const noexcept {
+            if constexpr (Constant) {
+                return *pointer_ != 0;
+            } else {
+                return typename vector::reference(pointer_);
+            }
+        }
+
+        _ADINKRA_NODISCARD constexpr reference
+        operator[](difference_type index) const noexcept {
+            return *(*this + index);
+        }
+
+        constexpr __iterator& operator++() noexcept {
+            ++pointer_;
+            return *this;
+        }
+
+        constexpr __iterator operator++(int) noexcept {
+            __iterator result(*this);
+            ++*this;
+            return result;
+        }
+
+        constexpr __iterator& operator--() noexcept {
+            --pointer_;
+            return *this;
+        }
+
+        constexpr __iterator operator--(int) noexcept {
+            __iterator result(*this);
+            --*this;
+            return result;
+        }
+
+        constexpr __iterator& operator+=(
+            difference_type count) noexcept {
+            pointer_ += count;
+            return *this;
+        }
+
+        constexpr __iterator& operator-=(
+            difference_type count) noexcept {
+            pointer_ -= count;
+            return *this;
+        }
+
+        _ADINKRA_NODISCARD constexpr __iterator
+        operator+(difference_type count) const noexcept {
+            return __iterator(
+                count == 0 ? pointer_ : pointer_ + count);
+        }
+
+        _ADINKRA_NODISCARD constexpr __iterator
+        operator-(difference_type count) const noexcept {
+            return __iterator(
+                count == 0 ? pointer_ : pointer_ - count);
+        }
+
+        template<bool Other>
+        _ADINKRA_NODISCARD constexpr difference_type operator-(
+            const __iterator<Other>& other) const noexcept {
+            return pointer_ == other.pointer_
+                ? 0
+                : pointer_ - other.pointer_;
+        }
+
+        template<bool Other>
+        _ADINKRA_NODISCARD constexpr bool operator==(
+            const __iterator<Other>& other) const noexcept {
+            return pointer_ == other.pointer_;
+        }
+
+        template<bool Other>
+        _ADINKRA_NODISCARD constexpr auto operator<=>(
+            const __iterator<Other>& other) const noexcept {
+            return pointer_ <=> other.pointer_;
+        }
+
+        friend constexpr __iterator operator+(
+            difference_type count, __iterator iterator) noexcept {
+            return iterator + count;
+        }
+
+    private:
+        byte_pointer pointer_;
+
+        explicit constexpr __iterator(byte_pointer value) noexcept
+            : pointer_(value) {}
+
+        _ADINKRA_NODISCARD constexpr byte_pointer
+        base() const noexcept {
+            return pointer_;
+        }
+    };
+
+public:
+    using iterator = __iterator<false>;
+    using const_iterator = __iterator<true>;
+    using pointer = iterator;
+    using const_pointer = const_iterator;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator =
+        std::reverse_iterator<const_iterator>;
+
+    constexpr vector() noexcept(noexcept(Allocator()))
+        : vector(Allocator()) {}
+
+    constexpr explicit vector(
+        const Allocator& allocator_value) noexcept
+        : storage_(byte_allocator(allocator_value)) {}
+
+    constexpr explicit vector(
+        size_type count,
+        const Allocator& allocator_value = Allocator())
+        : storage_(count, byte_type{0},
+                   byte_allocator(allocator_value)) {}
+
+    constexpr vector(
+        size_type count, const bool& value,
+        const Allocator& allocator_value = Allocator())
+        : storage_(
+              count, value ? byte_type{1} : byte_type{0},
+              byte_allocator(allocator_value)) {}
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    constexpr vector(
+        InputIterator first, InputIterator last,
+        const Allocator& allocator_value = Allocator())
+        : vector(allocator_value) {
+        assign(first, last);
+    }
+
+    constexpr vector(
+        initializer_list<bool> values,
+        const Allocator& allocator_value = Allocator())
+        : vector(values.begin(), values.end(), allocator_value) {}
+
+    constexpr vector(const vector& other)
+        : vector(
+              allocator_traits<Allocator>::
+                  select_on_container_copy_construction(
+                      other.get_allocator())) {
+        assign(other.begin(), other.end());
+    }
+
+    constexpr vector(
+        const vector& other,
+        const Allocator& allocator_value)
+        : vector(allocator_value) {
+        assign(other.begin(), other.end());
+    }
+
+    constexpr vector(vector&&) noexcept = default;
+
+    constexpr vector(
+        vector&& other,
+        const Allocator& allocator_value)
+        : storage_(
+              std::move(other.storage_),
+              byte_allocator(allocator_value)) {}
+
+    constexpr ~vector() = default;
+
+    constexpr vector& operator=(const vector& other) {
+        if (this != std::addressof(other)) {
+            storage_ = other.storage_;
+        }
+        return *this;
+    }
+
+    constexpr vector& operator=(vector&&) noexcept(
+        allocator_traits<Allocator>::
+                propagate_on_container_move_assignment::value ||
+        allocator_traits<Allocator>::is_always_equal::value) = default;
+
+    constexpr vector& operator=(initializer_list<bool> values) {
+        assign(values.begin(), values.end());
+        return *this;
+    }
+
+    constexpr void assign(size_type count, const bool& value) {
+        storage_.assign(
+            count, value ? byte_type{1} : byte_type{0});
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    constexpr void assign(InputIterator first, InputIterator last) {
+        clear();
+        for (; first != last; ++first) {
+            push_back(static_cast<bool>(*first));
+        }
+    }
+
+    constexpr void assign(initializer_list<bool> values) {
+        assign(values.begin(), values.end());
+    }
+
+    _ADINKRA_NODISCARD constexpr allocator_type
+    get_allocator() const noexcept {
+        return allocator_type(storage_.get_allocator());
+    }
+
+    _ADINKRA_NODISCARD constexpr reference at(size_type position) {
+        check_index(position);
+        return reference(storage_.data() + position);
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reference
+    at(size_type position) const {
+        check_index(position);
+        return storage_[position] != 0;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](size_type position) noexcept {
+        return reference(storage_.data() + position);
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reference
+    operator[](size_type position) const noexcept {
+        return storage_[position] != 0;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference front() noexcept {
+        return (*this)[0];
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reference front() const noexcept {
+        return (*this)[0];
+    }
+
+    _ADINKRA_NODISCARD constexpr reference back() noexcept {
+        return (*this)[size() - 1];
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reference back() const noexcept {
+        return (*this)[size() - 1];
+    }
+
+    _ADINKRA_NODISCARD constexpr iterator begin() noexcept {
+        return iterator(storage_.data());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_iterator begin() const noexcept {
+        return const_iterator(storage_.data());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_iterator cbegin() const noexcept {
+        return begin();
+    }
+
+    _ADINKRA_NODISCARD constexpr iterator end() noexcept {
+        return iterator(
+            storage_.empty()
+                ? storage_.data()
+                : storage_.data() + storage_.size());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_iterator end() const noexcept {
+        return const_iterator(
+            storage_.empty()
+                ? storage_.data()
+                : storage_.data() + storage_.size());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_iterator cend() const noexcept {
+        return end();
+    }
+
+    _ADINKRA_NODISCARD constexpr reverse_iterator rbegin() noexcept {
+        return reverse_iterator(end());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    crbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+
+    _ADINKRA_NODISCARD constexpr reverse_iterator rend() noexcept {
+        return reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD constexpr const_reverse_iterator
+    crend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD constexpr bool empty() const noexcept {
+        return storage_.empty();
+    }
+
+    _ADINKRA_NODISCARD constexpr size_type size() const noexcept {
+        return storage_.size();
+    }
+
+    _ADINKRA_NODISCARD constexpr size_type capacity() const noexcept {
+        return storage_.capacity();
+    }
+
+    _ADINKRA_NODISCARD constexpr size_type max_size() const noexcept {
+        return storage_.max_size();
+    }
+
+    constexpr void reserve(size_type requested) {
+        storage_.reserve(requested);
+    }
+
+    constexpr void shrink_to_fit() {
+        storage_.shrink_to_fit();
+    }
+
+    constexpr void clear() noexcept {
+        storage_.clear();
+    }
+
+    constexpr iterator insert(
+        const_iterator position, const bool& value) {
+        const size_type offset = offset_of(position);
+        storage_.insert(
+            storage_.begin() + static_cast<difference_type>(offset),
+            value ? byte_type{1} : byte_type{0});
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    constexpr iterator insert(
+        const_iterator position, size_type count,
+        const bool& value) {
+        const size_type offset = offset_of(position);
+        storage_.insert(
+            storage_.begin() + static_cast<difference_type>(offset),
+            count, value ? byte_type{1} : byte_type{0});
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    constexpr iterator insert(
+        const_iterator position,
+        InputIterator first, InputIterator last) {
+        const size_type offset = offset_of(position);
+        size_type inserted = 0;
+        for (; first != last; ++first, ++inserted) {
+            insert(
+                begin() + static_cast<difference_type>(
+                              offset + inserted),
+                static_cast<bool>(*first));
+        }
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    constexpr iterator insert(
+        const_iterator position, initializer_list<bool> values) {
+        return insert(position, values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    constexpr iterator emplace(
+        const_iterator position, Arguments&&... arguments) {
+        const bool value(std::forward<Arguments>(arguments)...);
+        return insert(position, value);
+    }
+
+    constexpr iterator erase(const_iterator position) {
+        return erase(position, position + 1);
+    }
+
+    constexpr iterator erase(
+        const_iterator first, const_iterator last) {
+        const size_type offset = offset_of(first);
+        const size_type count =
+            static_cast<size_type>(last - first);
+        storage_.erase(
+            storage_.begin() + static_cast<difference_type>(offset),
+            storage_.begin() + static_cast<difference_type>(
+                                   offset + count));
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    constexpr void push_back(const bool& value) {
+        storage_.push_back(value ? byte_type{1} : byte_type{0});
+    }
+
+    template<class... Arguments>
+    constexpr reference emplace_back(Arguments&&... arguments) {
+        const bool value(std::forward<Arguments>(arguments)...);
+        push_back(value);
+        return back();
+    }
+
+    constexpr void pop_back() {
+        storage_.pop_back();
+    }
+
+    constexpr void resize(size_type count, bool value = false) {
+        storage_.resize(
+            count, value ? byte_type{1} : byte_type{0});
+    }
+
+    constexpr void swap(vector& other) noexcept(
+        allocator_traits<Allocator>::
+                propagate_on_container_swap::value ||
+        allocator_traits<Allocator>::is_always_equal::value) {
+        storage_.swap(other.storage_);
+    }
+
+    constexpr void flip() noexcept {
+        for (byte_type& value : storage_) {
+            value = value == 0 ? 1 : 0;
+        }
+    }
+
+private:
+    storage_type storage_;
+
+    _ADINKRA_NODISCARD constexpr size_type
+    offset_of(const_iterator position) const noexcept {
+        return position.base() == storage_.data()
+            ? 0
+            : static_cast<size_type>(
+                  position.base() - storage_.data());
+    }
+
+    constexpr void check_index(size_type position) const {
+        if (position >= size()) {
+            throw out_of_range("vector<bool>::at");
+        }
+    }
+};
+
+template<class Type, class Allocator>
+_ADINKRA_NODISCARD constexpr bool operator==(
+    const vector<Type, Allocator>& left,
+    const vector<Type, Allocator>& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin());
+}
+
+template<class Type, class Allocator>
+_ADINKRA_NODISCARD constexpr auto operator<=>(
+    const vector<Type, Allocator>& left,
+    const vector<Type, Allocator>& right) {
+    const auto compare = [](
+        const Type& left_value,
+        const Type& right_value) {
+        if constexpr (requires {
+                          left_value <=> right_value;
+                      }) {
+            return left_value <=> right_value;
+        } else {
+            return left_value < right_value
+                       ? weak_ordering::less
+                 : right_value < left_value
+                       ? weak_ordering::greater
+                       : weak_ordering::equivalent;
+        }
+    };
+    using Result = decltype(compare(
+        declval<const Type&>(), declval<const Type&>()));
+    auto left_iterator = left.begin();
+    auto right_iterator = right.begin();
+    while (left_iterator != left.end() &&
+           right_iterator != right.end()) {
+        if (auto result =
+                compare(*left_iterator, *right_iterator);
+            result != 0) {
+            return result;
+        }
+        ++left_iterator;
+        ++right_iterator;
+    }
+    return left.size() < right.size() ? Result::less
+         : left.size() > right.size() ? Result::greater
+                                      : Result::equivalent;
+}
+
+template<class Allocator>
+struct hash<vector<bool, Allocator>> {
+    using argument_type = vector<bool, Allocator>;
+    using result_type = size_t;
+
+    size_t operator()(
+        const vector<bool, Allocator>& value) const noexcept {
+        size_t result =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1469598103934665603ULL)
+                : static_cast<size_t>(2166136261U);
+        const size_t prime =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1099511628211ULL)
+                : static_cast<size_t>(16777619U);
+        for (bool bit : value) {
+            result ^= bit ? size_t(1) : size_t(0);
+            result *= prime;
+        }
+        return result;
+    }
+};
+
+template<class Type, class Allocator>
+constexpr void swap(
+    vector<Type, Allocator>& left, vector<Type, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Type, class Allocator, class Value>
+constexpr typename vector<Type, Allocator>::size_type erase(
+    vector<Type, Allocator>& values, const Value& value) {
+    const auto previous_size = values.size();
+    const auto new_end =
+        std::remove(values.begin(), values.end(), value);
+    values.erase(new_end, values.end());
+    return previous_size - values.size();
+}
+
+template<class Type, class Allocator, class Predicate>
+constexpr typename vector<Type, Allocator>::size_type erase_if(
+    vector<Type, Allocator>& values, Predicate predicate) {
+    const auto previous_size = values.size();
+    const auto new_end =
+        std::remove_if(values.begin(), values.end(), predicate);
+    values.erase(new_end, values.end());
+    return previous_size - values.size();
+}
+
+template<class InputIterator,
+         class Allocator = allocator<
+             typename iterator_traits<InputIterator>::value_type>>
+vector(InputIterator, InputIterator, Allocator = Allocator())
+    -> vector<typename iterator_traits<InputIterator>::value_type, Allocator>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

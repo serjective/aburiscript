@@ -1,0 +1,231 @@
+#ifndef ADINKRA_STREAMBUF
+#define ADINKRA_STREAMBUF
+
+#include <ios>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits>
+class basic_streambuf {
+public:
+    using char_type = Character;
+    using traits_type = Traits;
+    using int_type = typename Traits::int_type;
+    using pos_type = typename Traits::pos_type;
+    using off_type = typename Traits::off_type;
+
+    basic_streambuf() noexcept
+        : get_begin_(nullptr), get_current_(nullptr),
+          get_end_(nullptr), put_begin_(nullptr),
+          put_current_(nullptr), put_end_(nullptr) {}
+
+    virtual ~basic_streambuf() = default;
+
+    virtual int_type sgetc() {
+        if (get_current_ != nullptr && get_current_ < get_end_) {
+            return Traits::to_int_type(*get_current_);
+        }
+        return underflow();
+    }
+
+    virtual int_type sbumpc() {
+        if (get_current_ != nullptr && get_current_ < get_end_) {
+            return Traits::to_int_type(*get_current_++);
+        }
+        return uflow();
+    }
+
+    int_type snextc() {
+        const int_type value = sbumpc();
+        return Traits::eq_int_type(value, Traits::eof())
+                   ? Traits::eof()
+                   : sgetc();
+    }
+
+    streamsize in_avail() {
+        if (get_current_ != nullptr &&
+            get_current_ < get_end_) {
+            return get_end_ - get_current_;
+        }
+        return showmanyc();
+    }
+
+    virtual int_type sputbackc(Character value) {
+        if (get_current_ != nullptr &&
+            get_current_ > get_begin_ &&
+            Traits::eq(get_current_[-1], value)) {
+            --get_current_;
+            return Traits::to_int_type(*get_current_);
+        }
+        return pbackfail(Traits::to_int_type(value));
+    }
+
+    virtual streamsize sgetn(Character* destination, streamsize count) {
+        return xsgetn(destination, count);
+    }
+
+    virtual int_type sputc(Character value) {
+        if (put_current_ != nullptr && put_current_ < put_end_) {
+            *put_current_++ = value;
+            return Traits::to_int_type(value);
+        }
+        return overflow(Traits::to_int_type(value));
+    }
+
+    virtual streamsize sputn(
+        const Character* source, streamsize count) {
+        return xsputn(source, count);
+    }
+
+    virtual int pubsync() {
+        return sync();
+    }
+
+    virtual pos_type pubseekoff(
+        off_type offset, ios_base::seekdir direction,
+        ios_base::openmode mode = ios_base::in | ios_base::out) {
+        return seekoff(offset, direction, mode);
+    }
+
+    virtual pos_type pubseekpos(
+        pos_type position,
+        ios_base::openmode mode = ios_base::in | ios_base::out) {
+        return seekpos(position, mode);
+    }
+
+    basic_streambuf* pubsetbuf(
+        Character* buffer, streamsize count) {
+        return setbuf(buffer, count);
+    }
+
+protected:
+    Character* eback() const noexcept {
+        return get_begin_;
+    }
+
+    Character* gptr() const noexcept {
+        return get_current_;
+    }
+
+    Character* egptr() const noexcept {
+        return get_end_;
+    }
+
+    void gbump(int count) noexcept {
+        get_current_ += count;
+    }
+
+    void setg(
+        Character* begin, Character* current,
+        Character* end) noexcept {
+        get_begin_ = begin;
+        get_current_ = current;
+        get_end_ = end;
+    }
+
+    Character* pbase() const noexcept {
+        return put_begin_;
+    }
+
+    Character* pptr() const noexcept {
+        return put_current_;
+    }
+
+    Character* epptr() const noexcept {
+        return put_end_;
+    }
+
+    void pbump(int count) noexcept {
+        put_current_ += count;
+    }
+
+    void setp(Character* begin, Character* end) noexcept {
+        put_begin_ = begin;
+        put_current_ = begin;
+        put_end_ = end;
+    }
+
+    virtual int_type underflow() {
+        return Traits::eof();
+    }
+
+    virtual int_type uflow() {
+        const int_type value = underflow();
+        if (!Traits::eq_int_type(value, Traits::eof()) &&
+            get_current_ != nullptr && get_current_ < get_end_) {
+            ++get_current_;
+        }
+        return value;
+    }
+
+    virtual int_type pbackfail(
+        int_type = Traits::eof()) {
+        return Traits::eof();
+    }
+
+    virtual streamsize xsgetn(
+        Character* destination, streamsize count) {
+        streamsize read = 0;
+        while (read < count) {
+            const int_type value = sbumpc();
+            if (Traits::eq_int_type(value, Traits::eof())) {
+                break;
+            }
+            destination[read++] = Traits::to_char_type(value);
+        }
+        return read;
+    }
+
+    virtual streamsize showmanyc() {
+        return 0;
+    }
+
+    virtual int_type overflow(
+        int_type = Traits::eof()) {
+        return Traits::eof();
+    }
+
+    virtual streamsize xsputn(
+        const Character* source, streamsize count) {
+        streamsize written = 0;
+        while (written < count &&
+               !Traits::eq_int_type(
+                   sputc(source[written]),
+                   Traits::eof())) {
+            ++written;
+        }
+        return written;
+    }
+
+    virtual int sync() {
+        return 0;
+    }
+
+    virtual basic_streambuf* setbuf(
+        Character*, streamsize) {
+        return this;
+    }
+
+    virtual pos_type seekoff(
+        off_type, ios_base::seekdir, ios_base::openmode) {
+        return pos_type(-1);
+    }
+
+    virtual pos_type seekpos(
+        pos_type position, ios_base::openmode mode) {
+        return seekoff(
+            static_cast<off_type>(position), ios_base::beg, mode);
+    }
+
+private:
+    Character* get_begin_;
+    Character* get_current_;
+    Character* get_end_;
+    Character* put_begin_;
+    Character* put_current_;
+    Character* put_end_;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

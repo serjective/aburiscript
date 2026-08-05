@@ -1,0 +1,927 @@
+#ifndef ADINKRA_RANDOM
+#define ADINKRA_RANDOM
+
+#include <__adinkra/config>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <initializer_list>
+#include <limits>
+#include <new>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class random_device {
+public:
+    using result_type = uint32_t;
+
+    random_device() = default;
+
+    explicit random_device(const char*) {}
+
+    static constexpr result_type min() {
+        return (numeric_limits<result_type>::min)();
+    }
+
+    static constexpr result_type max() {
+        return (numeric_limits<result_type>::max)();
+    }
+
+    double entropy() const noexcept {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+        return 32.0;
+#else
+        return 0.0;
+#endif
+    }
+
+    result_type operator()() {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+        return ::arc4random();
+#else
+        const result_type high =
+            static_cast<result_type>(::rand());
+        const result_type low =
+            static_cast<result_type>(::rand());
+        return (high << 16U) ^ low;
+#endif
+    }
+};
+
+class seed_seq {
+public:
+    using result_type = uint32_t;
+
+    seed_seq() noexcept = default;
+
+    template<class InputIterator>
+    seed_seq(InputIterator first, InputIterator last) {
+        while (first != last) {
+            append(static_cast<result_type>(*first++));
+        }
+    }
+
+    template<class Type>
+    seed_seq(initializer_list<Type> values)
+        : seed_seq(values.begin(), values.end()) {}
+
+    ~seed_seq() {
+        ::free(values_);
+    }
+
+    seed_seq(const seed_seq&) = delete;
+    seed_seq& operator=(const seed_seq&) = delete;
+
+    template<class RandomAccessIterator>
+    void generate(
+        RandomAccessIterator first,
+        RandomAccessIterator last) {
+        const size_t output_size =
+            static_cast<size_t>(last - first);
+        if (output_size == 0) {
+            return;
+        }
+
+        for (RandomAccessIterator current = first;
+             current != last; ++current) {
+            *current = static_cast<result_type>(0x8b8b8b8bU);
+        }
+
+        const size_t mix_distance =
+            output_size >= 623 ? 11
+            : output_size >= 68 ? 7
+            : output_size >= 39 ? 5
+            : output_size >= 7 ? 3
+                               : (output_size - 1) / 2;
+        const size_t first_offset =
+            (output_size - mix_distance) / 2;
+        const size_t second_offset =
+            first_offset + mix_distance;
+        const size_t mix_count =
+            size_ + 1 > output_size ? size_ + 1 : output_size;
+
+        for (size_t index = 0; index < mix_count; ++index) {
+            const size_t previous =
+                index == 0 ? output_size - 1
+                           : (index - 1) % output_size;
+            result_type mixed = static_cast<result_type>(
+                first[index % output_size] ^
+                first[(index + first_offset) % output_size] ^
+                first[previous]);
+            mixed ^= mixed >> 27U;
+            const result_type first_result =
+                static_cast<result_type>(1664525U * mixed);
+
+            result_type second_result = first_result;
+            if (index == 0) {
+                second_result += static_cast<result_type>(size_);
+            } else {
+                second_result +=
+                    static_cast<result_type>(index % output_size);
+                if (index <= size_) {
+                    second_result += values_[index - 1];
+                }
+            }
+
+            first[(index + first_offset) % output_size] +=
+                first_result;
+            first[(index + second_offset) % output_size] +=
+                second_result;
+            first[index % output_size] = second_result;
+        }
+
+        for (size_t index = mix_count;
+             index < mix_count + output_size; ++index) {
+            const size_t previous = (index - 1) % output_size;
+            result_type mixed = static_cast<result_type>(
+                first[index % output_size] +
+                first[(index + first_offset) % output_size] +
+                first[previous]);
+            mixed ^= mixed >> 27U;
+            const result_type first_result =
+                static_cast<result_type>(1566083941U * mixed);
+            const result_type second_result =
+                first_result -
+                static_cast<result_type>(index % output_size);
+
+            first[(index + first_offset) % output_size] ^=
+                first_result;
+            first[(index + second_offset) % output_size] ^=
+                second_result;
+            first[index % output_size] = second_result;
+        }
+    }
+
+    size_t size() const noexcept {
+        return size_;
+    }
+
+    template<class OutputIterator>
+    void param(OutputIterator output) const {
+        for (size_t index = 0; index < size_; ++index) {
+            *output++ = values_[index];
+        }
+    }
+
+private:
+    result_type* values_ = nullptr;
+    size_t size_ = 0;
+    size_t capacity_ = 0;
+
+    void append(result_type value) {
+        if (size_ == capacity_) {
+            const size_t next_capacity =
+                capacity_ == 0 ? 8 : capacity_ * 2;
+            void* allocation = ::realloc(
+                values_, next_capacity * sizeof(result_type));
+            if (allocation == nullptr) {
+                ::free(values_);
+                values_ = nullptr;
+                size_ = 0;
+                capacity_ = 0;
+                throw bad_alloc();
+            }
+            values_ = static_cast<result_type*>(allocation);
+            capacity_ = next_capacity;
+        }
+        values_[size_++] = value;
+    }
+};
+
+template<class UIntType, UIntType Multiplier, UIntType Increment,
+         UIntType Modulus>
+class linear_congruential_engine {
+    static_assert(is_unsigned_v<UIntType>);
+
+public:
+    using result_type = UIntType;
+
+    static constexpr result_type multiplier = Multiplier;
+    static constexpr result_type increment = Increment;
+    static constexpr result_type modulus = Modulus;
+    static constexpr result_type default_seed = 1U;
+
+    explicit constexpr linear_congruential_engine(
+        result_type seed_value = default_seed) {
+        seed(seed_value);
+    }
+
+    template<class SeedSequence>
+        requires (!is_convertible_v<SeedSequence&, result_type>)
+    explicit linear_congruential_engine(SeedSequence& sequence) {
+        seed(sequence);
+    }
+
+    constexpr void seed(result_type seed_value = default_seed) {
+        if constexpr (modulus != 0) {
+            state_ = seed_value % modulus;
+        } else {
+            state_ = seed_value;
+        }
+        if constexpr (increment == 0) {
+            if (state_ == 0) {
+                state_ = 1;
+            }
+        }
+    }
+
+    template<class SeedSequence>
+        requires (!is_convertible_v<SeedSequence&, result_type>)
+    void seed(SeedSequence& sequence) {
+        constexpr size_t word_count =
+            (numeric_limits<result_type>::digits + 31U) / 32U;
+        uint32_t generated[word_count + 3]{};
+        sequence.generate(
+            generated, generated + word_count + 3);
+        unsigned __int128 seed_value = 0;
+        for (size_t index = 0; index < word_count; ++index) {
+            seed_value |=
+                static_cast<unsigned __int128>(
+                    generated[index + 3])
+                << (index * 32U);
+        }
+        seed(static_cast<result_type>(seed_value));
+    }
+
+    static constexpr result_type min() {
+        return increment == 0 ? result_type(1) : result_type(0);
+    }
+
+    static constexpr result_type max() {
+        return modulus == 0
+            ? (numeric_limits<result_type>::max)()
+            : static_cast<result_type>(modulus - 1);
+    }
+
+    constexpr result_type operator()() {
+        if constexpr (modulus == 0) {
+            state_ = static_cast<result_type>(
+                multiplier * state_ + increment);
+        } else {
+            state_ = static_cast<result_type>(
+                (static_cast<unsigned __int128>(multiplier) *
+                     state_ +
+                 increment) %
+                modulus);
+        }
+        return state_;
+    }
+
+    constexpr void discard(unsigned long long count) {
+        while (count-- != 0) {
+            (void)(*this)();
+        }
+    }
+
+    friend constexpr bool operator==(
+        const linear_congruential_engine&,
+        const linear_congruential_engine&) = default;
+
+private:
+    result_type state_ = default_seed;
+};
+
+using minstd_rand0 =
+    linear_congruential_engine<uint_fast32_t, 16807, 0, 2147483647>;
+using minstd_rand =
+    linear_congruential_engine<uint_fast32_t, 48271, 0, 2147483647>;
+
+class mt19937 {
+public:
+    using result_type = uint32_t;
+
+    static constexpr result_type default_seed = 5489U;
+
+    explicit mt19937(result_type seed_value = default_seed) {
+        seed(seed_value);
+    }
+
+    template<class SeedSequence>
+        requires (!is_convertible_v<SeedSequence&, result_type>)
+    explicit mt19937(SeedSequence& sequence) {
+        seed(sequence);
+    }
+
+    void seed(result_type seed_value = default_seed) {
+        state_[0] = seed_value;
+        for (size_t index = 1; index < state_size; ++index) {
+            state_[index] =
+                1812433253U *
+                    (state_[index - 1] ^
+                     (state_[index - 1] >> 30U)) +
+                static_cast<result_type>(index);
+        }
+        index_ = state_size;
+    }
+
+    template<class SeedSequence>
+        requires (!is_convertible_v<SeedSequence&, result_type>)
+    void seed(SeedSequence& sequence) {
+        uint32_t generated[state_size];
+        sequence.generate(
+            generated, generated + state_size);
+        bool all_zero = true;
+        for (size_t index = 0; index < state_size; ++index) {
+            state_[index] = generated[index];
+            all_zero = all_zero && state_[index] == 0;
+        }
+        if (all_zero) {
+            state_[0] = 0x80000000U;
+        }
+        index_ = state_size;
+    }
+
+    static constexpr result_type min() {
+        return 0U;
+    }
+
+    static constexpr result_type max() {
+        return 0xffffffffU;
+    }
+
+    result_type operator()() {
+        if (index_ >= state_size) {
+            twist();
+        }
+
+        result_type value = state_[index_++];
+        value ^= value >> 11U;
+        value ^= (value << 7U) & 0x9d2c5680U;
+        value ^= (value << 15U) & 0xefc60000U;
+        value ^= value >> 18U;
+        return value;
+    }
+
+    void discard(unsigned long long count) {
+        while (count-- != 0) {
+            (void)(*this)();
+        }
+    }
+
+private:
+    static constexpr size_t state_size = 624;
+    static constexpr size_t shift_size = 397;
+    result_type state_[state_size]{};
+    size_t index_ = state_size;
+
+    void twist() {
+        for (size_t index = 0; index < state_size; ++index) {
+            const result_type combined =
+                (state_[index] & 0x80000000U) |
+                (state_[(index + 1) % state_size] & 0x7fffffffU);
+            result_type shifted = combined >> 1U;
+            if ((combined & 1U) != 0U) {
+                shifted ^= 0x9908b0dfU;
+            }
+            state_[index] =
+                state_[(index + shift_size) % state_size] ^ shifted;
+        }
+        index_ = 0;
+    }
+};
+
+class mt19937_64 {
+public:
+    using result_type = uint64_t;
+
+    static constexpr result_type default_seed = 5489U;
+
+    explicit mt19937_64(result_type seed_value = default_seed) {
+        seed(seed_value);
+    }
+
+    template<class SeedSequence>
+        requires (!is_convertible_v<SeedSequence&, result_type>)
+    explicit mt19937_64(SeedSequence& sequence) {
+        seed(sequence);
+    }
+
+    void seed(result_type seed_value = default_seed) {
+        state_[0] = seed_value;
+        for (size_t index = 1; index < state_size; ++index) {
+            state_[index] =
+                6364136223846793005ULL *
+                    (state_[index - 1] ^
+                     (state_[index - 1] >> 62U)) +
+                static_cast<result_type>(index);
+        }
+        index_ = state_size;
+    }
+
+    template<class SeedSequence>
+        requires (!is_convertible_v<SeedSequence&, result_type>)
+    void seed(SeedSequence& sequence) {
+        uint32_t generated[state_size * 2];
+        sequence.generate(
+            generated, generated + state_size * 2);
+        bool all_zero = true;
+        for (size_t index = 0; index < state_size; ++index) {
+            state_[index] =
+                static_cast<result_type>(generated[index * 2]) |
+                (static_cast<result_type>(
+                     generated[index * 2 + 1]) << 32U);
+            all_zero = all_zero && state_[index] == 0;
+        }
+        if (all_zero) {
+            state_[0] = 0x8000000000000000ULL;
+        }
+        index_ = state_size;
+    }
+
+    static constexpr result_type min() {
+        return 0;
+    }
+
+    static constexpr result_type max() {
+        return 0xffffffffffffffffULL;
+    }
+
+    result_type operator()() {
+        if (index_ >= state_size) {
+            twist();
+        }
+
+        result_type value = state_[index_++];
+        value ^= (value >> 29U) & 0x5555555555555555ULL;
+        value ^= (value << 17U) & 0x71d67fffeda60000ULL;
+        value ^= (value << 37U) & 0xfff7eee000000000ULL;
+        value ^= value >> 43U;
+        return value;
+    }
+
+    void discard(unsigned long long count) {
+        while (count-- != 0) {
+            (void)(*this)();
+        }
+    }
+
+private:
+    static constexpr size_t state_size = 312;
+    static constexpr size_t shift_size = 156;
+    static constexpr result_type lower_mask =
+        (result_type(1) << 31U) - 1U;
+    static constexpr result_type upper_mask = ~lower_mask;
+
+    result_type state_[state_size]{};
+    size_t index_ = state_size;
+
+    void twist() {
+        for (size_t index = 0; index < state_size; ++index) {
+            const result_type combined =
+                (state_[index] & upper_mask) |
+                (state_[(index + 1) % state_size] & lower_mask);
+            result_type shifted = combined >> 1U;
+            if ((combined & 1U) != 0U) {
+                shifted ^= 0xb5026f5aa96619e9ULL;
+            }
+            state_[index] =
+                state_[(index + shift_size) % state_size] ^ shifted;
+        }
+        index_ = 0;
+    }
+};
+
+using default_random_engine = mt19937;
+
+class bernoulli_distribution {
+public:
+    using result_type = bool;
+
+    class param_type {
+    public:
+        using distribution_type = bernoulli_distribution;
+
+        explicit param_type(double probability = 0.5)
+            : probability_(probability) {}
+
+        double p() const {
+            return probability_;
+        }
+
+        friend bool operator==(
+            const param_type&, const param_type&) = default;
+
+    private:
+        double probability_;
+    };
+
+    bernoulli_distribution()
+        : bernoulli_distribution(0.5) {}
+
+    explicit bernoulli_distribution(double probability)
+        : parameters_(probability) {}
+
+    explicit bernoulli_distribution(const param_type& parameters)
+        : parameters_(parameters) {}
+
+    void reset() {}
+
+    template<class Generator>
+    result_type operator()(Generator& generator) {
+        return (*this)(generator, parameters_);
+    }
+
+    template<class Generator>
+    result_type operator()(
+        Generator& generator, const param_type& parameters) {
+        if (parameters.p() <= 0.0) {
+            return false;
+        }
+        if (parameters.p() >= 1.0) {
+            return true;
+        }
+        const long double generator_min =
+            static_cast<long double>((Generator::min)());
+        const long double generator_range =
+            static_cast<long double>((Generator::max)()) -
+            generator_min + 1.0L;
+        const long double unit =
+            (static_cast<long double>(generator()) -
+             generator_min) /
+            generator_range;
+        return unit < static_cast<long double>(parameters.p());
+    }
+
+    double p() const {
+        return parameters_.p();
+    }
+
+    param_type param() const {
+        return parameters_;
+    }
+
+    void param(const param_type& parameters) {
+        parameters_ = parameters;
+    }
+
+    static constexpr result_type min() {
+        return false;
+    }
+
+    static constexpr result_type max() {
+        return true;
+    }
+
+    friend bool operator==(
+        const bernoulli_distribution&,
+        const bernoulli_distribution&) = default;
+
+private:
+    param_type parameters_;
+};
+
+template<class IntegerType = int>
+class uniform_int_distribution {
+    static_assert(is_integral_v<IntegerType>);
+
+public:
+    using result_type = IntegerType;
+
+    class param_type {
+    public:
+        using distribution_type = uniform_int_distribution;
+
+        explicit param_type(
+            result_type lower = result_type(0),
+            result_type upper =
+                (numeric_limits<result_type>::max)())
+            : lower_(lower), upper_(upper) {}
+
+        result_type a() const {
+            return lower_;
+        }
+
+        result_type b() const {
+            return upper_;
+        }
+
+    private:
+        result_type lower_;
+        result_type upper_;
+    };
+
+    uniform_int_distribution()
+        : uniform_int_distribution(
+              result_type(0),
+              (numeric_limits<result_type>::max)()) {}
+
+    explicit uniform_int_distribution(
+        result_type lower,
+        result_type upper =
+            (numeric_limits<result_type>::max)())
+        : parameters_(lower, upper) {}
+
+    explicit uniform_int_distribution(const param_type& parameters)
+        : parameters_(parameters) {}
+
+    void reset() {}
+
+    template<class Generator>
+    result_type operator()(Generator& generator) {
+        return (*this)(generator, parameters_);
+    }
+
+    template<class Generator>
+    result_type operator()(
+        Generator& generator,
+        const param_type& parameters) {
+        using result_unsigned = make_unsigned_t<result_type>;
+        using generator_result = typename Generator::result_type;
+        using generator_unsigned =
+            make_unsigned_t<generator_result>;
+        using wide_type = unsigned __int128;
+
+        const result_unsigned lower =
+            static_cast<result_unsigned>(parameters.a());
+        const result_unsigned upper =
+            static_cast<result_unsigned>(parameters.b());
+        const wide_type width =
+            static_cast<wide_type>(
+                static_cast<result_unsigned>(upper - lower)) +
+            1U;
+
+        const generator_unsigned generator_min =
+            static_cast<generator_unsigned>((Generator::min)());
+        const generator_unsigned generator_max =
+            static_cast<generator_unsigned>((Generator::max)());
+        const wide_type generator_width =
+            static_cast<wide_type>(
+                static_cast<generator_unsigned>(
+                    generator_max - generator_min)) +
+            1U;
+
+        const auto draw = [&]() -> wide_type {
+            return static_cast<wide_type>(
+                static_cast<generator_unsigned>(
+                    static_cast<generator_unsigned>(generator()) -
+                    generator_min));
+        };
+
+        wide_type sample = 0;
+        wide_type sample_width = generator_width;
+        do {
+            sample = draw();
+            sample_width = generator_width;
+            while (sample_width < width) {
+                sample =
+                    sample * generator_width + draw();
+                sample_width *= generator_width;
+            }
+        } while (
+            sample >=
+            sample_width - sample_width % width);
+
+        const result_unsigned result =
+            static_cast<result_unsigned>(
+                lower +
+                static_cast<result_unsigned>(sample % width));
+        return static_cast<result_type>(result);
+    }
+
+    result_type a() const {
+        return parameters_.a();
+    }
+
+    result_type b() const {
+        return parameters_.b();
+    }
+
+    param_type param() const {
+        return parameters_;
+    }
+
+    void param(const param_type& parameters) {
+        parameters_ = parameters;
+    }
+
+    result_type min() const {
+        return a();
+    }
+
+    result_type max() const {
+        return b();
+    }
+
+private:
+    param_type parameters_;
+};
+
+template<class RealType = double>
+class uniform_real_distribution {
+public:
+    using result_type = RealType;
+
+    class param_type {
+    public:
+        using distribution_type = uniform_real_distribution;
+
+        explicit param_type(
+            result_type lower = result_type(0),
+            result_type upper = result_type(1))
+            : lower_(lower), upper_(upper) {}
+
+        result_type a() const {
+            return lower_;
+        }
+
+        result_type b() const {
+            return upper_;
+        }
+
+    private:
+        result_type lower_;
+        result_type upper_;
+    };
+
+    uniform_real_distribution()
+        : uniform_real_distribution(result_type(0), result_type(1)) {}
+
+    explicit uniform_real_distribution(
+        result_type lower,
+        result_type upper = result_type(1))
+        : parameters_(lower, upper) {}
+
+    explicit uniform_real_distribution(const param_type& parameters)
+        : parameters_(parameters) {}
+
+    void reset() {}
+
+    template<class Generator>
+    result_type operator()(Generator& generator) {
+        return (*this)(generator, parameters_);
+    }
+
+    template<class Generator>
+    result_type operator()(
+        Generator& generator,
+        const param_type& parameters) {
+        const long double generator_min =
+            static_cast<long double>((Generator::min)());
+        const long double generator_range =
+            static_cast<long double>((Generator::max)()) -
+            generator_min + 1.0L;
+        const long double unit =
+            (static_cast<long double>(generator()) - generator_min) /
+            generator_range;
+        return static_cast<result_type>(
+            static_cast<long double>(parameters.a()) +
+            unit *
+                (static_cast<long double>(parameters.b()) -
+                 static_cast<long double>(parameters.a())));
+    }
+
+    result_type a() const {
+        return parameters_.a();
+    }
+
+    result_type b() const {
+        return parameters_.b();
+    }
+
+    param_type param() const {
+        return parameters_;
+    }
+
+    void param(const param_type& parameters) {
+        parameters_ = parameters;
+    }
+
+    result_type min() const {
+        return a();
+    }
+
+    result_type max() const {
+        return b();
+    }
+
+private:
+    param_type parameters_;
+};
+
+template<class RealType = double>
+class normal_distribution {
+    static_assert(is_floating_point_v<RealType>);
+
+public:
+    using result_type = RealType;
+
+    class param_type {
+    public:
+        using distribution_type = normal_distribution;
+
+        explicit param_type(
+            result_type mean = result_type(0),
+            result_type standard_deviation = result_type(1))
+            : mean_(mean),
+              standard_deviation_(standard_deviation) {}
+
+        result_type mean() const {
+            return mean_;
+        }
+
+        result_type stddev() const {
+            return standard_deviation_;
+        }
+
+        friend bool operator==(
+            const param_type&, const param_type&) = default;
+
+    private:
+        result_type mean_;
+        result_type standard_deviation_;
+    };
+
+    normal_distribution()
+        : normal_distribution(result_type(0), result_type(1)) {}
+
+    explicit normal_distribution(
+        result_type mean,
+        result_type standard_deviation = result_type(1))
+        : parameters_(mean, standard_deviation),
+          spare_(0),
+          has_spare_(false) {}
+
+    explicit normal_distribution(const param_type& parameters)
+        : parameters_(parameters),
+          spare_(0),
+          has_spare_(false) {}
+
+    void reset() {
+        has_spare_ = false;
+    }
+
+    template<class Generator>
+    result_type operator()(Generator& generator) {
+        return (*this)(generator, parameters_);
+    }
+
+    template<class Generator>
+    result_type operator()(
+        Generator& generator, const param_type& parameters) {
+        result_type standard_value;
+        if (has_spare_) {
+            standard_value = spare_;
+            has_spare_ = false;
+        } else {
+            uniform_real_distribution<result_type> uniform(
+                result_type(0), result_type(1));
+            result_type left;
+            result_type right;
+            result_type radius_squared;
+            do {
+                left = result_type(2) * uniform(generator) -
+                    result_type(1);
+                right = result_type(2) * uniform(generator) -
+                    result_type(1);
+                radius_squared = left * left + right * right;
+            } while (
+                radius_squared <= result_type(0) ||
+                radius_squared >= result_type(1));
+
+            const result_type multiplier = std::sqrt(
+                result_type(-2) * std::log(radius_squared) /
+                radius_squared);
+            standard_value = left * multiplier;
+            spare_ = right * multiplier;
+            has_spare_ = true;
+        }
+        return parameters.mean() +
+            parameters.stddev() * standard_value;
+    }
+
+    result_type mean() const {
+        return parameters_.mean();
+    }
+
+    result_type stddev() const {
+        return parameters_.stddev();
+    }
+
+    param_type param() const {
+        return parameters_;
+    }
+
+    void param(const param_type& parameters) {
+        parameters_ = parameters;
+    }
+
+    static constexpr result_type min() {
+        return (numeric_limits<result_type>::lowest)();
+    }
+
+    static constexpr result_type max() {
+        return (numeric_limits<result_type>::max)();
+    }
+
+private:
+    param_type parameters_;
+    result_type spare_;
+    bool has_spare_;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

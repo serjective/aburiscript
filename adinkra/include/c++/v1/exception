@@ -1,0 +1,90 @@
+#ifndef ADINKRA_EXCEPTION
+#define ADINKRA_EXCEPTION
+
+#include <__adinkra/config>
+#include <cstdio>
+#include <cstdlib>
+
+#ifndef __cpp_lib_uncaught_exceptions
+#define __cpp_lib_uncaught_exceptions 201411L
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+
+class _ADINKRA_EXPORT exception {
+public:
+    exception() noexcept = default;
+    exception(const exception&) noexcept = default;
+    exception& operator=(const exception&) noexcept = default;
+    virtual ~exception() noexcept;
+    virtual const char* what() const noexcept;
+};
+
+class _ADINKRA_EXPORT bad_exception : public exception {
+public:
+    bad_exception() noexcept = default;
+    bad_exception(const bad_exception&) noexcept = default;
+    bad_exception& operator=(const bad_exception&) noexcept = default;
+    ~bad_exception() noexcept override;
+    const char* what() const noexcept override;
+};
+
+class exception_ptr;
+_ADINKRA_EXPORT exception_ptr current_exception() noexcept;
+[[noreturn]] _ADINKRA_EXPORT
+void rethrow_exception(exception_ptr value);
+
+class _ADINKRA_EXPORT exception_ptr {
+public:
+    exception_ptr() noexcept = default;
+    exception_ptr(decltype(nullptr)) noexcept {}
+    exception_ptr(const exception_ptr& other) noexcept;
+    exception_ptr& operator=(const exception_ptr& other) noexcept;
+    ~exception_ptr() noexcept;
+
+    explicit operator bool() const noexcept {
+        return pointer_ != nullptr;
+    }
+
+    friend bool operator==(
+        const exception_ptr& left,
+        const exception_ptr& right) noexcept {
+        return left.pointer_ == right.pointer_;
+    }
+
+    friend bool operator!=(
+        const exception_ptr& left,
+        const exception_ptr& right) noexcept {
+        return !(left == right);
+    }
+
+private:
+    explicit exception_ptr(void* pointer) noexcept
+        : pointer_(pointer) {}
+
+    void* pointer_ = nullptr;
+
+    friend exception_ptr current_exception() noexcept;
+    friend void rethrow_exception(exception_ptr);
+};
+
+template<class Exception>
+exception_ptr make_exception_ptr(Exception value) noexcept {
+    try {
+        throw value;
+    } catch (...) {
+        return current_exception();
+    }
+}
+
+using terminate_handler = void (*)();
+
+_ADINKRA_EXPORT terminate_handler
+set_terminate(terminate_handler handler) noexcept;
+_ADINKRA_EXPORT terminate_handler get_terminate() noexcept;
+_ADINKRA_NORETURN _ADINKRA_EXPORT void terminate() noexcept;
+_ADINKRA_EXPORT int uncaught_exceptions() noexcept;
+
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+#endif

@@ -1,4 +1,4 @@
-// MacOS only
+
 extern int puts(const char *);
 
 int main(void) {

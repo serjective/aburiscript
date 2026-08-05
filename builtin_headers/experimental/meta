@@ -1,0 +1,124 @@
+#ifndef _ABURI_EXPERIMENTAL_META
+#define _ABURI_EXPERIMENTAL_META
+
+#ifndef __cpp_impl_reflection
+#error "<experimental/meta> requires reflection (-std=c++26 or -freflection)"
+#endif
+
+namespace std {
+namespace meta {
+
+using info = decltype(^^::);
+
+class string_view {
+    const char* data_;
+    unsigned long size_;
+
+public:
+    constexpr string_view() : data_(nullptr), size_(0) {}
+    constexpr string_view(const char* data, unsigned long size)
+        : data_(data), size_(size) {}
+    constexpr string_view(const char* text) : data_(text), size_(0) {
+        while (text && text[size_] != '\0') {
+            size_ += 1;
+        }
+    }
+
+    constexpr const char* data() const { return data_; }
+    constexpr unsigned long size() const { return size_; }
+    constexpr bool empty() const { return size_ == 0; }
+    constexpr char operator[](unsigned long index) const {
+        return data_[index];
+    }
+};
+
+constexpr bool operator==(string_view left, string_view right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (unsigned long index = 0; index < left.size(); ++index) {
+        if (left.data()[index] != right.data()[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+constexpr bool operator!=(string_view left, string_view right) {
+    return !(left == right);
+}
+
+constexpr bool operator==(string_view left, const char* right) {
+    return left == string_view(right);
+}
+
+constexpr bool operator==(const char* left, string_view right) {
+    return string_view(left) == right;
+}
+
+constexpr bool operator!=(string_view left, const char* right) {
+    return !(left == string_view(right));
+}
+
+constexpr bool operator!=(const char* left, string_view right) {
+    return !(string_view(left) == right);
+}
+
+class vector {
+    info* data_;
+    unsigned long size_;
+    unsigned long capacity_;
+
+public:
+    constexpr vector() : data_(nullptr), size_(0), capacity_(0) {}
+
+    consteval vector(const vector& other)
+        : data_(nullptr), size_(0), capacity_(0) {
+        for (unsigned long index = 0; index < other.size_; ++index) {
+            push_back(other.data_[index]);
+        }
+    }
+
+    constexpr ~vector() {
+        if (data_) {
+            __builtin_operator_delete(data_);
+        }
+    }
+
+    consteval void push_back(info reflection) {
+        if (size_ == capacity_) {
+            unsigned long next = capacity_ == 0 ? 4 : capacity_ * 2;
+            info* replacement = static_cast<info*>(
+                __builtin_operator_new(next * sizeof(info)));
+            for (unsigned long index = 0; index < size_; ++index) {
+                replacement[index] = data_[index];
+            }
+            if (data_) {
+                __builtin_operator_delete(data_);
+            }
+            data_ = replacement;
+            capacity_ = next;
+        }
+        data_[size_] = reflection;
+        size_ += 1;
+    }
+
+    constexpr unsigned long size() const { return size_; }
+    constexpr bool empty() const { return size_ == 0; }
+    consteval const info* data() const { return data_; }
+    consteval info operator[](unsigned long index) const {
+        return data_[index];
+    }
+    consteval info at(unsigned long index) const { return data_[index]; }
+    consteval const info* begin() const { return data_; }
+    consteval const info* end() const { return data_ + size_; }
+};
+
+} // namespace meta
+} // namespace std
+
+#define _ABURI_META_STRING_VIEW_TYPE ::std::meta::string_view
+#define _ABURI_META_VECTOR_TYPE ::std::meta::vector
+#include <__aburi/meta_core>
+
+#endif // _ABURI_EXPERIMENTAL_META

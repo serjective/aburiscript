@@ -1,0 +1,178 @@
+#ifndef ADINKRA_CONDITION_VARIABLE
+#define ADINKRA_CONDITION_VARIABLE
+
+#include <__adinkra/config>
+#include <cerrno>
+#include <chrono>
+#include <ctime>
+#include <mutex>
+#include <pthread.h>
+#include <system_error>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+enum class cv_status {
+    no_timeout,
+    timeout
+};
+
+class condition_variable {
+public:
+    using native_handle_type = pthread_cond_t*;
+
+    condition_variable() {
+        const int result = ::pthread_cond_init(&value_, nullptr);
+        if (result != 0) {
+            throw system_error(result, generic_category(),
+                               "pthread_cond_init");
+        }
+    }
+
+    ~condition_variable() {
+        (void)::pthread_cond_destroy(&value_);
+    }
+
+    condition_variable(const condition_variable&) = delete;
+    condition_variable& operator=(const condition_variable&) = delete;
+
+    void notify_one() noexcept {
+        (void)::pthread_cond_signal(&value_);
+    }
+
+    void notify_all() noexcept {
+        (void)::pthread_cond_broadcast(&value_);
+    }
+
+    void wait(unique_lock<mutex>& lock) {
+        if (!lock.owns_lock() || lock.mutex() == nullptr) {
+            throw system_error(
+                EPERM, generic_category(), "condition_variable::wait");
+        }
+        const int result = ::pthread_cond_wait(
+            &value_, lock.mutex()->native_handle());
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "pthread_cond_wait");
+        }
+    }
+
+    template<class Predicate>
+    void wait(unique_lock<mutex>& lock, Predicate predicate) {
+        while (!predicate()) {
+            wait(lock);
+        }
+    }
+
+    template<class Representation, class Period>
+    cv_status wait_for(
+        unique_lock<mutex>& lock,
+        const chrono::duration<Representation, Period>& duration) {
+        if (!lock.owns_lock() || lock.mutex() == nullptr) {
+            throw system_error(
+                EPERM, generic_category(),
+                "condition_variable::wait_for");
+        }
+
+        const auto requested =
+            chrono::duration_cast<chrono::nanoseconds>(
+                duration).count();
+        if (requested <= 0) {
+            return cv_status::timeout;
+        }
+
+        timespec deadline{};
+        (void)::clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec +=
+            static_cast<time_t>(requested / 1000000000LL);
+        const long long nanoseconds =
+            static_cast<long long>(deadline.tv_nsec) +
+            requested % 1000000000LL;
+        if (nanoseconds >= 1000000000LL) {
+            ++deadline.tv_sec;
+            deadline.tv_nsec = static_cast<long>(
+                nanoseconds - 1000000000LL);
+        } else {
+            deadline.tv_nsec =
+                static_cast<long>(nanoseconds);
+        }
+
+        const int result = ::pthread_cond_timedwait(
+            &value_, lock.mutex()->native_handle(), &deadline);
+        if (result == ETIMEDOUT) {
+            return cv_status::timeout;
+        }
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(),
+                "pthread_cond_timedwait");
+        }
+        return cv_status::no_timeout;
+    }
+
+    template<class Representation, class Period, class Predicate>
+    bool wait_for(
+        unique_lock<mutex>& lock,
+        const chrono::duration<Representation, Period>& duration,
+        Predicate predicate) {
+        if (predicate()) {
+            return true;
+        }
+        const auto started = chrono::steady_clock::now();
+        auto remaining =
+            chrono::duration_cast<chrono::nanoseconds>(duration);
+        while (remaining.count() > 0) {
+            if (wait_for(lock, remaining) == cv_status::timeout) {
+                return predicate();
+            }
+            if (predicate()) {
+                return true;
+            }
+            remaining =
+                chrono::duration_cast<chrono::nanoseconds>(duration) -
+                (chrono::steady_clock::now() - started);
+        }
+        return predicate();
+    }
+
+    template<class Clock, class Duration>
+    cv_status wait_until(
+        unique_lock<mutex>& lock,
+        const chrono::time_point<Clock, Duration>& deadline) {
+        const auto now = Clock::now();
+        if (deadline <= now) {
+            return cv_status::timeout;
+        }
+        const cv_status result = wait_for(lock, deadline - now);
+        if (result == cv_status::no_timeout) {
+            return result;
+        }
+        return Clock::now() < deadline
+            ? cv_status::no_timeout
+            : cv_status::timeout;
+    }
+
+    template<class Clock, class Duration, class Predicate>
+    bool wait_until(
+        unique_lock<mutex>& lock,
+        const chrono::time_point<Clock, Duration>& deadline,
+        Predicate predicate) {
+        while (!predicate()) {
+            if (wait_until(lock, deadline) ==
+                cv_status::timeout) {
+                return predicate();
+            }
+        }
+        return true;
+    }
+
+    native_handle_type native_handle() noexcept {
+        return &value_;
+    }
+
+private:
+    pthread_cond_t value_;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

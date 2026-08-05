@@ -1,0 +1,102 @@
+
+
+#ifndef ABURI_AIR_OPCODE
+#error "define ABURI_AIR_OPCODE before including opcodes.def"
+#endif
+
+ABURI_AIR_OPCODE(StackAlloc,    "stack_alloc",     0, 0, 1, 0)
+ABURI_AIR_OPCODE(StackAllocDyn, "stack_alloc_dyn", 1, 0, 1, 1)
+ABURI_AIR_OPCODE(StackSave,     "stack_save",      0, 0, 1, 0)
+ABURI_AIR_OPCODE(StackRestore,  "stack_restore",   1, 0, 0, 1)
+ABURI_AIR_OPCODE(Load,          "load",            1, 0, 1, 0)
+ABURI_AIR_OPCODE(Store,         "store",           2, 0, 0, 1)
+ABURI_AIR_OPCODE(Memcpy,        "memcpy",          3, 0, 0, 1)
+ABURI_AIR_OPCODE(Memmove,       "memmove",         3, 0, 0, 1)
+ABURI_AIR_OPCODE(Memset,        "memset",          3, 0, 0, 1)
+
+ABURI_AIR_OPCODE(AtomicLoad,  "atomic_load",  1, 0, 1, 1)
+ABURI_AIR_OPCODE(AtomicStore, "atomic_store", 2, 0, 0, 1)
+ABURI_AIR_OPCODE(AtomicRmw,   "atomic_rmw",   2, 0, 1, 1)
+ABURI_AIR_OPCODE(AtomicCas,   "atomic_cas",   3, 0, 1, 1)
+ABURI_AIR_OPCODE(Fence,       "fence",        0, 0, 0, 1)
+
+ABURI_AIR_OPCODE(Iadd, "iadd", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Isub, "isub", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Imul, "imul", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Iand, "iand", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Ior,  "ior",  2, 0, 1, 0)
+ABURI_AIR_OPCODE(Ixor, "ixor", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Shl,  "shl",  2, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Sdiv, "sdiv", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Udiv, "udiv", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Srem, "srem", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Urem, "urem", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Ashr, "ashr", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Lshr, "lshr", 2, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Bswap,  "bswap",  1, 0, 1, 0)
+ABURI_AIR_OPCODE(Clz,    "clz",    1, 0, 1, 0)
+ABURI_AIR_OPCODE(Ctz,    "ctz",    1, 0, 1, 0)
+ABURI_AIR_OPCODE(Popcnt, "popcnt", 1, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Fadd, "fadd", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Fsub, "fsub", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Fmul, "fmul", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Fdiv, "fdiv", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Frem, "frem", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Fneg, "fneg", 1, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Icmp, "icmp", 2, 0, 1, 0)
+ABURI_AIR_OPCODE(Fcmp, "fcmp", 2, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Trunc,    "trunc",    1, 0, 1, 0)
+ABURI_AIR_OPCODE(Zext,     "zext",     1, 0, 1, 0)
+ABURI_AIR_OPCODE(Sext,     "sext",     1, 0, 1, 0)
+ABURI_AIR_OPCODE(Fptrunc,  "fptrunc",  1, 0, 1, 0)
+ABURI_AIR_OPCODE(Fpext,    "fpext",    1, 0, 1, 0)
+ABURI_AIR_OPCODE(Fptosi,   "fptosi",   1, 0, 1, 0)
+ABURI_AIR_OPCODE(Fptoui,   "fptoui",   1, 0, 1, 0)
+ABURI_AIR_OPCODE(Sitofp,   "sitofp",   1, 0, 1, 0)
+ABURI_AIR_OPCODE(Uitofp,   "uitofp",   1, 0, 1, 0)
+ABURI_AIR_OPCODE(Ptrtoint, "ptrtoint", 1, 0, 1, 0)
+ABURI_AIR_OPCODE(Inttoptr, "inttoptr", 1, 0, 1, 0)
+ABURI_AIR_OPCODE(Bitcast,  "bitcast",  1, 0, 1, 0)
+
+ABURI_AIR_OPCODE(PtrAdd, "ptr_add", 2, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Select, "select", 3, 0, 1, 0)
+
+ABURI_AIR_OPCODE(VaStart, "va_start", 1, 0, 0, 1)
+
+ABURI_AIR_OPCODE(InlineAsm, "inline_asm", -1, 0, 0, 1)
+
+ABURI_AIR_OPCODE(EhAllocException, "eh_alloc_exception", 0, 0, 1, 1)
+ABURI_AIR_OPCODE(EhLandingPad,     "eh_landing_pad",     0, 0, 1, 1)
+ABURI_AIR_OPCODE(EhSelector,       "eh_selector",        1, 0, 1, 0)
+ABURI_AIR_OPCODE(EhTypeId,         "eh_typeid_for",      1, 0, 1, 0)
+ABURI_AIR_OPCODE(CatchBegin,       "catch_begin",        1, 0, 1, 1)
+ABURI_AIR_OPCODE(CatchEnd,         "catch_end",          0, 0, 0, 1)
+
+ABURI_AIR_OPCODE(Trap,       "trap",        0, 0, 0, 1)
+ABURI_AIR_OPCODE(FrameAddr,  "frame_addr",  0, 0, 1, 0)
+ABURI_AIR_OPCODE(ReturnAddr, "return_addr", 0, 0, 1, 0)
+
+ABURI_AIR_OPCODE(Jump,        "jump",        0,  1, 0, 1)
+ABURI_AIR_OPCODE(BrIf,        "br_if",       1,  1, 0, 1)
+ABURI_AIR_OPCODE(Switch,      "switch",      1,  1, 0, 1)
+ABURI_AIR_OPCODE(BrIndirect,  "br_indirect", 1,  1, 0, 1)
+
+ABURI_AIR_OPCODE(AsmGoto,     "asm_goto",    -1, 1, 0, 1)
+ABURI_AIR_OPCODE(Ret,         "ret",         -1, 1, 0, 1)
+ABURI_AIR_OPCODE(Unreachable, "unreachable", 0,  1, 0, 1)
+ABURI_AIR_OPCODE(Throw,       "throw",       -1, 1, 0, 1)
+ABURI_AIR_OPCODE(Rethrow,     "rethrow",     0,  1, 0, 1)
+ABURI_AIR_OPCODE(Resume,      "resume",      2,  1, 0, 1)
+
+ABURI_AIR_OPCODE(Call,           "call",            -1, 0, 2, 1)
+ABURI_AIR_OPCODE(CallIndirect,   "call_indirect",   -1, 0, 2, 1)
+ABURI_AIR_OPCODE(Invoke,         "invoke",          -1, 1, 2, 1)
+ABURI_AIR_OPCODE(InvokeIndirect, "invoke_indirect", -1, 1, 2, 1)
+
+ABURI_AIR_OPCODE(TailCallIndirect, "tail_call_indirect", -1, 1, 0, 1)

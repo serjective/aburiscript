@@ -1,0 +1,416 @@
+#ifndef ADINKRA_MUTEX
+#define ADINKRA_MUTEX
+
+#include <__adinkra/config>
+#include <__adinkra/once_flag>
+#include <cerrno>
+#include <pthread.h>
+#include <sched.h>
+#include <system_error>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct defer_lock_t {
+    explicit defer_lock_t() = default;
+};
+struct try_to_lock_t {
+    explicit try_to_lock_t() = default;
+};
+struct adopt_lock_t {
+    explicit adopt_lock_t() = default;
+};
+
+inline constexpr defer_lock_t defer_lock{};
+inline constexpr try_to_lock_t try_to_lock{};
+inline constexpr adopt_lock_t adopt_lock{};
+
+class mutex {
+public:
+    using native_handle_type = pthread_mutex_t*;
+
+    mutex() {
+        const int result = ::pthread_mutex_init(&value_, nullptr);
+        if (result != 0) {
+            throw system_error(result, generic_category(),
+                               "pthread_mutex_init");
+        }
+    }
+
+    ~mutex() {
+        (void)::pthread_mutex_destroy(&value_);
+    }
+
+    mutex(const mutex&) = delete;
+    mutex& operator=(const mutex&) = delete;
+
+    void lock() {
+        const int result = ::pthread_mutex_lock(&value_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "pthread_mutex_lock");
+        }
+    }
+
+    bool try_lock() noexcept {
+        return ::pthread_mutex_trylock(&value_) == 0;
+    }
+
+    void unlock() noexcept {
+        (void)::pthread_mutex_unlock(&value_);
+    }
+
+    native_handle_type native_handle() noexcept {
+        return &value_;
+    }
+
+private:
+    pthread_mutex_t value_;
+};
+
+class recursive_mutex {
+public:
+    using native_handle_type = pthread_mutex_t*;
+
+    recursive_mutex() {
+        pthread_mutexattr_t attributes;
+        int result = ::pthread_mutexattr_init(&attributes);
+        const bool attributes_initialized = result == 0;
+        if (result == 0) {
+            result = ::pthread_mutexattr_settype(
+                &attributes, PTHREAD_MUTEX_RECURSIVE);
+        }
+        if (result == 0) {
+            result = ::pthread_mutex_init(&value_, &attributes);
+        }
+        if (attributes_initialized) {
+            (void)::pthread_mutexattr_destroy(&attributes);
+        }
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "recursive_mutex");
+        }
+    }
+
+    ~recursive_mutex() {
+        (void)::pthread_mutex_destroy(&value_);
+    }
+
+    recursive_mutex(const recursive_mutex&) = delete;
+    recursive_mutex& operator=(const recursive_mutex&) = delete;
+
+    void lock() {
+        const int result = ::pthread_mutex_lock(&value_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(),
+                "recursive_mutex::lock");
+        }
+    }
+
+    bool try_lock() noexcept {
+        return ::pthread_mutex_trylock(&value_) == 0;
+    }
+
+    void unlock() noexcept {
+        (void)::pthread_mutex_unlock(&value_);
+    }
+
+    native_handle_type native_handle() noexcept {
+        return &value_;
+    }
+
+private:
+    pthread_mutex_t value_;
+};
+
+template<class Mutex>
+class lock_guard {
+public:
+    using mutex_type = Mutex;
+
+    explicit lock_guard(mutex_type& value)
+        : mutex_(value) {
+        mutex_.lock();
+    }
+
+    lock_guard(mutex_type& value, adopt_lock_t) noexcept
+        : mutex_(value) {}
+
+    ~lock_guard() {
+        mutex_.unlock();
+    }
+
+    lock_guard(const lock_guard&) = delete;
+    lock_guard& operator=(const lock_guard&) = delete;
+
+private:
+    mutex_type& mutex_;
+};
+
+template<class Mutex>
+class unique_lock {
+public:
+    using mutex_type = Mutex;
+
+    unique_lock() noexcept : mutex_(nullptr), owns_(false) {}
+
+    explicit unique_lock(mutex_type& value)
+        : mutex_(&value), owns_(false) {
+        lock();
+    }
+
+    unique_lock(mutex_type& value, defer_lock_t) noexcept
+        : mutex_(&value), owns_(false) {}
+
+    unique_lock(mutex_type& value, try_to_lock_t)
+        : mutex_(&value), owns_(value.try_lock()) {}
+
+    unique_lock(mutex_type& value, adopt_lock_t) noexcept
+        : mutex_(&value), owns_(true) {}
+
+    unique_lock(unique_lock&& other) noexcept
+        : mutex_(other.mutex_), owns_(other.owns_) {
+        other.mutex_ = nullptr;
+        other.owns_ = false;
+    }
+
+    unique_lock& operator=(unique_lock&& other) noexcept {
+        if (this != &other) {
+            if (owns_) {
+                mutex_->unlock();
+            }
+            mutex_ = other.mutex_;
+            owns_ = other.owns_;
+            other.mutex_ = nullptr;
+            other.owns_ = false;
+        }
+        return *this;
+    }
+
+    ~unique_lock() {
+        if (owns_) {
+            mutex_->unlock();
+        }
+    }
+
+    unique_lock(const unique_lock&) = delete;
+    unique_lock& operator=(const unique_lock&) = delete;
+
+    void lock() {
+        if (mutex_ == nullptr || owns_) {
+            throw system_error(
+                EINVAL, generic_category(), "unique_lock::lock");
+        }
+        mutex_->lock();
+        owns_ = true;
+    }
+
+    bool try_lock() {
+        if (mutex_ == nullptr || owns_) {
+            throw system_error(
+                EINVAL, generic_category(), "unique_lock::try_lock");
+        }
+        owns_ = mutex_->try_lock();
+        return owns_;
+    }
+
+    void unlock() {
+        if (!owns_) {
+            throw system_error(
+                EPERM, generic_category(), "unique_lock::unlock");
+        }
+        mutex_->unlock();
+        owns_ = false;
+    }
+
+    void swap(unique_lock& other) noexcept {
+        std::swap(mutex_, other.mutex_);
+        std::swap(owns_, other.owns_);
+    }
+
+    mutex_type* release() noexcept {
+        mutex_type* result = mutex_;
+        mutex_ = nullptr;
+        owns_ = false;
+        return result;
+    }
+
+    bool owns_lock() const noexcept {
+        return owns_;
+    }
+
+    explicit operator bool() const noexcept {
+        return owns_;
+    }
+
+    mutex_type* mutex() const noexcept {
+        return mutex_;
+    }
+
+private:
+    mutex_type* mutex_;
+    bool owns_;
+};
+
+namespace __mutex_detail {
+
+template<class Lock>
+int try_lock_from(int index, Lock& lock_value) {
+    return lock_value.try_lock() ? -1 : index;
+}
+
+template<class FirstLock, class SecondLock, class... Rest>
+int try_lock_from(
+    int index, FirstLock& first, SecondLock& second,
+    Rest&... rest) {
+    if (!first.try_lock()) {
+        return index;
+    }
+    try {
+        const int result = try_lock_from(
+            index + 1, second, rest...);
+        if (result != -1) {
+            first.unlock();
+        }
+        return result;
+    } catch (...) {
+        first.unlock();
+        throw;
+    }
+}
+
+} // namespace __mutex_detail
+
+template<class FirstLock, class SecondLock, class... Rest>
+int try_lock(
+    FirstLock& first, SecondLock& second, Rest&... rest) {
+    return __mutex_detail::try_lock_from(
+        0, first, second, rest...);
+}
+
+template<class FirstLock, class SecondLock, class... Rest>
+void lock(
+    FirstLock& first, SecondLock& second, Rest&... rest) {
+    for (;;) {
+        first.lock();
+        try {
+            if (__mutex_detail::try_lock_from(
+                    1, second, rest...) == -1) {
+                return;
+            }
+        } catch (...) {
+            first.unlock();
+            throw;
+        }
+        first.unlock();
+        (void)::sched_yield();
+    }
+}
+
+template<class... Mutexes>
+class scoped_lock;
+
+namespace __mutex_detail {
+
+template<class... Mutexes>
+class scoped_lock_storage;
+
+template<>
+class scoped_lock_storage<> {
+public:
+    explicit scoped_lock_storage() noexcept = default;
+
+    void unlock() noexcept {}
+};
+
+template<class FirstMutex, class... Rest>
+class scoped_lock_storage<FirstMutex, Rest...> {
+public:
+    explicit scoped_lock_storage(
+        FirstMutex& first, Rest&... rest) noexcept
+        : first_(first), rest_(rest...) {}
+
+    void unlock() noexcept {
+        first_.unlock();
+        rest_.unlock();
+    }
+
+private:
+    FirstMutex& first_;
+    scoped_lock_storage<Rest...> rest_;
+};
+
+} // namespace __mutex_detail
+
+template<>
+class scoped_lock<> {
+public:
+    explicit scoped_lock() noexcept = default;
+
+    explicit scoped_lock(adopt_lock_t) noexcept {}
+};
+
+template<class Mutex>
+class scoped_lock<Mutex> {
+public:
+    using mutex_type = Mutex;
+
+    explicit scoped_lock(mutex_type& value)
+        : mutex_(value) {
+        mutex_.lock();
+    }
+
+    explicit scoped_lock(
+        adopt_lock_t, mutex_type& value) noexcept
+        : mutex_(value) {}
+
+    ~scoped_lock() {
+        mutex_.unlock();
+    }
+
+    scoped_lock(const scoped_lock&) = delete;
+    scoped_lock& operator=(const scoped_lock&) = delete;
+
+private:
+    mutex_type& mutex_;
+};
+
+template<class FirstMutex, class SecondMutex, class... Rest>
+class scoped_lock<FirstMutex, SecondMutex, Rest...> {
+public:
+    explicit scoped_lock(
+        FirstMutex& first, SecondMutex& second, Rest&... rest)
+        : mutexes_(first, second, rest...) {
+        std::lock(first, second, rest...);
+    }
+
+    explicit scoped_lock(
+        adopt_lock_t, FirstMutex& first, SecondMutex& second,
+        Rest&... rest) noexcept
+        : mutexes_(first, second, rest...) {
+    }
+
+    ~scoped_lock() {
+        mutexes_.unlock();
+    }
+
+    scoped_lock(const scoped_lock&) = delete;
+    scoped_lock& operator=(const scoped_lock&) = delete;
+
+private:
+    __mutex_detail::scoped_lock_storage<
+        FirstMutex, SecondMutex, Rest...> mutexes_;
+};
+
+template<class... Mutexes>
+scoped_lock(Mutexes&...) -> scoped_lock<Mutexes...>;
+
+template<class... Mutexes>
+scoped_lock(adopt_lock_t, Mutexes&...) -> scoped_lock<Mutexes...>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#include <condition_variable>
+
+#endif

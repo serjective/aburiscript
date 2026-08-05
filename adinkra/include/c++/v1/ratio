@@ -1,0 +1,107 @@
+#ifndef ADINKRA_RATIO
+#define ADINKRA_RATIO
+
+#include <__adinkra/config>
+#include <cstdint>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+constexpr intmax_t __ratio_absolute(intmax_t value) {
+    return value < 0 ? -value : value;
+}
+
+constexpr intmax_t __ratio_gcd(intmax_t left, intmax_t right) {
+    left = __ratio_absolute(left);
+    right = __ratio_absolute(right);
+    while (right != 0) {
+        const intmax_t remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    return left == 0 ? 1 : left;
+}
+
+template<intmax_t Numerator, intmax_t Denominator = 1>
+struct ratio {
+    static_assert(Denominator != 0);
+
+private:
+    static constexpr intmax_t divisor =
+        __ratio_gcd(Numerator, Denominator);
+
+public:
+    static constexpr intmax_t num =
+        (Denominator < 0 ? -Numerator : Numerator) / divisor;
+    static constexpr intmax_t den =
+        __ratio_absolute(Denominator) / divisor;
+    using type = ratio<num, den>;
+};
+
+template<class Left, class Right>
+using ratio_add = ratio<
+    Left::num * Right::den + Right::num * Left::den,
+    Left::den * Right::den>;
+
+template<class Left, class Right>
+using ratio_subtract = ratio<
+    Left::num * Right::den - Right::num * Left::den,
+    Left::den * Right::den>;
+
+template<class Left, class Right>
+using ratio_multiply = ratio<
+    Left::num * Right::num,
+    Left::den * Right::den>;
+
+template<class Left, class Right>
+using ratio_divide = ratio<
+    Left::num * Right::den,
+    Left::den * Right::num>;
+
+template<class Left, class Right>
+struct ratio_equal
+    : bool_constant<
+          Left::num * Right::den ==
+          Right::num * Left::den> {};
+
+template<class Left, class Right>
+struct ratio_not_equal
+    : bool_constant<!ratio_equal<Left, Right>::value> {};
+
+template<class Left, class Right>
+struct ratio_less
+    : bool_constant<
+          Left::num * Right::den <
+          Right::num * Left::den> {};
+
+template<class Left, class Right>
+struct ratio_less_equal
+    : bool_constant<!ratio_less<Right, Left>::value> {};
+
+template<class Left, class Right>
+struct ratio_greater : ratio_less<Right, Left> {};
+
+template<class Left, class Right>
+struct ratio_greater_equal
+    : bool_constant<!ratio_less<Left, Right>::value> {};
+
+using nano = ratio<1, 1000000000>;
+using pico = ratio<1, 1000000000000>;
+using femto = ratio<1, 1000000000000000>;
+using atto = ratio<1, 1000000000000000000>;
+using micro = ratio<1, 1000000>;
+using milli = ratio<1, 1000>;
+using centi = ratio<1, 100>;
+using deci = ratio<1, 10>;
+using deca = ratio<10>;
+using hecto = ratio<100>;
+using kilo = ratio<1000>;
+using mega = ratio<1000000>;
+using giga = ratio<1000000000>;
+using tera = ratio<1000000000000>;
+using peta = ratio<1000000000000000>;
+using exa = ratio<1000000000000000000>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

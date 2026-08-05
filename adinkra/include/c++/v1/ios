@@ -1,0 +1,445 @@
+#ifndef ADINKRA_IOS
+#define ADINKRA_IOS
+
+#include <__adinkra/config>
+#include <__adinkra/io>
+#include <exception>
+#include <iosfwd>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class ios_base {
+public:
+    using fmtflags = unsigned long;
+    using iostate = unsigned int;
+    using openmode = unsigned int;
+    using seekdir = unsigned int;
+
+    static constexpr fmtflags boolalpha = 1UL << 0;
+    static constexpr fmtflags dec = 1UL << 1;
+    static constexpr fmtflags fixed = 1UL << 2;
+    static constexpr fmtflags hex = 1UL << 3;
+    static constexpr fmtflags internal = 1UL << 4;
+    static constexpr fmtflags left = 1UL << 5;
+    static constexpr fmtflags oct = 1UL << 6;
+    static constexpr fmtflags right = 1UL << 7;
+    static constexpr fmtflags scientific = 1UL << 8;
+    static constexpr fmtflags showbase = 1UL << 9;
+    static constexpr fmtflags showpoint = 1UL << 10;
+    static constexpr fmtflags showpos = 1UL << 11;
+    static constexpr fmtflags skipws = 1UL << 12;
+    static constexpr fmtflags unitbuf = 1UL << 13;
+    static constexpr fmtflags uppercase = 1UL << 14;
+    static constexpr fmtflags adjustfield = left | right | internal;
+    static constexpr fmtflags basefield = dec | oct | hex;
+    static constexpr fmtflags floatfield = scientific | fixed;
+
+    static constexpr iostate goodbit = 0;
+    static constexpr iostate badbit = 1U << 0;
+    static constexpr iostate eofbit = 1U << 1;
+    static constexpr iostate failbit = 1U << 2;
+
+    static constexpr openmode app = 1U << 0;
+    static constexpr openmode ate = 1U << 1;
+    static constexpr openmode binary = 1U << 2;
+    static constexpr openmode in = 1U << 3;
+    static constexpr openmode out = 1U << 4;
+    static constexpr openmode trunc = 1U << 5;
+
+    static constexpr seekdir beg = 0;
+    static constexpr seekdir cur = 1;
+    static constexpr seekdir end = 2;
+
+    class failure : public exception {
+    public:
+        explicit failure(const char* message) noexcept
+            : message_(message) {}
+        const char* what() const noexcept override { return message_; }
+
+    private:
+        const char* message_;
+    };
+
+    class Init {
+    public:
+        Init() = default;
+        ~Init() = default;
+    };
+
+    static bool sync_with_stdio(bool synchronize = true) {
+        static bool synchronized = true;
+        const bool previous = synchronized;
+        synchronized = synchronize;
+        return previous;
+    }
+
+    virtual ~ios_base() {
+        __io::ios_storage_destroy(word_storage_);
+    }
+
+    static int xalloc() {
+        return __io::ios_xalloc();
+    }
+
+    long& iword(int index) {
+        return __io::ios_iword(word_storage_, index);
+    }
+
+    void*& pword(int index) {
+        return __io::ios_pword(word_storage_, index);
+    }
+
+    fmtflags flags() const noexcept { return flags_; }
+
+    fmtflags flags(fmtflags value) noexcept {
+        fmtflags previous = flags_;
+        flags_ = value;
+        return previous;
+    }
+
+    fmtflags setf(fmtflags value) noexcept {
+        fmtflags previous = flags_;
+        flags_ |= value;
+        return previous;
+    }
+
+    fmtflags setf(fmtflags value, fmtflags mask) noexcept {
+        fmtflags previous = flags_;
+        flags_ = (flags_ & ~mask) | (value & mask);
+        return previous;
+    }
+
+    void unsetf(fmtflags mask) noexcept { flags_ &= ~mask; }
+
+    streamsize precision() const noexcept { return precision_; }
+
+    streamsize precision(streamsize value) noexcept {
+        streamsize previous = precision_;
+        precision_ = value;
+        return previous;
+    }
+
+    streamsize width() const noexcept { return width_; }
+
+    streamsize width(streamsize value) noexcept {
+        streamsize previous = width_;
+        width_ = value;
+        return previous;
+    }
+
+protected:
+    ios_base() noexcept
+        : flags_(skipws | dec), precision_(6), width_(0),
+          word_storage_(nullptr) {}
+
+    ios_base(ios_base&& other) noexcept
+        : flags_(other.flags_),
+          precision_(other.precision_),
+          width_(other.width_),
+          word_storage_(other.word_storage_) {
+        other.word_storage_ = nullptr;
+    }
+
+    ios_base& operator=(ios_base&& other) noexcept {
+        if (this != &other) {
+            __io::ios_storage_destroy(word_storage_);
+            flags_ = other.flags_;
+            precision_ = other.precision_;
+            width_ = other.width_;
+            word_storage_ = other.word_storage_;
+            other.word_storage_ = nullptr;
+        }
+        return *this;
+    }
+
+    void swap(ios_base& other) noexcept {
+        fmtflags saved_flags = flags_;
+        flags_ = other.flags_;
+        other.flags_ = saved_flags;
+
+        streamsize saved_precision = precision_;
+        precision_ = other.precision_;
+        other.precision_ = saved_precision;
+
+        streamsize saved_width = width_;
+        width_ = other.width_;
+        other.width_ = saved_width;
+
+        __io::ios_word_storage* saved_storage = word_storage_;
+        word_storage_ = other.word_storage_;
+        other.word_storage_ = saved_storage;
+    }
+
+private:
+    fmtflags flags_;
+    streamsize precision_;
+    streamsize width_;
+    __io::ios_word_storage* word_storage_;
+
+    void copy_word_storage(const ios_base& other) {
+        __io::ios_word_storage* replacement =
+            __io::ios_storage_copy(other.word_storage_);
+        __io::ios_storage_destroy(word_storage_);
+        word_storage_ = replacement;
+    }
+
+    ios_base(const ios_base&) = delete;
+    ios_base& operator=(const ios_base&) = delete;
+
+    template<class Character, class Traits>
+    friend class basic_ios;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#include <locale>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits>
+class basic_ios : public ios_base {
+public:
+    using char_type = Character;
+    using traits_type = Traits;
+    using int_type = typename Traits::int_type;
+    using pos_type = typename Traits::pos_type;
+    using off_type = typename Traits::off_type;
+
+    explicit operator bool() const noexcept { return !fail(); }
+    bool operator!() const noexcept { return fail(); }
+
+    iostate rdstate() const noexcept { return state_; }
+    void clear(iostate state = goodbit) {
+        state_ = state;
+        if ((state_ & exceptions_) != 0) {
+            throw failure("basic_ios failure");
+        }
+    }
+    void setstate(iostate state) { clear(state_ | state); }
+    bool good() const noexcept { return state_ == goodbit; }
+    bool eof() const noexcept { return (state_ & eofbit) != 0; }
+    bool fail() const noexcept {
+        return (state_ & (failbit | badbit)) != 0;
+    }
+    bool bad() const noexcept { return (state_ & badbit) != 0; }
+
+    iostate exceptions() const noexcept { return exceptions_; }
+    void exceptions(iostate state) {
+        exceptions_ = state;
+        if ((state_ & exceptions_) != 0) {
+            throw failure("basic_ios exception mask");
+        }
+    }
+
+    Character fill() const noexcept { return fill_; }
+    Character fill(Character value) noexcept {
+        Character previous = fill_;
+        fill_ = value;
+        return previous;
+    }
+
+    basic_ostream<Character, Traits>* tie() const noexcept {
+        return tie_;
+    }
+
+    basic_ostream<Character, Traits>*
+    tie(basic_ostream<Character, Traits>* value) noexcept {
+        auto* previous = tie_;
+        tie_ = value;
+        return previous;
+    }
+
+    locale imbue(const locale& value) {
+        locale previous = locale_;
+        locale_ = value;
+        return previous;
+    }
+
+    locale getloc() const {
+        return locale_;
+    }
+
+    Character widen(char value) const {
+        return static_cast<Character>(
+            static_cast<unsigned char>(value));
+    }
+
+    char narrow(Character value, char fallback) const {
+        const Character converted = static_cast<Character>(
+            static_cast<unsigned char>(value));
+        return converted == value
+            ? static_cast<char>(value)
+            : fallback;
+    }
+
+    basic_ios& copyfmt(const basic_ios& other) {
+        if (this != &other) {
+            this->copy_word_storage(other);
+            this->flags(other.flags());
+            this->precision(other.precision());
+            this->width(other.width());
+            fill_ = other.fill_;
+            tie_ = other.tie_;
+            locale_ = other.locale_;
+            exceptions(other.exceptions_);
+        }
+        return *this;
+    }
+
+protected:
+    basic_ios() noexcept
+        : state_(goodbit), exceptions_(goodbit),
+          fill_(Character(' ')), tie_(nullptr), locale_() {}
+
+    void move(basic_ios& other) noexcept {
+        ios_base::operator=(static_cast<ios_base&&>(other));
+        state_ = other.state_;
+        exceptions_ = other.exceptions_;
+        fill_ = other.fill_;
+        tie_ = other.tie_;
+        locale_ = other.locale_;
+
+        other.state_ = goodbit;
+        other.exceptions_ = goodbit;
+        other.fill_ = Character(' ');
+        other.tie_ = nullptr;
+    }
+
+    void move(basic_ios&& other) noexcept {
+        move(other);
+    }
+
+    void swap(basic_ios& other) noexcept {
+        ios_base::swap(other);
+
+        iostate saved_state = state_;
+        state_ = other.state_;
+        other.state_ = saved_state;
+
+        iostate saved_exceptions = exceptions_;
+        exceptions_ = other.exceptions_;
+        other.exceptions_ = saved_exceptions;
+
+        Character saved_fill = fill_;
+        fill_ = other.fill_;
+        other.fill_ = saved_fill;
+
+        basic_ostream<Character, Traits>* saved_tie = tie_;
+        tie_ = other.tie_;
+        other.tie_ = saved_tie;
+
+        locale saved_locale = locale_;
+        locale_ = other.locale_;
+        other.locale_ = saved_locale;
+    }
+
+private:
+    iostate state_;
+    iostate exceptions_;
+    Character fill_;
+    basic_ostream<Character, Traits>* tie_;
+    locale locale_;
+};
+
+inline ios_base& boolalpha(ios_base& stream) {
+    stream.setf(ios_base::boolalpha);
+    return stream;
+}
+inline ios_base& noboolalpha(ios_base& stream) {
+    stream.unsetf(ios_base::boolalpha);
+    return stream;
+}
+inline ios_base& showbase(ios_base& stream) {
+    stream.setf(ios_base::showbase);
+    return stream;
+}
+inline ios_base& noshowbase(ios_base& stream) {
+    stream.unsetf(ios_base::showbase);
+    return stream;
+}
+inline ios_base& showpoint(ios_base& stream) {
+    stream.setf(ios_base::showpoint);
+    return stream;
+}
+inline ios_base& noshowpoint(ios_base& stream) {
+    stream.unsetf(ios_base::showpoint);
+    return stream;
+}
+inline ios_base& showpos(ios_base& stream) {
+    stream.setf(ios_base::showpos);
+    return stream;
+}
+inline ios_base& noshowpos(ios_base& stream) {
+    stream.unsetf(ios_base::showpos);
+    return stream;
+}
+inline ios_base& skipws(ios_base& stream) {
+    stream.setf(ios_base::skipws);
+    return stream;
+}
+inline ios_base& noskipws(ios_base& stream) {
+    stream.unsetf(ios_base::skipws);
+    return stream;
+}
+inline ios_base& uppercase(ios_base& stream) {
+    stream.setf(ios_base::uppercase);
+    return stream;
+}
+inline ios_base& nouppercase(ios_base& stream) {
+    stream.unsetf(ios_base::uppercase);
+    return stream;
+}
+inline ios_base& unitbuf(ios_base& stream) {
+    stream.setf(ios_base::unitbuf);
+    return stream;
+}
+inline ios_base& nounitbuf(ios_base& stream) {
+    stream.unsetf(ios_base::unitbuf);
+    return stream;
+}
+inline ios_base& dec(ios_base& stream) {
+    stream.setf(ios_base::dec, ios_base::basefield);
+    return stream;
+}
+inline ios_base& hex(ios_base& stream) {
+    stream.setf(ios_base::hex, ios_base::basefield);
+    return stream;
+}
+inline ios_base& oct(ios_base& stream) {
+    stream.setf(ios_base::oct, ios_base::basefield);
+    return stream;
+}
+inline ios_base& left(ios_base& stream) {
+    stream.setf(ios_base::left, ios_base::adjustfield);
+    return stream;
+}
+inline ios_base& right(ios_base& stream) {
+    stream.setf(ios_base::right, ios_base::adjustfield);
+    return stream;
+}
+inline ios_base& internal(ios_base& stream) {
+    stream.setf(ios_base::internal, ios_base::adjustfield);
+    return stream;
+}
+inline ios_base& fixed(ios_base& stream) {
+    stream.setf(ios_base::fixed, ios_base::floatfield);
+    return stream;
+}
+inline ios_base& scientific(ios_base& stream) {
+    stream.setf(ios_base::scientific, ios_base::floatfield);
+    return stream;
+}
+inline ios_base& hexfloat(ios_base& stream) {
+    stream.setf(
+        ios_base::fixed | ios_base::scientific,
+        ios_base::floatfield);
+    return stream;
+}
+inline ios_base& defaultfloat(ios_base& stream) {
+    stream.unsetf(ios_base::floatfield);
+    return stream;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

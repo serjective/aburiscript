@@ -1,0 +1,65 @@
+#ifndef ADINKRA_STACK
+#define ADINKRA_STACK
+
+#include <__adinkra/config>
+#include <compare>
+#include <deque>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type, class Container = deque<Type>>
+class stack {
+public:
+    using container_type = Container;
+    using value_type = typename Container::value_type;
+    using size_type = typename Container::size_type;
+    using reference = typename Container::reference;
+    using const_reference = typename Container::const_reference;
+
+    stack() = default;
+    explicit stack(const Container& container) : c(container) {}
+    explicit stack(Container&& container) : c(std::move(container)) {}
+
+    bool empty() const { return c.empty(); }
+    size_type size() const { return c.size(); }
+    reference top() { return c.back(); }
+    const_reference top() const { return c.back(); }
+    void push(const Type& value) { c.push_back(value); }
+    void push(Type&& value) { c.push_back(std::move(value)); }
+    template<class... Arguments>
+    decltype(auto) emplace(Arguments&&... arguments) {
+        return c.emplace_back(
+            std::forward<Arguments>(arguments)...);
+    }
+    void pop() { c.pop_back(); }
+    void swap(stack& other)
+        noexcept(noexcept(c.swap(other.c))) {
+        c.swap(other.c);
+    }
+
+    friend bool operator==(
+        const stack& left, const stack& right) {
+        return left.c == right.c;
+    }
+    friend auto operator<=>(
+        const stack& left, const stack& right) {
+        return left.c <=> right.c;
+    }
+
+protected:
+    Container c;
+};
+
+template<class Container>
+stack(Container) -> stack<typename Container::value_type, Container>;
+
+template<class Type, class Container>
+void swap(stack<Type, Container>& left, stack<Type, Container>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

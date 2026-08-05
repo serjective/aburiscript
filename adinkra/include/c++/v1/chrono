@@ -1,0 +1,550 @@
+#ifndef ADINKRA_CHRONO
+#define ADINKRA_CHRONO
+
+#include <__adinkra/config>
+#include <ctime>
+#include <limits>
+#include <ratio>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+namespace chrono {
+
+template<class Representation>
+struct treat_as_floating_point
+    : is_floating_point<Representation> {};
+
+template<class Representation>
+inline constexpr bool treat_as_floating_point_v =
+    treat_as_floating_point<Representation>::value;
+
+template<class Representation, class Period = ratio<1>>
+class duration {
+public:
+    using rep = Representation;
+    using period = Period;
+
+    constexpr duration() = default;
+
+    template<class Other>
+        requires (
+            is_convertible_v<const Other&, rep> &&
+            (treat_as_floating_point_v<rep> ||
+             !treat_as_floating_point_v<Other>))
+    constexpr explicit duration(const Other& value)
+        : value_(static_cast<rep>(value)) {}
+
+    template<class OtherRepresentation, class OtherPeriod>
+        requires (
+            is_convertible_v<const OtherRepresentation&, rep> &&
+            (treat_as_floating_point_v<rep> ||
+             (ratio_divide<OtherPeriod, Period>::den == 1 &&
+              !treat_as_floating_point_v<OtherRepresentation>)))
+    constexpr duration(
+        const duration<OtherRepresentation, OtherPeriod>& other)
+        : value_(static_cast<rep>(
+              static_cast<long double>(other.count()) *
+              static_cast<long double>(OtherPeriod::num) *
+              static_cast<long double>(Period::den) /
+              (static_cast<long double>(OtherPeriod::den) *
+               static_cast<long double>(Period::num)))) {}
+
+    constexpr rep count() const {
+        return value_;
+    }
+
+    static constexpr duration zero() {
+        return duration(rep(0));
+    }
+
+    static constexpr duration min() {
+        return duration((numeric_limits<rep>::lowest)());
+    }
+
+    static constexpr duration max() {
+        return duration((numeric_limits<rep>::max)());
+    }
+
+    constexpr duration& operator+=(const duration& other) {
+        value_ += other.value_;
+        return *this;
+    }
+
+    constexpr duration& operator-=(const duration& other) {
+        value_ -= other.value_;
+        return *this;
+    }
+
+    constexpr duration& operator*=(const rep& scalar) {
+        value_ *= scalar;
+        return *this;
+    }
+
+    constexpr duration& operator/=(const rep& scalar) {
+        value_ /= scalar;
+        return *this;
+    }
+
+    constexpr duration& operator%=(const rep& scalar) {
+        value_ %= scalar;
+        return *this;
+    }
+
+    constexpr duration& operator%=(const duration& other) {
+        value_ %= other.value_;
+        return *this;
+    }
+
+private:
+    rep value_{};
+};
+
+template<class Type>
+struct __is_duration : false_type {};
+
+template<class Representation, class Period>
+struct __is_duration<duration<Representation, Period>>
+    : true_type {};
+
+template<class ToDuration, class Rep, class Period>
+constexpr ToDuration duration_cast(
+    const duration<Rep, Period>& value) {
+    using result_rep = typename ToDuration::rep;
+    using result_period = typename ToDuration::period;
+    using factor = ratio_divide<Period, result_period>;
+    if constexpr (is_integral_v<Rep> && is_integral_v<result_rep>) {
+        using calculation_rep =
+            common_type_t<Rep, result_rep, intmax_t>;
+        return ToDuration(static_cast<result_rep>(
+            static_cast<calculation_rep>(value.count()) *
+            static_cast<calculation_rep>(factor::num) /
+            static_cast<calculation_rep>(factor::den)));
+    } else {
+        return ToDuration(static_cast<result_rep>(
+            static_cast<long double>(value.count()) *
+            static_cast<long double>(factor::num) /
+            static_cast<long double>(factor::den)));
+    }
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+using __common_duration = duration<
+    common_type_t<LeftRep, RightRep>,
+    ratio<
+        __ratio_gcd(LeftPeriod::num, RightPeriod::num),
+        (LeftPeriod::den /
+         __ratio_gcd(LeftPeriod::den, RightPeriod::den)) *
+            RightPeriod::den>>;
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr auto operator+(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right)
+    -> __common_duration<
+        LeftRep, LeftPeriod, RightRep, RightPeriod> {
+    using result =
+        __common_duration<
+            LeftRep, LeftPeriod, RightRep, RightPeriod>;
+    return result(
+        duration_cast<result>(left).count() +
+        duration_cast<result>(right).count());
+}
+
+template<class Rep, class Period>
+constexpr duration<Rep, Period>
+operator+(const duration<Rep, Period>& value) {
+    return value;
+}
+
+template<class Rep, class Period>
+constexpr duration<Rep, Period>
+operator-(const duration<Rep, Period>& value) {
+    return duration<Rep, Period>(-value.count());
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr auto operator-(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right)
+    -> __common_duration<
+        LeftRep, LeftPeriod, RightRep, RightPeriod> {
+    using result =
+        __common_duration<
+            LeftRep, LeftPeriod, RightRep, RightPeriod>;
+    return result(
+        duration_cast<result>(left).count() -
+        duration_cast<result>(right).count());
+}
+
+template<class Rep, class Period, class Scalar>
+constexpr auto operator*(
+    const duration<Rep, Period>& value,
+    const Scalar& scalar)
+    -> duration<common_type_t<Rep, Scalar>, Period> {
+    using result = duration<common_type_t<Rep, Scalar>, Period>;
+    return result(
+        static_cast<typename result::rep>(value.count()) *
+        static_cast<typename result::rep>(scalar));
+}
+
+template<class Scalar, class Rep, class Period>
+constexpr auto operator*(
+    const Scalar& scalar,
+    const duration<Rep, Period>& value)
+    -> duration<common_type_t<Rep, Scalar>, Period> {
+    return value * scalar;
+}
+
+template<class Rep, class Period, class Scalar>
+    requires (!__is_duration<remove_cvref_t<Scalar>>::value)
+constexpr auto operator/(
+    const duration<Rep, Period>& value,
+    const Scalar& scalar) {
+    using result = duration<common_type_t<Rep, Scalar>, Period>;
+    return result(
+        static_cast<typename result::rep>(value.count()) /
+        static_cast<typename result::rep>(scalar));
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr auto operator/(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right)
+    -> common_type_t<LeftRep, RightRep> {
+    using common_duration =
+        __common_duration<
+            LeftRep, LeftPeriod, RightRep, RightPeriod>;
+    return static_cast<common_type_t<LeftRep, RightRep>>(
+               duration_cast<common_duration>(left).count()) /
+           static_cast<common_type_t<LeftRep, RightRep>>(
+               duration_cast<common_duration>(right).count());
+}
+
+template<class Rep, class Period, class Scalar>
+    requires is_arithmetic_v<remove_cvref_t<Scalar>>
+constexpr auto operator%(
+    const duration<Rep, Period>& value,
+    const Scalar& scalar) {
+    using result = duration<common_type_t<Rep, Scalar>, Period>;
+    return result(
+        static_cast<typename result::rep>(value.count()) %
+        static_cast<typename result::rep>(scalar));
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr auto operator%(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right)
+    -> __common_duration<
+        LeftRep, LeftPeriod, RightRep, RightPeriod> {
+    using result =
+        __common_duration<
+            LeftRep, LeftPeriod, RightRep, RightPeriod>;
+    return result(
+        duration_cast<result>(left).count() %
+        duration_cast<result>(right).count());
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr bool operator==(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right) {
+    using common =
+        __common_duration<
+            LeftRep, LeftPeriod, RightRep, RightPeriod>;
+    return duration_cast<common>(left).count() ==
+           duration_cast<common>(right).count();
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr bool operator<(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right) {
+    using common =
+        __common_duration<
+            LeftRep, LeftPeriod, RightRep, RightPeriod>;
+    return duration_cast<common>(left).count() <
+           duration_cast<common>(right).count();
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr bool operator>(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right) {
+    return right < left;
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr bool operator<=(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right) {
+    return !(right < left);
+}
+
+template<class LeftRep, class LeftPeriod,
+         class RightRep, class RightPeriod>
+constexpr bool operator>=(
+    const duration<LeftRep, LeftPeriod>& left,
+    const duration<RightRep, RightPeriod>& right) {
+    return !(left < right);
+}
+
+using nanoseconds = duration<long long, nano>;
+using microseconds = duration<long long, micro>;
+using milliseconds = duration<long long, milli>;
+using seconds = duration<long long>;
+using minutes = duration<long long, ratio<60>>;
+using hours = duration<long long, ratio<3600>>;
+
+template<class Clock, class Duration = typename Clock::duration>
+class time_point {
+public:
+    using clock = Clock;
+    using duration = Duration;
+    using rep = typename duration::rep;
+    using period = typename duration::period;
+
+    constexpr time_point() = default;
+    constexpr explicit time_point(const duration& value)
+        : value_(value) {}
+
+    template<class OtherDuration>
+    constexpr time_point(
+        const time_point<Clock, OtherDuration>& other)
+        : value_(other.time_since_epoch()) {}
+
+    constexpr duration time_since_epoch() const {
+        return value_;
+    }
+
+    constexpr time_point& operator+=(const duration& value) {
+        value_ += value;
+        return *this;
+    }
+
+    constexpr time_point& operator-=(const duration& value) {
+        value_ -= value;
+        return *this;
+    }
+
+    static constexpr time_point min() {
+        return time_point(duration::min());
+    }
+
+    static constexpr time_point max() {
+        return time_point(duration::max());
+    }
+
+private:
+    duration value_{};
+};
+
+template<class Clock, class LeftDuration, class RightDuration>
+constexpr auto operator-(
+    const time_point<Clock, LeftDuration>& left,
+    const time_point<Clock, RightDuration>& right) {
+    return left.time_since_epoch() - right.time_since_epoch();
+}
+
+template<class Clock, class Duration, class Rep, class Period>
+constexpr auto operator+(
+    const time_point<Clock, Duration>& point,
+    const duration<Rep, Period>& value) {
+    using result_duration =
+        decltype(point.time_since_epoch() + value);
+    return time_point<Clock, result_duration>(
+        point.time_since_epoch() + value);
+}
+
+template<class Rep, class Period, class Clock, class Duration>
+constexpr auto operator+(
+    const duration<Rep, Period>& value,
+    const time_point<Clock, Duration>& point) {
+    return point + value;
+}
+
+template<class Clock, class Duration, class Rep, class Period>
+constexpr auto operator-(
+    const time_point<Clock, Duration>& point,
+    const duration<Rep, Period>& value) {
+    using result_duration =
+        decltype(point.time_since_epoch() - value);
+    return time_point<Clock, result_duration>(
+        point.time_since_epoch() - value);
+}
+
+template<class Clock, class LeftDuration, class RightDuration>
+constexpr bool operator==(
+    const time_point<Clock, LeftDuration>& left,
+    const time_point<Clock, RightDuration>& right) {
+    return left.time_since_epoch() == right.time_since_epoch();
+}
+
+template<class Clock, class LeftDuration, class RightDuration>
+constexpr bool operator<(
+    const time_point<Clock, LeftDuration>& left,
+    const time_point<Clock, RightDuration>& right) {
+    return left.time_since_epoch() < right.time_since_epoch();
+}
+
+template<class Clock, class LeftDuration, class RightDuration>
+constexpr bool operator>(
+    const time_point<Clock, LeftDuration>& left,
+    const time_point<Clock, RightDuration>& right) {
+    return right < left;
+}
+
+template<class Clock, class LeftDuration, class RightDuration>
+constexpr bool operator<=(
+    const time_point<Clock, LeftDuration>& left,
+    const time_point<Clock, RightDuration>& right) {
+    return !(right < left);
+}
+
+template<class Clock, class LeftDuration, class RightDuration>
+constexpr bool operator>=(
+    const time_point<Clock, LeftDuration>& left,
+    const time_point<Clock, RightDuration>& right) {
+    return !(left < right);
+}
+
+template<class ToDuration, class Clock, class Duration>
+constexpr time_point<Clock, ToDuration> time_point_cast(
+    const time_point<Clock, Duration>& value) {
+    return time_point<Clock, ToDuration>(
+        duration_cast<ToDuration>(
+            value.time_since_epoch()));
+}
+
+class system_clock {
+public:
+    using rep = long long;
+    using period = nano;
+    using duration = nanoseconds;
+    using time_point = chrono::time_point<system_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now() noexcept {
+        timespec value{};
+        ::clock_gettime(CLOCK_REALTIME, &value);
+        return time_point(duration(
+            static_cast<rep>(value.tv_sec) * 1000000000LL +
+            static_cast<rep>(value.tv_nsec)));
+    }
+
+    static time_t to_time_t(const time_point& value) noexcept {
+        return static_cast<time_t>(
+            duration_cast<seconds>(
+                value.time_since_epoch()).count());
+    }
+
+    static time_point from_time_t(time_t value) noexcept {
+        return time_point(duration(
+            static_cast<rep>(value) * 1000000000LL));
+    }
+};
+
+class steady_clock {
+public:
+    using rep = long long;
+    using period = nano;
+    using duration = nanoseconds;
+    using time_point = chrono::time_point<steady_clock>;
+    static constexpr bool is_steady = true;
+
+    static time_point now() noexcept {
+        timespec value{};
+        ::clock_gettime(CLOCK_MONOTONIC, &value);
+        return time_point(duration(
+            static_cast<rep>(value.tv_sec) * 1000000000LL +
+            static_cast<rep>(value.tv_nsec)));
+    }
+};
+
+using high_resolution_clock = steady_clock;
+
+} // namespace chrono
+
+inline namespace literals {
+inline namespace chrono_literals {
+
+constexpr chrono::hours operator""h(
+    unsigned long long value) {
+    return chrono::hours(
+        static_cast<chrono::hours::rep>(value));
+}
+
+constexpr chrono::duration<long double, ratio<3600>>
+operator""h(long double value) {
+    return chrono::duration<long double, ratio<3600>>(value);
+}
+
+constexpr chrono::minutes operator""min(
+    unsigned long long value) {
+    return chrono::minutes(
+        static_cast<chrono::minutes::rep>(value));
+}
+
+constexpr chrono::duration<long double, ratio<60>>
+operator""min(long double value) {
+    return chrono::duration<long double, ratio<60>>(value);
+}
+
+constexpr chrono::seconds operator""s(
+    unsigned long long value) {
+    return chrono::seconds(
+        static_cast<chrono::seconds::rep>(value));
+}
+
+constexpr chrono::duration<long double>
+operator""s(long double value) {
+    return chrono::duration<long double>(value);
+}
+
+constexpr chrono::milliseconds operator""ms(
+    unsigned long long value) {
+    return chrono::milliseconds(
+        static_cast<chrono::milliseconds::rep>(value));
+}
+
+constexpr chrono::duration<long double, milli>
+operator""ms(long double value) {
+    return chrono::duration<long double, milli>(value);
+}
+
+constexpr chrono::microseconds operator""us(
+    unsigned long long value) {
+    return chrono::microseconds(
+        static_cast<chrono::microseconds::rep>(value));
+}
+
+constexpr chrono::duration<long double, micro>
+operator""us(long double value) {
+    return chrono::duration<long double, micro>(value);
+}
+
+constexpr chrono::nanoseconds operator""ns(
+    unsigned long long value) {
+    return chrono::nanoseconds(
+        static_cast<chrono::nanoseconds::rep>(value));
+}
+
+constexpr chrono::duration<long double, nano>
+operator""ns(long double value) {
+    return chrono::duration<long double, nano>(value);
+}
+
+} // namespace chrono_literals
+} // namespace literals
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

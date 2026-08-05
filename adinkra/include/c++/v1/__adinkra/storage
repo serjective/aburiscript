@@ -1,0 +1,30 @@
+#ifndef ADINKRA___ADINKRA_STORAGE
+#define ADINKRA___ADINKRA_STORAGE
+
+#include <__adinkra/config>
+#include <cstddef>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __storage {
+
+_ADINKRA_EXPORT size_t recommend_capacity(
+    size_t current, size_t minimum, size_t maximum);
+
+_ADINKRA_EXPORT void copy_bytes(
+    void* destination, const void* source, size_t count) noexcept;
+
+_ADINKRA_EXPORT void move_bytes(
+    void* destination, const void* source, size_t count) noexcept;
+
+_ADINKRA_EXPORT void fill_bytes(
+    void* destination, unsigned char value, size_t count) noexcept;
+
+_ADINKRA_EXPORT int compare_bytes(
+    const void* left, const void* right, size_t count) noexcept;
+
+} // namespace __storage
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

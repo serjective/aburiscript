@@ -1,0 +1,749 @@
+#ifndef ADINKRA_SET
+#define ADINKRA_SET
+
+#include <__adinkra/config>
+#include <algorithm>
+#include <cstddef>
+#include <initializer_list>
+#include <map>
+#include <memory>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Key, class Compare, class Allocator>
+class multiset;
+
+template<class Key, class Compare = less<Key>,
+         class Allocator = allocator<Key>>
+class set {
+    using map_type =
+        map<Key, unsigned char, Compare,
+            allocator<pair<const Key, unsigned char>>>;
+
+public:
+    using key_type = Key;
+    using value_type = Key;
+    using key_compare = Compare;
+    using value_compare = Compare;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = const value_type&;
+    using const_reference = const value_type&;
+    using pointer = const value_type*;
+    using const_pointer = const value_type*;
+
+    class iterator {
+        friend class set;
+
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = Key;
+        using difference_type = ptrdiff_t;
+        using pointer = const Key*;
+        using reference = const Key&;
+
+        iterator() = default;
+        reference operator*() const { return iterator_->first; }
+        pointer operator->() const {
+            return std::addressof(iterator_->first);
+        }
+        iterator& operator++() {
+            ++iterator_;
+            return *this;
+        }
+        iterator operator++(int) {
+            iterator result(*this);
+            ++*this;
+            return result;
+        }
+        iterator& operator--() {
+            --iterator_;
+            return *this;
+        }
+        iterator operator--(int) {
+            iterator result(*this);
+            --*this;
+            return result;
+        }
+        friend bool operator==(
+            const iterator& left, const iterator& right) {
+            return left.iterator_ == right.iterator_;
+        }
+
+    private:
+        typename map_type::const_iterator iterator_;
+
+        explicit iterator(
+            typename map_type::const_iterator value)
+            : iterator_(value) {}
+    };
+
+    using const_iterator = iterator;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = reverse_iterator;
+
+    set() = default;
+    explicit set(
+        const Compare& compare,
+        const Allocator& allocator = Allocator())
+        : values_(compare), allocator_(allocator) {}
+    explicit set(const Allocator& allocator)
+        : values_(), allocator_(allocator) {}
+
+    template<class InputIterator>
+    set(
+        InputIterator first, InputIterator last,
+        const Compare& compare = Compare(),
+        const Allocator& allocator = Allocator())
+        : set(compare, allocator) {
+        insert(first, last);
+    }
+
+    set(
+        initializer_list<Key> values,
+        const Compare& compare = Compare(),
+        const Allocator& allocator = Allocator())
+        : set(values.begin(), values.end(), compare, allocator) {}
+
+    allocator_type get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    iterator begin() const noexcept {
+        return iterator(values_.begin());
+    }
+    iterator end() const noexcept {
+        return iterator(values_.end());
+    }
+    const_iterator cbegin() const noexcept { return begin(); }
+    const_iterator cend() const noexcept { return end(); }
+    reverse_iterator rbegin() const noexcept {
+        return reverse_iterator(end());
+    }
+    reverse_iterator rend() const noexcept {
+        return reverse_iterator(begin());
+    }
+
+    bool empty() const noexcept { return values_.empty(); }
+    size_type size() const noexcept { return values_.size(); }
+    size_type max_size() const noexcept {
+        return values_.max_size();
+    }
+
+    pair<iterator, bool> insert(const Key& value) {
+        auto result = values_.try_emplace(value, 0);
+        return {iterator(result.first), result.second};
+    }
+    pair<iterator, bool> insert(Key&& value) {
+        auto result =
+            values_.try_emplace(std::move(value), 0);
+        return {iterator(result.first), result.second};
+    }
+    iterator insert(const_iterator, const Key& value) {
+        return insert(value).first;
+    }
+    template<class InputIterator>
+    void insert(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+    void insert(initializer_list<Key> values) {
+        insert(values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    pair<iterator, bool> emplace(Arguments&&... arguments) {
+        Key value(std::forward<Arguments>(arguments)...);
+        return insert(std::move(value));
+    }
+
+    iterator erase(const_iterator position) {
+        return iterator(values_.erase(position.iterator_));
+    }
+    size_type erase(const Key& key) {
+        return values_.erase(key);
+    }
+    iterator erase(
+        const_iterator first, const_iterator last) {
+        return iterator(values_.erase(
+            first.iterator_, last.iterator_));
+    }
+    void clear() noexcept { values_.clear(); }
+
+    void swap(set& other) {
+        values_.swap(other.values_);
+        std::swap(allocator_, other.allocator_);
+    }
+
+    template<class OtherCompare>
+    void merge(set<Key, OtherCompare, Allocator>& source) {
+        if (static_cast<const void*>(this) ==
+            static_cast<const void*>(std::addressof(source))) {
+            return;
+        }
+        auto current = source.begin();
+        while (current != source.end()) {
+            const auto result = insert(*current);
+            if (result.second) {
+                current = source.erase(current);
+            } else {
+                ++current;
+            }
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(set<Key, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    template<class OtherCompare>
+    void merge(multiset<Key, OtherCompare, Allocator>& source) {
+        auto current = source.begin();
+        while (current != source.end()) {
+            const auto result = insert(*current);
+            if (result.second) {
+                current = source.erase(current);
+            } else {
+                ++current;
+            }
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(multiset<Key, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    size_type count(const Key& key) const {
+        return values_.count(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    size_type count(const Other& key) const {
+        return values_.count(key);
+    }
+    bool contains(const Key& key) const {
+        return values_.contains(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    bool contains(const Other& key) const {
+        return values_.contains(key);
+    }
+    iterator find(const Key& key) const {
+        return iterator(values_.find(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator find(const Other& key) const {
+        return iterator(values_.find(key));
+    }
+    iterator lower_bound(const Key& key) const {
+        return iterator(values_.lower_bound(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator lower_bound(const Other& key) const {
+        return iterator(values_.lower_bound(key));
+    }
+    iterator upper_bound(const Key& key) const {
+        return iterator(values_.upper_bound(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator upper_bound(const Other& key) const {
+        return iterator(values_.upper_bound(key));
+    }
+    pair<iterator, iterator> equal_range(
+        const Key& key) const {
+        auto result = values_.equal_range(key);
+        return {iterator(result.first), iterator(result.second)};
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    pair<iterator, iterator> equal_range(
+        const Other& key) const {
+        auto result = values_.equal_range(key);
+        return {iterator(result.first), iterator(result.second)};
+    }
+
+    key_compare key_comp() const {
+        return values_.key_comp();
+    }
+    value_compare value_comp() const {
+        return values_.key_comp();
+    }
+
+private:
+    map_type values_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+};
+
+template<class Key, class Compare, class Allocator>
+void swap(
+    set<Key, Compare, Allocator>& left,
+    set<Key, Compare, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Key, class Compare, class Allocator, class Predicate>
+typename set<Key, Compare, Allocator>::size_type erase_if(
+    set<Key, Compare, Allocator>& container, Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const set<Key, Compare, Allocator>& left,
+    const set<Key, Compare, Allocator>& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin());
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator<(
+    const set<Key, Compare, Allocator>& left,
+    const set<Key, Compare, Allocator>& right) {
+    return std::lexicographical_compare(
+        left.begin(), left.end(), right.begin(), right.end());
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator>(
+    const set<Key, Compare, Allocator>& left,
+    const set<Key, Compare, Allocator>& right) {
+    return right < left;
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator<=(
+    const set<Key, Compare, Allocator>& left,
+    const set<Key, Compare, Allocator>& right) {
+    return !(right < left);
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator>=(
+    const set<Key, Compare, Allocator>& left,
+    const set<Key, Compare, Allocator>& right) {
+    return !(left < right);
+}
+
+template<class Key, class Compare = less<Key>,
+         class Allocator = allocator<Key>>
+class multiset {
+    using storage_allocator =
+        typename allocator_traits<Allocator>::template rebind_alloc<
+            pair<const Key, unsigned char>>;
+    using map_type =
+        multimap<Key, unsigned char, Compare, storage_allocator>;
+
+public:
+    using key_type = Key;
+    using value_type = Key;
+    using key_compare = Compare;
+    using value_compare = Compare;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = const value_type&;
+    using const_reference = const value_type&;
+    using pointer = const value_type*;
+    using const_pointer = const value_type*;
+
+    class iterator {
+        friend class multiset;
+
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = Key;
+        using difference_type = ptrdiff_t;
+        using pointer = const Key*;
+        using reference = const Key&;
+
+        iterator() = default;
+
+        reference operator*() const {
+            return iterator_->first;
+        }
+
+        pointer operator->() const {
+            return std::addressof(iterator_->first);
+        }
+
+        iterator& operator++() {
+            ++iterator_;
+            return *this;
+        }
+
+        iterator operator++(int) {
+            iterator result(*this);
+            ++*this;
+            return result;
+        }
+
+        iterator& operator--() {
+            --iterator_;
+            return *this;
+        }
+
+        iterator operator--(int) {
+            iterator result(*this);
+            --*this;
+            return result;
+        }
+
+        friend bool operator==(
+            const iterator& left, const iterator& right) {
+            return left.iterator_ == right.iterator_;
+        }
+
+    private:
+        typename map_type::const_iterator iterator_;
+
+        explicit iterator(
+            typename map_type::const_iterator value)
+            : iterator_(value) {}
+    };
+
+    using const_iterator = iterator;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = reverse_iterator;
+
+    multiset()
+        : multiset(Compare(), Allocator()) {}
+
+    explicit multiset(
+        const Compare& compare,
+        const Allocator& allocator = Allocator())
+        : values_(
+              compare, storage_allocator(allocator)),
+          allocator_(allocator) {}
+
+    explicit multiset(const Allocator& allocator)
+        : multiset(Compare(), allocator) {}
+
+    template<class InputIterator>
+    multiset(
+        InputIterator first, InputIterator last,
+        const Compare& compare = Compare(),
+        const Allocator& allocator = Allocator())
+        : multiset(compare, allocator) {
+        insert(first, last);
+    }
+
+    multiset(
+        initializer_list<Key> values,
+        const Compare& compare = Compare(),
+        const Allocator& allocator = Allocator())
+        : multiset(
+              values.begin(), values.end(),
+              compare, allocator) {}
+
+    multiset(const multiset&) = default;
+    multiset(multiset&&) noexcept = default;
+    multiset& operator=(const multiset&) = default;
+    multiset& operator=(multiset&&) noexcept = default;
+
+    multiset& operator=(initializer_list<Key> values) {
+        clear();
+        insert(values);
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    iterator begin() const noexcept {
+        return iterator(values_.begin());
+    }
+
+    iterator end() const noexcept {
+        return iterator(values_.end());
+    }
+
+    const_iterator cbegin() const noexcept {
+        return begin();
+    }
+
+    const_iterator cend() const noexcept {
+        return end();
+    }
+
+    reverse_iterator rbegin() const noexcept {
+        return reverse_iterator(end());
+    }
+
+    reverse_iterator rend() const noexcept {
+        return reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD bool empty() const noexcept {
+        return values_.empty();
+    }
+
+    _ADINKRA_NODISCARD size_type size() const noexcept {
+        return values_.size();
+    }
+
+    _ADINKRA_NODISCARD size_type max_size() const noexcept {
+        return values_.max_size();
+    }
+
+    iterator insert(const Key& value) {
+        return iterator(values_.emplace(value, 0));
+    }
+
+    iterator insert(Key&& value) {
+        return iterator(values_.emplace(std::move(value), 0));
+    }
+
+    iterator insert(const_iterator, const Key& value) {
+        return insert(value);
+    }
+
+    iterator insert(const_iterator, Key&& value) {
+        return insert(std::move(value));
+    }
+
+    template<class InputIterator>
+    void insert(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    void insert(initializer_list<Key> values) {
+        insert(values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    iterator emplace(Arguments&&... arguments) {
+        Key value(std::forward<Arguments>(arguments)...);
+        return insert(std::move(value));
+    }
+
+    template<class... Arguments>
+    iterator emplace_hint(
+        const_iterator, Arguments&&... arguments) {
+        return emplace(std::forward<Arguments>(arguments)...);
+    }
+
+    iterator erase(const_iterator position) {
+        return iterator(values_.erase(position.iterator_));
+    }
+
+    size_type erase(const Key& key) {
+        return values_.erase(key);
+    }
+
+    iterator erase(
+        const_iterator first, const_iterator last) {
+        return iterator(values_.erase(
+            first.iterator_, last.iterator_));
+    }
+
+    void clear() noexcept {
+        values_.clear();
+    }
+
+    void swap(multiset& other)
+        noexcept(noexcept(values_.swap(other.values_))) {
+        values_.swap(other.values_);
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_swap::value) {
+            std::swap(allocator_, other.allocator_);
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(set<Key, OtherCompare, Allocator>& source) {
+        auto current = source.begin();
+        while (current != source.end()) {
+            insert(*current);
+            current = source.erase(current);
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(set<Key, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    template<class OtherCompare>
+    void merge(multiset<Key, OtherCompare, Allocator>& source) {
+        if (static_cast<const void*>(this) ==
+            static_cast<const void*>(std::addressof(source))) {
+            return;
+        }
+        auto current = source.begin();
+        while (current != source.end()) {
+            insert(*current);
+            current = source.erase(current);
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(multiset<Key, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    _ADINKRA_NODISCARD size_type
+    count(const Key& key) const {
+        return values_.count(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    _ADINKRA_NODISCARD size_type
+    count(const Other& key) const {
+        return values_.count(key);
+    }
+
+    _ADINKRA_NODISCARD bool
+    contains(const Key& key) const {
+        return values_.contains(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    _ADINKRA_NODISCARD bool
+    contains(const Other& key) const {
+        return values_.contains(key);
+    }
+
+    iterator find(const Key& key) const {
+        return iterator(values_.find(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator find(const Other& key) const {
+        return iterator(values_.find(key));
+    }
+
+    iterator lower_bound(const Key& key) const {
+        return iterator(values_.lower_bound(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator lower_bound(const Other& key) const {
+        return iterator(values_.lower_bound(key));
+    }
+
+    iterator upper_bound(const Key& key) const {
+        return iterator(values_.upper_bound(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator upper_bound(const Other& key) const {
+        return iterator(values_.upper_bound(key));
+    }
+
+    pair<iterator, iterator> equal_range(
+        const Key& key) const {
+        auto result = values_.equal_range(key);
+        return {
+            iterator(result.first), iterator(result.second)
+        };
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    pair<iterator, iterator> equal_range(
+        const Other& key) const {
+        auto result = values_.equal_range(key);
+        return {
+            iterator(result.first), iterator(result.second)
+        };
+    }
+
+    key_compare key_comp() const {
+        return values_.key_comp();
+    }
+
+    value_compare value_comp() const {
+        return values_.key_comp();
+    }
+
+private:
+    map_type values_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+};
+
+template<class Key, class Compare, class Allocator>
+void swap(
+    multiset<Key, Compare, Allocator>& left,
+    multiset<Key, Compare, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Key, class Compare, class Allocator, class Predicate>
+typename multiset<Key, Compare, Allocator>::size_type erase_if(
+    multiset<Key, Compare, Allocator>& container,
+    Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const multiset<Key, Compare, Allocator>& left,
+    const multiset<Key, Compare, Allocator>& right) {
+    return left.size() == right.size() &&
+           std::equal(
+               left.begin(), left.end(), right.begin());
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator<(
+    const multiset<Key, Compare, Allocator>& left,
+    const multiset<Key, Compare, Allocator>& right) {
+    return std::lexicographical_compare(
+        left.begin(), left.end(), right.begin(), right.end());
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator>(
+    const multiset<Key, Compare, Allocator>& left,
+    const multiset<Key, Compare, Allocator>& right) {
+    return right < left;
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator<=(
+    const multiset<Key, Compare, Allocator>& left,
+    const multiset<Key, Compare, Allocator>& right) {
+    return !(right < left);
+}
+
+template<class Key, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator>=(
+    const multiset<Key, Compare, Allocator>& left,
+    const multiset<Key, Compare, Allocator>& right) {
+    return !(left < right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

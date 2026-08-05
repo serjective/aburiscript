@@ -39,9 +39,7 @@ DataModelKind data_model_for_target(const TargetInfo& target) {
 } // namespace
 
 EhRuntimeHooks eh_runtime_hooks_for_kind(EhRuntimeKind kind) {
-    // LLVM and GCC Itanium C++ EH runtimes share the same public symbol ABI.
-    // `Custom` defaults to Itanium-compatible names until user/runtime-specific
-    // overrides are threaded through policy configuration.
+
     switch (kind) {
         case EhRuntimeKind::LLVM:
         case EhRuntimeKind::GCC:
@@ -58,8 +56,7 @@ EhRuntimeLinkProfile eh_runtime_link_profile_for_kind(EhRuntimeKind kind,
 
     switch (kind) {
         case EhRuntimeKind::LLVM:
-            // Keep explicit runtime-library selection conservative and host-tuned
-            // until target/driver probing is expanded.
+
             if (target_os == TargetOS::MACOS) {
                 profile.runtime_link_args = {"-rtlib=compiler-rt", "-unwindlib=libunwind"};
             }
@@ -75,8 +72,7 @@ EhRuntimeLinkProfile eh_runtime_link_profile_for_kind(EhRuntimeKind kind,
             return profile;
 
         case EhRuntimeKind::Custom:
-            // Custom profile keeps a neutral default driver/args; embedders can
-            // override policy hooks/symbols while the driver path stays stable.
+
             return profile;
     }
     return profile;
@@ -85,9 +81,13 @@ EhRuntimeLinkProfile eh_runtime_link_profile_for_kind(EhRuntimeKind kind,
 AbiPolicy abi_policy_for_target(const TargetInfo& target) {
     AbiPolicy policy;
     policy.data_model = data_model_for_target(target);
-    policy.endianness = EndiannessKind::Little;
+    policy.endianness = target.endianness;
     policy.plain_int_bitfield_signed = true;
     policy.allow_ms_struct_layout_overrides = true;
+    policy.can_key_function_be_inline =
+        target.arch != TargetArch::ARM32 &&
+        !(target.arch == TargetArch::AARCH64 &&
+          target.os == TargetOS::MACOS);
 
     if (target.os == TargetOS::WINDOWS) {
         policy.cxx_abi = CxxAbiKind::Microsoft;
@@ -97,8 +97,6 @@ AbiPolicy abi_policy_for_target(const TargetInfo& target) {
         policy.bitfield_abi = BitfieldABI::ITANIUM;
     }
 
-    // Default to C-style naming in C mode; C++ mode can opt into ABI mangling
-    // through driver overrides for now.
     policy.mangling = ManglingKind::C;
     policy.eh_runtime_hooks = eh_runtime_hooks_for_kind(policy.eh_runtime);
     return policy;

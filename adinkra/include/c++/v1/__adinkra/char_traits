@@ -1,0 +1,161 @@
+#ifndef ADINKRA___ADINKRA_CHAR_TRAITS
+#define ADINKRA___ADINKRA_CHAR_TRAITS
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <cstdint>
+#include <wchar.h>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class strong_ordering;
+
+template<class Character>
+struct __char_traits_int_type {
+    using type = unsigned long;
+};
+
+template<>
+struct __char_traits_int_type<char> {
+    using type = int;
+};
+
+template<>
+struct __char_traits_int_type<wchar_t> {
+    using type = ::wint_t;
+};
+
+#if defined(__cpp_char8_t)
+template<>
+struct __char_traits_int_type<char8_t> {
+    using type = uint_least32_t;
+};
+#endif
+
+template<>
+struct __char_traits_int_type<char16_t> {
+    using type = uint_least16_t;
+};
+
+template<>
+struct __char_traits_int_type<char32_t> {
+    using type = uint_least32_t;
+};
+
+template<class Character>
+struct char_traits {
+    using comparison_category = strong_ordering;
+    using char_type = Character;
+    using int_type =
+        typename __char_traits_int_type<Character>::type;
+    using off_type = long long;
+    using pos_type = long long;
+    using state_type = ::mbstate_t;
+
+    static constexpr void assign(char_type& left, const char_type& right) {
+        left = right;
+    }
+
+    static constexpr bool eq(char_type left, char_type right) {
+        return left == right;
+    }
+
+    static constexpr bool lt(char_type left, char_type right) {
+        if constexpr (sizeof(char_type) == sizeof(unsigned char)) {
+            return static_cast<unsigned char>(left) <
+                   static_cast<unsigned char>(right);
+        } else {
+            return left < right;
+        }
+    }
+
+    static constexpr int compare(
+        const char_type* left, const char_type* right, size_t count) {
+        for (size_t index = 0; index < count; ++index) {
+            if (lt(left[index], right[index])) {
+                return -1;
+            }
+            if (lt(right[index], left[index])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    static constexpr size_t length(const char_type* value) {
+        size_t result = 0;
+        while (!eq(value[result], char_type())) {
+            ++result;
+        }
+        return result;
+    }
+
+    static constexpr const char_type* find(
+        const char_type* value, size_t count, const char_type& sought) {
+        for (size_t index = 0; index < count; ++index) {
+            if (eq(value[index], sought)) {
+                return value + index;
+            }
+        }
+        return nullptr;
+    }
+
+    static constexpr char_type* move(
+        char_type* destination, const char_type* source, size_t count) {
+        if (destination < source) {
+            for (size_t index = 0; index < count; ++index) {
+                destination[index] = source[index];
+            }
+        } else if (destination > source) {
+            for (size_t index = count; index > 0; --index) {
+                destination[index - 1] = source[index - 1];
+            }
+        }
+        return destination;
+    }
+
+    static constexpr char_type* copy(
+        char_type* destination, const char_type* source, size_t count) {
+        for (size_t index = 0; index < count; ++index) {
+            destination[index] = source[index];
+        }
+        return destination;
+    }
+
+    static constexpr char_type* assign(
+        char_type* destination, size_t count, char_type value) {
+        for (size_t index = 0; index < count; ++index) {
+            destination[index] = value;
+        }
+        return destination;
+    }
+
+    static constexpr int_type not_eof(int_type value) {
+        return eq_int_type(value, eof()) ? ~eof() : value;
+    }
+
+    static constexpr char_type to_char_type(int_type value) {
+        return static_cast<char_type>(value);
+    }
+
+    static constexpr int_type to_int_type(char_type value) {
+        if constexpr (sizeof(char_type) == sizeof(unsigned char)) {
+            return static_cast<int_type>(
+                static_cast<unsigned char>(value));
+        } else {
+            return static_cast<int_type>(value);
+        }
+    }
+
+    static constexpr bool eq_int_type(int_type left, int_type right) {
+        return left == right;
+    }
+
+    static constexpr int_type eof() {
+        return static_cast<int_type>(-1);
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,46 @@
+#ifndef ADINKRA_TYPEINFO
+#define ADINKRA_TYPEINFO
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <exception>
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+
+class _ADINKRA_EXPORT type_info {
+public:
+    virtual ~type_info();
+
+    _ADINKRA_NODISCARD bool operator==(const type_info& other) const noexcept;
+    _ADINKRA_NODISCARD bool before(const type_info& other) const noexcept;
+    _ADINKRA_NODISCARD size_t hash_code() const noexcept;
+    _ADINKRA_NODISCARD const char* name() const noexcept;
+
+    type_info(const type_info&) = delete;
+    type_info& operator=(const type_info&) = delete;
+
+private:
+    const char* type_name_;
+};
+
+class _ADINKRA_EXPORT bad_cast : public exception {
+public:
+    bad_cast() noexcept = default;
+    bad_cast(const bad_cast&) noexcept = default;
+    bad_cast& operator=(const bad_cast&) noexcept = default;
+    ~bad_cast() noexcept override;
+    const char* what() const noexcept override;
+};
+
+class _ADINKRA_EXPORT bad_typeid : public exception {
+public:
+    bad_typeid() noexcept = default;
+    bad_typeid(const bad_typeid&) noexcept = default;
+    bad_typeid& operator=(const bad_typeid&) noexcept = default;
+    ~bad_typeid() noexcept override;
+    const char* what() const noexcept override;
+};
+
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+#endif

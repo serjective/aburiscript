@@ -1,0 +1,101 @@
+#ifndef ADINKRA_VALARRAY
+#define ADINKRA_VALARRAY
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <initializer_list>
+#include <utility>
+#include <vector>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type>
+class valarray {
+public:
+    using value_type = Type;
+
+    valarray() = default;
+
+    explicit valarray(size_t count)
+        : values_(count) {}
+
+    valarray(const Type& value, size_t count)
+        : values_(count, value) {}
+
+    valarray(const Type* values, size_t count)
+        : values_(values, values + count) {}
+
+    valarray(initializer_list<Type> values)
+        : values_(values) {}
+
+    valarray(const valarray&) = default;
+    valarray(valarray&&) noexcept = default;
+    valarray& operator=(const valarray&) = default;
+    valarray& operator=(valarray&&) noexcept = default;
+
+    valarray& operator=(const Type& value) {
+        for (Type& element : values_) {
+            element = value;
+        }
+        return *this;
+    }
+
+    size_t size() const noexcept {
+        return values_.size();
+    }
+
+    void resize(size_t count, Type value = Type()) {
+        values_.resize(count, value);
+    }
+
+    Type& operator[](size_t index) noexcept {
+        return values_[index];
+    }
+
+    const Type& operator[](size_t index) const noexcept {
+        return values_[index];
+    }
+
+    Type* __begin() noexcept {
+        return values_.data();
+    }
+
+    const Type* __begin() const noexcept {
+        return values_.data();
+    }
+
+    Type* __end() noexcept {
+        return values_.data() + values_.size();
+    }
+
+    const Type* __end() const noexcept {
+        return values_.data() + values_.size();
+    }
+
+private:
+    vector<Type> values_;
+};
+
+template<class Type>
+Type* begin(valarray<Type>& values) noexcept {
+    return values.__begin();
+}
+
+template<class Type>
+const Type* begin(const valarray<Type>& values) noexcept {
+    return values.__begin();
+}
+
+template<class Type>
+Type* end(valarray<Type>& values) noexcept {
+    return values.__end();
+}
+
+template<class Type>
+const Type* end(const valarray<Type>& values) noexcept {
+    return values.__end();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,618 @@
+#ifndef ADINKRA_TUPLE
+#define ADINKRA_TUPLE
+
+#include <__adinkra/config>
+#include <__adinkra/tuple_protocol>
+#include <cstddef>
+#include <functional>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class... Types>
+class tuple;
+
+template<size_t Index, class... Types>
+constexpr tuple_element_t<Index, tuple<Types...>>&
+get(tuple<Types...>& value) noexcept;
+
+template<size_t Index, class... Types>
+constexpr const tuple_element_t<Index, tuple<Types...>>&
+get(const tuple<Types...>& value) noexcept;
+
+template<size_t Index, class... Types>
+constexpr tuple_element_t<Index, tuple<Types...>>&&
+get(tuple<Types...>&& value) noexcept;
+
+template<size_t Index, class... Types>
+constexpr const tuple_element_t<Index, tuple<Types...>>&&
+get(const tuple<Types...>&& value) noexcept;
+
+namespace __tuple_detail {
+
+template<class Target, class Source, bool SameSize>
+struct conversion {
+    static constexpr bool constructible_from_const = false;
+    static constexpr bool convertible_from_const = false;
+    static constexpr bool constructible_from_rvalue = false;
+    static constexpr bool convertible_from_rvalue = false;
+    static constexpr bool assignable_from_const = false;
+    static constexpr bool assignable_from_rvalue = false;
+};
+
+template<class... Targets, class... Sources>
+struct conversion<
+    tuple<Targets...>, tuple<Sources...>, true> {
+    static constexpr bool constructible_from_const =
+        (is_constructible_v<Targets, const Sources&> && ...);
+    static constexpr bool convertible_from_const =
+        (is_convertible_v<const Sources&, Targets> && ...);
+    static constexpr bool constructible_from_rvalue =
+        (is_constructible_v<Targets, Sources&&> && ...);
+    static constexpr bool convertible_from_rvalue =
+        (is_convertible_v<Sources&&, Targets> && ...);
+    static constexpr bool assignable_from_const =
+        (is_assignable_v<Targets&, const Sources&> && ...);
+    static constexpr bool assignable_from_rvalue =
+        (is_assignable_v<Targets&, Sources&&> && ...);
+};
+
+template<class Target, class Source>
+using conversion_for = conversion<
+    Target, Source,
+    tuple_size_v<Target> == tuple_size_v<Source>>;
+
+template<class Target, class First, class Second>
+struct pair_conversion {
+    static constexpr bool constructible_from_const = false;
+    static constexpr bool convertible_from_const = false;
+    static constexpr bool constructible_from_rvalue = false;
+    static constexpr bool convertible_from_rvalue = false;
+};
+
+template<class TargetFirst, class TargetSecond,
+         class First, class Second>
+struct pair_conversion<
+    tuple<TargetFirst, TargetSecond>, First, Second> {
+    static constexpr bool constructible_from_const =
+        is_constructible_v<TargetFirst, const First&> &&
+        is_constructible_v<TargetSecond, const Second&>;
+    static constexpr bool convertible_from_const =
+        is_convertible_v<const First&, TargetFirst> &&
+        is_convertible_v<const Second&, TargetSecond>;
+    static constexpr bool constructible_from_rvalue =
+        is_constructible_v<TargetFirst, First&&> &&
+        is_constructible_v<TargetSecond, Second&&>;
+    static constexpr bool convertible_from_rvalue =
+        is_convertible_v<First&&, TargetFirst> &&
+        is_convertible_v<Second&&, TargetSecond>;
+};
+
+template<size_t Index, class Type>
+struct leaf {
+    constexpr leaf() requires is_default_constructible_v<Type>
+        : value() {}
+
+    template<class Value>
+    constexpr explicit leaf(Value&& input)
+        : value(std::forward<Value>(input)) {}
+
+    [[no_unique_address]] Type value;
+};
+
+template<class Sequence, class... Types>
+struct storage;
+
+template<size_t... Indexes, class... Types>
+struct storage<index_sequence<Indexes...>, Types...>
+    : leaf<Indexes, Types>... {
+    constexpr storage() requires (is_default_constructible_v<Types> && ...)
+        : leaf<Indexes, Types>()... {}
+
+    template<class... Values>
+        requires (sizeof...(Values) == sizeof...(Types))
+    constexpr explicit storage(Values&&... values)
+        : leaf<Indexes, Types>(std::forward<Values>(values))... {}
+};
+
+template<class Target, class... Types>
+struct type_count;
+
+template<class Target>
+struct type_count<Target> : integral_constant<size_t, 0> {};
+
+template<class Target, class First, class... Rest>
+struct type_count<Target, First, Rest...>
+    : integral_constant<size_t,
+        (is_same_v<Target, First> ? 1 : 0) +
+        type_count<Target, Rest...>::value> {};
+
+template<class Target, class... Types>
+struct type_index;
+
+template<class Target, class... Rest>
+struct type_index<Target, Target, Rest...>
+    : integral_constant<size_t, 0> {};
+
+template<class Target, class First, class... Rest>
+struct type_index<Target, First, Rest...>
+    : integral_constant<size_t, 1 + type_index<Target, Rest...>::value> {};
+
+} // namespace __tuple_detail
+
+template<class... Types>
+class tuple : private __tuple_detail::storage<
+                  index_sequence_for<Types...>, Types...> {
+    using Storage = __tuple_detail::storage<
+        index_sequence_for<Types...>, Types...>;
+
+public:
+    constexpr tuple() requires (is_default_constructible_v<Types> && ...)
+        = default;
+
+    template<class Allocator>
+    constexpr tuple(allocator_arg_t, const Allocator&)
+        requires (is_default_constructible_v<Types> && ...)
+        : Storage() {}
+
+    constexpr explicit(
+        !(is_convertible_v<const Types&, Types> && ...))
+    tuple(const Types&... values)
+        requires (
+            sizeof...(Types) > 0 &&
+            (is_constructible_v<Types, const Types&> && ...))
+        : Storage(values...) {}
+
+    template<class... Values>
+        requires ((sizeof...(Values) == sizeof...(Types)) &&
+                  (is_constructible_v<Types, Values&&> && ...))
+    constexpr explicit(!(is_convertible_v<Values&&, Types> && ...))
+    tuple(Values&&... values)
+        : Storage(std::forward<Values>(values)...) {}
+
+    template<class Allocator, class... Values>
+        requires ((sizeof...(Values) == sizeof...(Types)) &&
+                  (is_constructible_v<Types, Values&&> && ...))
+    constexpr explicit(!(is_convertible_v<Values&&, Types> && ...))
+    tuple(
+        allocator_arg_t, const Allocator&,
+        Values&&... values)
+        : Storage(std::forward<Values>(values)...) {}
+
+    constexpr tuple(const tuple&) = default;
+    constexpr tuple(tuple&&) = default;
+
+    template<class... OtherTypes>
+        requires __tuple_detail::conversion_for<
+            tuple, tuple<OtherTypes...>>::constructible_from_const
+    constexpr explicit(
+        !__tuple_detail::conversion_for<
+            tuple, tuple<OtherTypes...>>::convertible_from_const)
+    tuple(const tuple<OtherTypes...>& other)
+        : tuple(
+              other, index_sequence_for<Types...>{}) {}
+
+    template<class... OtherTypes>
+        requires __tuple_detail::conversion_for<
+            tuple, tuple<OtherTypes...>>::constructible_from_rvalue
+    constexpr explicit(
+        !__tuple_detail::conversion_for<
+            tuple, tuple<OtherTypes...>>::convertible_from_rvalue)
+    tuple(tuple<OtherTypes...>&& other)
+        : tuple(
+              std::move(other), index_sequence_for<Types...>{}) {}
+
+    template<class First, class Second>
+        requires __tuple_detail::pair_conversion<
+            tuple, First, Second>::constructible_from_const
+    constexpr explicit(
+        !__tuple_detail::pair_conversion<
+            tuple, First, Second>::convertible_from_const)
+    tuple(const pair<First, Second>& other)
+        : Storage(other.first, other.second) {}
+
+    template<class First, class Second>
+        requires __tuple_detail::pair_conversion<
+            tuple, First, Second>::constructible_from_rvalue
+    constexpr explicit(
+        !__tuple_detail::pair_conversion<
+            tuple, First, Second>::convertible_from_rvalue)
+    tuple(pair<First, Second>&& other)
+        : Storage(
+              std::move(other.first),
+              std::move(other.second)) {}
+
+    constexpr tuple& operator=(const tuple&) = default;
+    constexpr tuple& operator=(tuple&&) = default;
+
+    template<class... OtherTypes>
+        requires __tuple_detail::conversion_for<
+            tuple, tuple<OtherTypes...>>::assignable_from_const
+    constexpr tuple& operator=(
+        const tuple<OtherTypes...>& other) {
+        assign(other, index_sequence_for<Types...>{});
+        return *this;
+    }
+
+    template<class... OtherTypes>
+        requires __tuple_detail::conversion_for<
+            tuple, tuple<OtherTypes...>>::assignable_from_rvalue
+    constexpr tuple& operator=(
+        tuple<OtherTypes...>&& other) {
+        assign(
+            std::move(other),
+            index_sequence_for<Types...>{});
+        return *this;
+    }
+
+    template<class First, class Second>
+        requires (
+            sizeof...(Types) == 2 &&
+            is_assignable_v<
+                tuple_element_t<0, tuple>&, const First&> &&
+            is_assignable_v<
+                tuple_element_t<1, tuple>&, const Second&>)
+    constexpr tuple& operator=(
+        const pair<First, Second>& other) {
+        get<0>(*this) = other.first;
+        get<1>(*this) = other.second;
+        return *this;
+    }
+
+    template<class First, class Second>
+        requires (
+            sizeof...(Types) == 2 &&
+            is_assignable_v<
+                tuple_element_t<0, tuple>&, First&&> &&
+            is_assignable_v<
+                tuple_element_t<1, tuple>&, Second&&>)
+    constexpr tuple& operator=(
+        pair<First, Second>&& other) {
+        get<0>(*this) = std::move(other.first);
+        get<1>(*this) = std::move(other.second);
+        return *this;
+    }
+
+    constexpr void swap(tuple& other)
+        noexcept((is_nothrow_move_constructible_v<Types> && ...) &&
+                 (is_nothrow_move_assignable_v<Types> && ...)) {
+        [&]<size_t... Indexes>(index_sequence<Indexes...>) {
+            (std::swap(get<Indexes>(*this), get<Indexes>(other)), ...);
+        }(index_sequence_for<Types...>{});
+    }
+
+private:
+    template<class... OtherTypes, size_t... Indexes>
+    constexpr tuple(
+        const tuple<OtherTypes...>& other,
+        index_sequence<Indexes...>)
+        : Storage(get<Indexes>(other)...) {}
+
+    template<class... OtherTypes, size_t... Indexes>
+    constexpr tuple(
+        tuple<OtherTypes...>&& other,
+        index_sequence<Indexes...>)
+        : Storage(get<Indexes>(std::move(other))...) {}
+
+    template<class OtherTuple, size_t... Indexes>
+    constexpr void assign(
+        OtherTuple&& other, index_sequence<Indexes...>) {
+        ((get<Indexes>(*this) =
+              get<Indexes>(std::forward<OtherTuple>(other))), ...);
+    }
+
+    template<size_t Index, class... Values>
+    friend constexpr tuple_element_t<Index, tuple<Values...>>&
+    get(tuple<Values...>& value) noexcept;
+
+    template<size_t Index, class... Values>
+    friend constexpr const tuple_element_t<Index, tuple<Values...>>&
+    get(const tuple<Values...>& value) noexcept;
+};
+
+template<class... Types>
+tuple(Types...) -> tuple<Types...>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+
+template<class... Types>
+struct tuple_size<tuple<Types...>>
+    : integral_constant<size_t, sizeof...(Types)> {};
+
+template<class Type, class...>
+using __tuple_size_cv = Type;
+
+template<class Type>
+struct tuple_size<__tuple_size_cv<
+    const Type,
+    enable_if_t<!is_volatile_v<Type>>,
+    decltype(tuple_size<Type>::value)>>
+    : integral_constant<size_t, tuple_size<Type>::value> {};
+
+template<class Type>
+struct tuple_size<__tuple_size_cv<
+    volatile Type,
+    enable_if_t<!is_const_v<Type>>,
+    decltype(tuple_size<Type>::value)>>
+    : integral_constant<size_t, tuple_size<Type>::value> {};
+
+template<class Type>
+struct tuple_size<__tuple_size_cv<
+    const volatile Type,
+    decltype(tuple_size<Type>::value)>>
+    : integral_constant<size_t, tuple_size<Type>::value> {};
+
+template<size_t Index, class... Types>
+struct tuple_element<Index, tuple<Types...>> {
+    static_assert(Index < sizeof...(Types));
+    using type = __type_pack_element<Index, Types...>;
+};
+
+template<size_t Index, class Type>
+struct tuple_element<Index, const Type> {
+    using type = add_const_t<typename tuple_element<Index, Type>::type>;
+};
+
+template<size_t Index, class Type>
+struct tuple_element<Index, volatile Type> {
+    using type = add_volatile_t<typename tuple_element<Index, Type>::type>;
+};
+
+template<size_t Index, class Type>
+struct tuple_element<Index, const volatile Type> {
+    using type = add_cv_t<typename tuple_element<Index, Type>::type>;
+};
+
+template<class First, class Second>
+struct tuple_size<pair<First, Second>> : integral_constant<size_t, 2> {};
+
+template<size_t Index, class First, class Second>
+struct tuple_element<Index, pair<First, Second>> {
+    static_assert(Index < 2);
+    using type = conditional_t<Index == 0, First, Second>;
+};
+
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<size_t Index, class... Types>
+constexpr tuple_element_t<Index, tuple<Types...>>&
+get(tuple<Types...>& value) noexcept {
+    using Element = tuple_element_t<Index, tuple<Types...>>;
+    using Leaf = __tuple_detail::leaf<Index, Element>;
+    return static_cast<Leaf&>(value).value;
+}
+
+template<size_t Index, class... Types>
+constexpr const tuple_element_t<Index, tuple<Types...>>&
+get(const tuple<Types...>& value) noexcept {
+    using Element = tuple_element_t<Index, tuple<Types...>>;
+    using Leaf = __tuple_detail::leaf<Index, Element>;
+    return static_cast<const Leaf&>(value).value;
+}
+
+template<size_t Index, class... Types>
+constexpr tuple_element_t<Index, tuple<Types...>>&&
+get(tuple<Types...>&& value) noexcept {
+    using Result = tuple_element_t<Index, tuple<Types...>>&&;
+    return static_cast<Result>(get<Index>(value));
+}
+
+template<size_t Index, class... Types>
+constexpr const tuple_element_t<Index, tuple<Types...>>&&
+get(const tuple<Types...>&& value) noexcept {
+    using Result = const tuple_element_t<
+        Index, tuple<Types...>>&&;
+    return static_cast<Result>(get<Index>(value));
+}
+
+template<class First, class Second>
+template<class... FirstArguments, class... SecondArguments,
+         size_t... FirstIndexes, size_t... SecondIndexes>
+constexpr pair<First, Second>::pair(
+    tuple<FirstArguments...>&& first_arguments,
+    tuple<SecondArguments...>&& second_arguments,
+    index_sequence<FirstIndexes...>,
+    index_sequence<SecondIndexes...>)
+    : first(get<FirstIndexes>(
+          std::move(first_arguments))...),
+      second(get<SecondIndexes>(
+          std::move(second_arguments))...) {}
+
+template<class First, class Second>
+template<class... FirstArguments, class... SecondArguments>
+constexpr pair<First, Second>::pair(
+    piecewise_construct_t,
+    tuple<FirstArguments...> first_arguments,
+    tuple<SecondArguments...> second_arguments)
+    : pair(
+          std::move(first_arguments),
+          std::move(second_arguments),
+          index_sequence_for<FirstArguments...>{},
+          index_sequence_for<SecondArguments...>{}) {}
+
+template<class Type, class... Types>
+constexpr Type& get(tuple<Types...>& value) noexcept {
+    static_assert(__tuple_detail::type_count<Type, Types...>::value == 1);
+    return get<__tuple_detail::type_index<Type, Types...>::value>(value);
+}
+
+template<class Type, class... Types>
+constexpr const Type& get(const tuple<Types...>& value) noexcept {
+    static_assert(__tuple_detail::type_count<Type, Types...>::value == 1);
+    return get<__tuple_detail::type_index<Type, Types...>::value>(value);
+}
+
+template<class Type, class... Types>
+constexpr Type&& get(tuple<Types...>&& value) noexcept {
+    return std::move(get<Type>(value));
+}
+
+template<class... Types>
+_ADINKRA_NODISCARD constexpr tuple<unwrap_ref_decay_t<Types>...>
+make_tuple(Types&&... values) {
+    return tuple<unwrap_ref_decay_t<Types>...>(
+        std::forward<Types>(values)...);
+}
+
+template<class... Types>
+_ADINKRA_NODISCARD constexpr tuple<Types&...> tie(Types&... values) noexcept {
+    return tuple<Types&...>(values...);
+}
+
+template<class... Types>
+_ADINKRA_NODISCARD constexpr tuple<Types&&...>
+forward_as_tuple(Types&&... values) noexcept {
+    return tuple<Types&&...>(std::forward<Types>(values)...);
+}
+
+namespace __tuple_detail {
+
+template<class Left, class Right, size_t... LeftIndexes,
+         size_t... RightIndexes>
+constexpr auto concatenate(
+    Left&& left, Right&& right,
+    index_sequence<LeftIndexes...>,
+    index_sequence<RightIndexes...>) {
+    return tuple<
+        tuple_element_t<LeftIndexes, remove_cvref_t<Left>>...,
+        tuple_element_t<RightIndexes, remove_cvref_t<Right>>...>(
+            get<LeftIndexes>(std::forward<Left>(left))...,
+            get<RightIndexes>(std::forward<Right>(right))...);
+}
+
+} // namespace __tuple_detail
+
+_ADINKRA_NODISCARD constexpr tuple<> tuple_cat() {
+    return {};
+}
+
+template<class Tuple>
+_ADINKRA_NODISCARD constexpr auto tuple_cat(Tuple&& value) {
+    return __tuple_detail::concatenate(
+        tuple<>(),
+        std::forward<Tuple>(value),
+        index_sequence<>(),
+        make_index_sequence<
+            tuple_size_v<remove_cvref_t<Tuple>>>());
+}
+
+template<class First, class Second, class... Rest>
+_ADINKRA_NODISCARD constexpr auto tuple_cat(
+    First&& first, Second&& second, Rest&&... rest) {
+    auto combined = __tuple_detail::concatenate(
+        std::forward<First>(first),
+        std::forward<Second>(second),
+        make_index_sequence<
+            tuple_size_v<remove_cvref_t<First>>>(),
+        make_index_sequence<
+            tuple_size_v<remove_cvref_t<Second>>>());
+    return tuple_cat(
+        std::move(combined),
+        std::forward<Rest>(rest)...);
+}
+
+struct __ignore_type {
+    template<class Type>
+    constexpr const __ignore_type& operator=(Type&&) const noexcept {
+        return *this;
+    }
+};
+
+inline constexpr __ignore_type ignore{};
+
+template<class Function, class Tuple>
+constexpr decltype(auto) apply(Function&& function, Tuple&& tuple_value) {
+    return [&]<size_t... Indexes>(index_sequence<Indexes...>)
+        -> decltype(auto) {
+        return std::invoke(
+            std::forward<Function>(function),
+            get<Indexes>(std::forward<Tuple>(tuple_value))...);
+    }(make_index_sequence<tuple_size_v<remove_reference_t<Tuple>>>{});
+}
+
+template<class Type, class Tuple>
+constexpr Type make_from_tuple(Tuple&& tuple_value) {
+    return [&]<size_t... Indexes>(index_sequence<Indexes...>) {
+        return Type(get<Indexes>(std::forward<Tuple>(tuple_value))...);
+    }(make_index_sequence<tuple_size_v<remove_reference_t<Tuple>>>{});
+}
+
+template<class... Types>
+constexpr void swap(tuple<Types...>& left, tuple<Types...>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class... LeftTypes, class... RightTypes>
+    requires (sizeof...(LeftTypes) == sizeof...(RightTypes))
+_ADINKRA_NODISCARD constexpr bool
+operator==(const tuple<LeftTypes...>& left,
+           const tuple<RightTypes...>& right) {
+    return [&]<size_t... Indexes>(index_sequence<Indexes...>) {
+        return ((get<Indexes>(left) == get<Indexes>(right)) && ...);
+    }(index_sequence_for<LeftTypes...>{});
+}
+
+namespace __tuple_detail {
+
+template<size_t Index, class... LeftTypes, class... RightTypes>
+constexpr bool less(
+    const tuple<LeftTypes...>& left,
+    const tuple<RightTypes...>& right) {
+    if constexpr (Index == sizeof...(LeftTypes)) {
+        return false;
+    } else if (get<Index>(left) < get<Index>(right)) {
+        return true;
+    } else if (get<Index>(right) < get<Index>(left)) {
+        return false;
+    } else {
+        return less<Index + 1>(left, right);
+    }
+}
+
+} // namespace __tuple_detail
+
+template<class... LeftTypes, class... RightTypes>
+    requires (sizeof...(LeftTypes) == sizeof...(RightTypes))
+_ADINKRA_NODISCARD constexpr bool operator<(
+    const tuple<LeftTypes...>& left,
+    const tuple<RightTypes...>& right) {
+    return __tuple_detail::less<0>(left, right);
+}
+
+template<class... LeftTypes, class... RightTypes>
+    requires (sizeof...(LeftTypes) == sizeof...(RightTypes))
+_ADINKRA_NODISCARD constexpr bool operator>(
+    const tuple<LeftTypes...>& left,
+    const tuple<RightTypes...>& right) {
+    return right < left;
+}
+
+template<class... LeftTypes, class... RightTypes>
+    requires (sizeof...(LeftTypes) == sizeof...(RightTypes))
+_ADINKRA_NODISCARD constexpr bool operator<=(
+    const tuple<LeftTypes...>& left,
+    const tuple<RightTypes...>& right) {
+    return !(right < left);
+}
+
+template<class... LeftTypes, class... RightTypes>
+    requires (sizeof...(LeftTypes) == sizeof...(RightTypes))
+_ADINKRA_NODISCARD constexpr bool operator>=(
+    const tuple<LeftTypes...>& left,
+    const tuple<RightTypes...>& right) {
+    return !(left < right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#if !defined(ADINKRA_MEMORY) && !defined(ADINKRA_VECTOR)
+#include <vector>
+#endif
+
+#endif

@@ -1,0 +1,221 @@
+#ifndef ADINKRA_SHARED_MUTEX
+#define ADINKRA_SHARED_MUTEX
+
+#include <__adinkra/config>
+#include <cerrno>
+#include <chrono>
+#include <mutex>
+#include <pthread.h>
+#include <system_error>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class shared_mutex {
+public:
+    using native_handle_type = pthread_rwlock_t*;
+
+    shared_mutex() {
+        const int result =
+            ::pthread_rwlock_init(&value_, nullptr);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "pthread_rwlock_init");
+        }
+    }
+
+    ~shared_mutex() {
+        (void)::pthread_rwlock_destroy(&value_);
+    }
+
+    shared_mutex(const shared_mutex&) = delete;
+    shared_mutex& operator=(const shared_mutex&) = delete;
+
+    void lock() {
+        const int result = ::pthread_rwlock_wrlock(&value_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "shared_mutex::lock");
+        }
+    }
+
+    bool try_lock() noexcept {
+        return ::pthread_rwlock_trywrlock(&value_) == 0;
+    }
+
+    void unlock() noexcept {
+        (void)::pthread_rwlock_unlock(&value_);
+    }
+
+    void lock_shared() {
+        const int result = ::pthread_rwlock_rdlock(&value_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(),
+                "shared_mutex::lock_shared");
+        }
+    }
+
+    bool try_lock_shared() noexcept {
+        return ::pthread_rwlock_tryrdlock(&value_) == 0;
+    }
+
+    void unlock_shared() noexcept {
+        (void)::pthread_rwlock_unlock(&value_);
+    }
+
+    native_handle_type native_handle() noexcept {
+        return &value_;
+    }
+
+private:
+    pthread_rwlock_t value_;
+};
+
+template<class Mutex>
+class shared_lock {
+public:
+    using mutex_type = Mutex;
+
+    shared_lock() noexcept = default;
+
+    explicit shared_lock(mutex_type& value)
+        : mutex_(&value), owns_(false) {
+        lock();
+    }
+
+    shared_lock(mutex_type& value, defer_lock_t) noexcept
+        : mutex_(&value), owns_(false) {}
+
+    shared_lock(mutex_type& value, try_to_lock_t)
+        : mutex_(&value), owns_(value.try_lock_shared()) {}
+
+    shared_lock(mutex_type& value, adopt_lock_t) noexcept
+        : mutex_(&value), owns_(true) {}
+
+    template<class Clock, class Duration>
+    shared_lock(
+        mutex_type& value,
+        const chrono::time_point<Clock, Duration>& timeout)
+        : mutex_(&value),
+          owns_(value.try_lock_shared_until(timeout)) {}
+
+    template<class Representation, class Period>
+    shared_lock(
+        mutex_type& value,
+        const chrono::duration<Representation, Period>& timeout)
+        : mutex_(&value),
+          owns_(value.try_lock_shared_for(timeout)) {}
+
+    shared_lock(shared_lock&& other) noexcept
+        : mutex_(other.mutex_), owns_(other.owns_) {
+        other.mutex_ = nullptr;
+        other.owns_ = false;
+    }
+
+    shared_lock& operator=(shared_lock&& other) noexcept {
+        if (this != &other) {
+            if (owns_) {
+                mutex_->unlock_shared();
+            }
+            mutex_ = other.mutex_;
+            owns_ = other.owns_;
+            other.mutex_ = nullptr;
+            other.owns_ = false;
+        }
+        return *this;
+    }
+
+    ~shared_lock() {
+        if (owns_) {
+            mutex_->unlock_shared();
+        }
+    }
+
+    shared_lock(const shared_lock&) = delete;
+    shared_lock& operator=(const shared_lock&) = delete;
+
+    void lock() {
+        ensure_lockable("shared_lock::lock");
+        mutex_->lock_shared();
+        owns_ = true;
+    }
+
+    bool try_lock() {
+        ensure_lockable("shared_lock::try_lock");
+        owns_ = mutex_->try_lock_shared();
+        return owns_;
+    }
+
+    template<class Representation, class Period>
+    bool try_lock_for(
+        const chrono::duration<Representation, Period>& timeout) {
+        ensure_lockable("shared_lock::try_lock_for");
+        owns_ = mutex_->try_lock_shared_for(timeout);
+        return owns_;
+    }
+
+    template<class Clock, class Duration>
+    bool try_lock_until(
+        const chrono::time_point<Clock, Duration>& timeout) {
+        ensure_lockable("shared_lock::try_lock_until");
+        owns_ = mutex_->try_lock_shared_until(timeout);
+        return owns_;
+    }
+
+    void unlock() {
+        if (!owns_) {
+            throw system_error(
+                EPERM, generic_category(), "shared_lock::unlock");
+        }
+        mutex_->unlock_shared();
+        owns_ = false;
+    }
+
+    void swap(shared_lock& other) noexcept {
+        std::swap(mutex_, other.mutex_);
+        std::swap(owns_, other.owns_);
+    }
+
+    mutex_type* release() noexcept {
+        mutex_type* result = mutex_;
+        mutex_ = nullptr;
+        owns_ = false;
+        return result;
+    }
+
+    bool owns_lock() const noexcept {
+        return owns_;
+    }
+
+    explicit operator bool() const noexcept {
+        return owns_;
+    }
+
+    mutex_type* mutex() const noexcept {
+        return mutex_;
+    }
+
+private:
+    void ensure_lockable(const char* operation) const {
+        if (mutex_ == nullptr || owns_) {
+            throw system_error(
+                EINVAL, generic_category(), operation);
+        }
+    }
+
+    mutex_type* mutex_ = nullptr;
+    bool owns_ = false;
+};
+
+template<class Mutex>
+shared_lock(Mutex&) -> shared_lock<Mutex>;
+
+template<class Mutex>
+void swap(shared_lock<Mutex>& left, shared_lock<Mutex>& right) noexcept {
+    left.swap(right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

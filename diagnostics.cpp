@@ -2,7 +2,7 @@
 
 void DiagnosticEngine::report_error(const std::string& msg, SrcLoc loc) {
     if (fatal_errors) {
-        // Legacy mode: first error throws immediately
+
         if (sm && !loc.isInvalid()) {
             throw std::runtime_error(sm->formatDiagnostic(DiagnosticLevel::Error, msg, loc));
         }
@@ -52,7 +52,7 @@ void DiagnosticEngine::flush_diagnostics() const {
         if (diag.suppressed) continue;
         std::string formatted = format(diag.level, diag.message, diag.location);
         std::cerr << formatted;
-        // formatDiagnostic may or may not end with newline
+
         if (!formatted.empty() && formatted.back() != '\n') {
             std::cerr << "\n";
         }

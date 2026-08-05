@@ -1,0 +1,23 @@
+#ifndef ADINKRA_CTIME
+#define ADINKRA_CTIME
+
+#include <__adinkra/config>
+#include <time.h>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+using ::clock_t;
+using ::size_t;
+using ::time_t;
+using ::tm;
+using ::asctime;
+using ::clock;
+using ::ctime;
+using ::difftime;
+using ::gmtime;
+using ::localtime;
+using ::mktime;
+using ::strftime;
+using ::time;
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

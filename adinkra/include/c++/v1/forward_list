@@ -1,0 +1,110 @@
+#ifndef ADINKRA_FORWARD_LIST
+#define ADINKRA_FORWARD_LIST
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <iterator>
+#include <list>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type, class Allocator = allocator<Type>>
+class forward_list : public list<Type, Allocator> {
+    using base_type = list<Type, Allocator>;
+
+    template<bool Constant>
+    class basic_iterator {
+        friend class forward_list;
+        template<bool>
+        friend class basic_iterator;
+
+        using base_iterator = conditional_t<
+            Constant,
+            typename base_type::const_iterator,
+            typename base_type::iterator>;
+
+        explicit basic_iterator(base_iterator value) noexcept
+            : value_(value) {}
+
+public:
+        using iterator_category = forward_iterator_tag;
+        using value_type = Type;
+        using difference_type = ptrdiff_t;
+        using pointer =
+            conditional_t<Constant, const Type*, Type*>;
+        using reference =
+            conditional_t<Constant, const Type&, Type&>;
+
+        basic_iterator() = default;
+
+        template<bool Other = Constant>
+            requires Other
+        basic_iterator(const basic_iterator<false>& other) noexcept
+            : value_(other.value_) {}
+
+        reference operator*() const noexcept {
+            return *value_;
+        }
+
+        pointer operator->() const noexcept {
+            return value_.operator->();
+        }
+
+        basic_iterator& operator++() noexcept {
+            ++value_;
+            return *this;
+        }
+
+        basic_iterator operator++(int) noexcept {
+            basic_iterator previous(*this);
+            ++*this;
+            return previous;
+        }
+
+        template<bool Other>
+        friend bool operator==(
+            const basic_iterator& left,
+            const basic_iterator<Other>& right) noexcept {
+            return left.value_ == right.value_;
+        }
+
+    private:
+        base_iterator value_;
+    };
+
+public:
+    using iterator = basic_iterator<false>;
+    using const_iterator = basic_iterator<true>;
+
+    using base_type::base_type;
+    using base_type::operator=;
+
+    iterator begin() noexcept {
+        return iterator(base_type::begin());
+    }
+
+    const_iterator begin() const noexcept {
+        return const_iterator(base_type::begin());
+    }
+
+    const_iterator cbegin() const noexcept {
+        return begin();
+    }
+
+    iterator end() noexcept {
+        return iterator(base_type::end());
+    }
+
+    const_iterator end() const noexcept {
+        return const_iterator(base_type::end());
+    }
+
+    const_iterator cend() const noexcept {
+        return end();
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

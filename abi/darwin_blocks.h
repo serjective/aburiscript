@@ -7,7 +7,6 @@
 
 struct LangOptions;
 struct TargetInfo;
-class QualType;
 
 namespace darwin_blocks {
 
@@ -75,8 +74,6 @@ uint32_t block_byref_header_size(bool has_copy_dispose_helpers);
 uint32_t block_byref_payload_offset(bool has_copy_dispose_helpers);
 
 std::string_view runtime_class_symbol(ConcreteBlockStorageClass storage);
-std::string encode_block_invoke_signature(QualType invoke_type,
-                                          const TargetInfo* target);
 
 } // namespace darwin_blocks
 

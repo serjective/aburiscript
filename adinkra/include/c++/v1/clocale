@@ -1,0 +1,16 @@
+#ifndef ADINKRA_CLOCALE
+#define ADINKRA_CLOCALE
+
+#include <locale.h>
+
+#include <__adinkra/config>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+using ::lconv;
+using ::localeconv;
+using ::setlocale;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

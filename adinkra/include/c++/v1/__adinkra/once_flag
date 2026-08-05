@@ -1,0 +1,148 @@
+#ifndef ADINKRA_INTERNAL_ONCE_FLAG
+#define ADINKRA_INTERNAL_ONCE_FLAG
+
+#include <__adinkra/config>
+#include <sched.h>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __once_detail {
+
+template<class Member>
+struct member_pointer_class;
+
+template<class Member, class Class>
+struct member_pointer_class<Member Class::*> {
+    using type = Class;
+};
+
+template<class Member, class Object>
+constexpr decltype(auto) member_object(Member member, Object&& object) {
+    using Class = typename member_pointer_class<
+        decay_t<Member>>::type;
+    if constexpr (is_base_of_v<Class, decay_t<Object>>) {
+        return std::forward<Object>(object).*member;
+    } else if constexpr (requires {
+                             object.get().*member;
+                         }) {
+        return object.get().*member;
+    } else {
+        return (*std::forward<Object>(object)).*member;
+    }
+}
+
+template<class Member, class Object, class... Arguments>
+constexpr decltype(auto) invoke_member_function(
+    Member&& member, Object&& object, Arguments&&... arguments) {
+    using Class = typename member_pointer_class<
+        decay_t<Member>>::type;
+    if constexpr (is_base_of_v<Class, decay_t<Object>>) {
+        return (std::forward<Object>(object).*member)(
+            std::forward<Arguments>(arguments)...);
+    } else if constexpr (requires {
+                             (object.get().*member)(
+                                 std::forward<Arguments>(
+                                     arguments)...);
+                         }) {
+        return (object.get().*member)(
+            std::forward<Arguments>(arguments)...);
+    } else {
+        return ((*std::forward<Object>(object)).*member)(
+            std::forward<Arguments>(arguments)...);
+    }
+}
+
+template<class Function, class Object, class... Arguments>
+    requires is_member_function_pointer_v<decay_t<Function>>
+constexpr decltype(auto) invoke(
+    Function&& function, Object&& object, Arguments&&... arguments) {
+    return invoke_member_function(
+        std::forward<Function>(function),
+        std::forward<Object>(object),
+        std::forward<Arguments>(arguments)...);
+}
+
+template<class Function, class Object>
+    requires is_member_object_pointer_v<decay_t<Function>>
+constexpr decltype(auto) invoke(Function&& function, Object&& object) {
+    return member_object(
+        std::forward<Function>(function),
+        std::forward<Object>(object));
+}
+
+template<class Function, class... Arguments>
+    requires (!is_member_pointer_v<decay_t<Function>>)
+constexpr decltype(auto) invoke(
+    Function&& function, Arguments&&... arguments) {
+    return std::forward<Function>(function)(
+        std::forward<Arguments>(arguments)...);
+}
+
+} // namespace __once_detail
+
+class once_flag;
+
+template<class Callable, class... Arguments>
+void call_once(
+    once_flag& flag, Callable&& callable, Arguments&&... arguments);
+
+class once_flag {
+public:
+    constexpr once_flag() noexcept = default;
+
+    once_flag(const once_flag&) = delete;
+    once_flag& operator=(const once_flag&) = delete;
+
+private:
+    template<class Callable, class... Arguments>
+    friend void call_once(
+        once_flag&, Callable&&, Arguments&&...);
+
+    enum : unsigned char {
+        not_started,
+        running,
+        complete
+    };
+
+    unsigned char state_ = not_started;
+};
+
+template<class Callable, class... Arguments>
+void call_once(
+    once_flag& flag, Callable&& callable, Arguments&&... arguments) {
+    for (;;) {
+        if (__atomic_load_n(
+                &flag.state_, __ATOMIC_ACQUIRE) ==
+            once_flag::complete) {
+            return;
+        }
+
+        unsigned char expected = once_flag::not_started;
+        if (__atomic_compare_exchange_n(
+                &flag.state_, &expected, once_flag::running,
+                false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            try {
+                __once_detail::invoke(
+                    std::forward<Callable>(callable),
+                    std::forward<Arguments>(arguments)...);
+            } catch (...) {
+                __atomic_store_n(
+                    &flag.state_, once_flag::not_started,
+                    __ATOMIC_RELEASE);
+                throw;
+            }
+            __atomic_store_n(
+                &flag.state_, once_flag::complete,
+                __ATOMIC_RELEASE);
+            return;
+        }
+
+        (void)::sched_yield();
+    }
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

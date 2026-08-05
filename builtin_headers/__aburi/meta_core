@@ -1,0 +1,273 @@
+#ifndef _ABURI_META_QUERY_API
+#define _ABURI_META_QUERY_API
+
+#ifndef _ABURI_META_STRING_VIEW_TYPE
+#error "reflection header must select a string-view type"
+#endif
+
+#ifndef _ABURI_META_VECTOR_TYPE
+#error "reflection header must select a reflection-sequence type"
+#endif
+
+namespace std {
+namespace meta {
+
+consteval _ABURI_META_STRING_VIEW_TYPE name_of(info reflection) {
+    return _ABURI_META_STRING_VIEW_TYPE(
+        __metafn_name_data(0, reflection),
+        __metafn_name_size(0, reflection));
+}
+
+consteval _ABURI_META_STRING_VIEW_TYPE qualified_name_of(info reflection) {
+    return _ABURI_META_STRING_VIEW_TYPE(
+        __metafn_name_data(1, reflection),
+        __metafn_name_size(1, reflection));
+}
+
+consteval _ABURI_META_STRING_VIEW_TYPE display_name_of(info reflection) {
+    return _ABURI_META_STRING_VIEW_TYPE(
+        __metafn_name_data(2, reflection),
+        __metafn_name_size(2, reflection));
+}
+
+consteval info type_of(info reflection) {
+    return __metafn_query_info(0, reflection);
+}
+
+consteval info parent_of(info reflection) {
+    return __metafn_query_info(1, reflection);
+}
+
+consteval info dealias(info reflection) {
+    return __metafn_query_info(2, reflection);
+}
+
+consteval unsigned long size_of(info reflection) {
+    return __metafn_query_int(0, reflection);
+}
+
+consteval unsigned long alignment_of(info reflection) {
+    return __metafn_query_int(1, reflection);
+}
+
+consteval unsigned long offset_of(info reflection) {
+    return __metafn_query_int(2, reflection);
+}
+
+consteval unsigned long bit_offset_of(info reflection) {
+    return __metafn_query_int(3, reflection);
+}
+
+consteval unsigned long bit_size_of(info reflection) {
+    return __metafn_query_int(4, reflection);
+}
+
+consteval bool is_type(info reflection) {
+    return __metafn_query_int(10, reflection) != 0;
+}
+
+consteval bool is_namespace(info reflection) {
+    return __metafn_query_int(11, reflection) != 0;
+}
+
+consteval bool is_template(info reflection) {
+    return __metafn_query_int(12, reflection) != 0;
+}
+
+consteval bool is_function(info reflection) {
+    return __metafn_query_int(13, reflection) != 0;
+}
+
+consteval bool is_variable(info reflection) {
+    return __metafn_query_int(14, reflection) != 0;
+}
+
+consteval bool is_enumerator(info reflection) {
+    return __metafn_query_int(15, reflection) != 0;
+}
+
+consteval bool is_nonstatic_data_member(info reflection) {
+    return __metafn_query_int(16, reflection) != 0;
+}
+
+consteval bool is_static_data_member(info reflection) {
+    return __metafn_query_int(17, reflection) != 0;
+}
+
+consteval bool is_class_type(info reflection) {
+    return __metafn_query_int(18, reflection) != 0;
+}
+
+consteval bool is_union_type(info reflection) {
+    return __metafn_query_int(19, reflection) != 0;
+}
+
+consteval bool is_enum_type(info reflection) {
+    return __metafn_query_int(20, reflection) != 0;
+}
+
+consteval bool is_constructor(info reflection) {
+    return __metafn_query_int(21, reflection) != 0;
+}
+
+consteval bool is_destructor(info reflection) {
+    return __metafn_query_int(22, reflection) != 0;
+}
+
+consteval bool is_value(info reflection) {
+    return __metafn_query_int(23, reflection) != 0;
+}
+
+consteval bool type_is_integral(info reflection) {
+    return __metafn_query_int(40, reflection) != 0;
+}
+
+consteval bool type_is_floating_point(info reflection) {
+    return __metafn_query_int(41, reflection) != 0;
+}
+
+consteval bool type_is_pointer(info reflection) {
+    return __metafn_query_int(42, reflection) != 0;
+}
+
+consteval bool type_is_lvalue_reference(info reflection) {
+    return __metafn_query_int(43, reflection) != 0;
+}
+
+consteval bool type_is_rvalue_reference(info reflection) {
+    return __metafn_query_int(44, reflection) != 0;
+}
+
+consteval bool type_is_reference(info reflection) {
+    return __metafn_query_int(45, reflection) != 0;
+}
+
+consteval bool type_is_arithmetic(info reflection) {
+    return __metafn_query_int(46, reflection) != 0;
+}
+
+consteval bool type_is_const(info reflection) {
+    return __metafn_query_int(47, reflection) != 0;
+}
+
+consteval bool type_is_volatile(info reflection) {
+    return __metafn_query_int(48, reflection) != 0;
+}
+
+consteval bool type_is_function(info reflection) {
+    return __metafn_query_int(49, reflection) != 0;
+}
+
+consteval bool type_is_array(info reflection) {
+    return __metafn_query_int(50, reflection) != 0;
+}
+
+consteval bool type_is_scalar(info reflection) {
+    return __metafn_query_int(51, reflection) != 0;
+}
+
+consteval bool type_is_same(info left, info right) {
+    return __metafn_query_int(52, left, right) != 0;
+}
+
+consteval info type_remove_const(info reflection) {
+    return __metafn_query_info(10, reflection);
+}
+
+consteval info type_remove_volatile(info reflection) {
+    return __metafn_query_info(11, reflection);
+}
+
+consteval info type_remove_cv(info reflection) {
+    return __metafn_query_info(12, reflection);
+}
+
+consteval info type_add_const(info reflection) {
+    return __metafn_query_info(13, reflection);
+}
+
+consteval info type_add_volatile(info reflection) {
+    return __metafn_query_info(14, reflection);
+}
+
+consteval info type_add_cv(info reflection) {
+    return __metafn_query_info(15, reflection);
+}
+
+consteval info type_add_pointer(info reflection) {
+    return __metafn_query_info(16, reflection);
+}
+
+consteval info type_remove_pointer(info reflection) {
+    return __metafn_query_info(17, reflection);
+}
+
+consteval info type_remove_reference(info reflection) {
+    return __metafn_query_info(18, reflection);
+}
+
+consteval info type_add_lvalue_reference(info reflection) {
+    return __metafn_query_info(19, reflection);
+}
+
+consteval info type_add_rvalue_reference(info reflection) {
+    return __metafn_query_info(20, reflection);
+}
+
+consteval info type_remove_cvref(info reflection) {
+    return __metafn_query_info(21, reflection);
+}
+
+consteval _ABURI_META_VECTOR_TYPE members_of(info reflection) {
+    _ABURI_META_VECTOR_TYPE result;
+    unsigned long count = __metafn_range_count(0, reflection);
+    for (unsigned long index = 0; index < count; ++index) {
+        result.push_back(__metafn_range_at(0, reflection, index));
+    }
+    return result;
+}
+
+consteval _ABURI_META_VECTOR_TYPE
+nonstatic_data_members_of(info reflection) {
+    _ABURI_META_VECTOR_TYPE result;
+    unsigned long count = __metafn_range_count(1, reflection);
+    for (unsigned long index = 0; index < count; ++index) {
+        result.push_back(__metafn_range_at(1, reflection, index));
+    }
+    return result;
+}
+
+consteval _ABURI_META_VECTOR_TYPE static_data_members_of(info reflection) {
+    _ABURI_META_VECTOR_TYPE result;
+    unsigned long count = __metafn_range_count(2, reflection);
+    for (unsigned long index = 0; index < count; ++index) {
+        result.push_back(__metafn_range_at(2, reflection, index));
+    }
+    return result;
+}
+
+consteval _ABURI_META_VECTOR_TYPE bases_of(info reflection) {
+    _ABURI_META_VECTOR_TYPE result;
+    unsigned long count = __metafn_range_count(3, reflection);
+    for (unsigned long index = 0; index < count; ++index) {
+        result.push_back(__metafn_range_at(3, reflection, index));
+    }
+    return result;
+}
+
+consteval _ABURI_META_VECTOR_TYPE enumerators_of(info reflection) {
+    _ABURI_META_VECTOR_TYPE result;
+    unsigned long count = __metafn_range_count(4, reflection);
+    for (unsigned long index = 0; index < count; ++index) {
+        result.push_back(__metafn_range_at(4, reflection, index));
+    }
+    return result;
+}
+
+} // namespace meta
+} // namespace std
+
+#undef _ABURI_META_STRING_VIEW_TYPE
+#undef _ABURI_META_VECTOR_TYPE
+
+#endif // _ABURI_META_QUERY_API

@@ -1,0 +1,1175 @@
+#ifndef ADINKRA_MAP
+#define ADINKRA_MAP
+
+#include <__adinkra/config>
+#include <__adinkra/tree>
+#include <algorithm>
+#include <compare>
+#include <cstddef>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <stdexcept>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Compare, class Other, class Key>
+concept __transparent_ordered_lookup =
+    (!is_same_v<remove_cvref_t<Other>, Key>) &&
+    requires {
+        typename Compare::is_transparent;
+    } &&
+    requires(
+        const Compare& compare,
+        const Other& other,
+        const Key& key) {
+        compare(other, key);
+        compare(key, other);
+    };
+
+template<class Key, class Mapped, class Compare, class Allocator>
+class multimap;
+
+template<class Key, class Mapped, class Compare = less<Key>,
+         class Allocator = allocator<pair<const Key, Mapped>>>
+class map {
+    template<class, class, class, class>
+    friend class multimap;
+
+    struct __multi_tag {};
+    struct __direct_construct_tag {};
+
+    struct Node final : __tree::node_base {
+        pair<const Key, Mapped> value;
+
+        template<class... Arguments>
+        Node(__direct_construct_tag, Arguments&&... arguments)
+            : __tree::node_base{
+                  nullptr, nullptr, nullptr, true},
+              value(std::forward<Arguments>(arguments)...) {}
+
+        template<class KeyValue, class... Arguments>
+        Node(KeyValue&& key, Arguments&&... arguments)
+            : __tree::node_base{
+                  nullptr, nullptr, nullptr, true},
+              value(
+                  piecewise_construct,
+                  forward_as_tuple(std::forward<KeyValue>(key)),
+                  forward_as_tuple(
+                      std::forward<Arguments>(arguments)...)) {}
+    };
+
+public:
+    using key_type = Key;
+    using mapped_type = Mapped;
+    using value_type = pair<const Key, Mapped>;
+    using key_compare = Compare;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+
+    class value_compare {
+        friend class map;
+
+    public:
+        bool operator()(
+            const value_type& left,
+            const value_type& right) const {
+            return compare_(left.first, right.first);
+        }
+
+    protected:
+        explicit value_compare(Compare compare)
+            : compare_(compare) {}
+
+        Compare compare_;
+    };
+
+    class const_iterator;
+
+    class iterator {
+        friend class map;
+        friend class const_iterator;
+
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = pair<const Key, Mapped>;
+        using difference_type = ptrdiff_t;
+        using pointer = value_type*;
+        using reference = value_type&;
+
+        iterator() noexcept : owner_(nullptr), node_(nullptr) {}
+
+        reference operator*() const noexcept {
+            return static_cast<Node*>(node_)->value;
+        }
+        pointer operator->() const noexcept {
+            return std::addressof(
+                static_cast<Node*>(node_)->value);
+        }
+
+        iterator& operator++() noexcept {
+            node_ = __tree::next(node_);
+            return *this;
+        }
+        iterator operator++(int) noexcept {
+            iterator result(*this);
+            ++*this;
+            return result;
+        }
+        iterator& operator--() noexcept {
+            node_ = node_ == nullptr
+                ? __tree::maximum(owner_->root_)
+                : __tree::previous(node_);
+            return *this;
+        }
+        iterator operator--(int) noexcept {
+            iterator result(*this);
+            --*this;
+            return result;
+        }
+
+        friend bool operator==(
+            const iterator& left, const iterator& right) noexcept {
+            return left.owner_ == right.owner_ &&
+                   left.node_ == right.node_;
+        }
+
+    private:
+        map* owner_;
+        __tree::node_base* node_;
+
+        iterator(
+            map* owner, __tree::node_base* node) noexcept
+            : owner_(owner), node_(node) {}
+    };
+
+    class const_iterator {
+        friend class map;
+
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = pair<const Key, Mapped>;
+        using difference_type = ptrdiff_t;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+
+        const_iterator() noexcept : owner_(nullptr), node_(nullptr) {}
+        const_iterator(const iterator& other) noexcept
+            : owner_(other.owner_), node_(other.node_) {}
+
+        reference operator*() const noexcept {
+            return static_cast<const Node*>(node_)->value;
+        }
+        pointer operator->() const noexcept {
+            return std::addressof(
+                static_cast<const Node*>(node_)->value);
+        }
+
+        const_iterator& operator++() noexcept {
+            node_ = __tree::next(node_);
+            return *this;
+        }
+        const_iterator operator++(int) noexcept {
+            const_iterator result(*this);
+            ++*this;
+            return result;
+        }
+        const_iterator& operator--() noexcept {
+            node_ = node_ == nullptr
+                ? __tree::maximum(owner_->root_)
+                : __tree::previous(node_);
+            return *this;
+        }
+        const_iterator operator--(int) noexcept {
+            const_iterator result(*this);
+            --*this;
+            return result;
+        }
+
+        friend bool operator==(
+            const const_iterator& left,
+            const const_iterator& right) noexcept {
+            return left.owner_ == right.owner_ &&
+                   left.node_ == right.node_;
+        }
+
+    private:
+        const map* owner_;
+        const __tree::node_base* node_;
+
+        const_iterator(
+            const map* owner,
+            const __tree::node_base* node) noexcept
+            : owner_(owner), node_(node) {}
+    };
+
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator =
+        std::reverse_iterator<const_iterator>;
+
+    map()
+        : root_(nullptr), size_(0), compare_(), allocator_(),
+          allow_duplicates_(false) {}
+
+    explicit map(
+        const Compare& compare_value,
+        const Allocator& allocator_value = Allocator())
+        : root_(nullptr), size_(0), compare_(compare_value),
+          allocator_(allocator_value), allow_duplicates_(false) {}
+
+    explicit map(const Allocator& allocator_value)
+        : map(Compare(), allocator_value) {}
+
+    template<class InputIterator>
+    map(
+        InputIterator first, InputIterator last,
+        const Compare& compare_value = Compare(),
+        const Allocator& allocator_value = Allocator())
+        : map(compare_value, allocator_value) {
+        insert(first, last);
+    }
+
+    map(
+        initializer_list<value_type> values,
+        const Compare& compare_value = Compare(),
+        const Allocator& allocator_value = Allocator())
+        : map(
+              values.begin(), values.end(),
+              compare_value, allocator_value) {}
+
+    map(const map& other)
+        : map(
+              other.compare_,
+              allocator_traits<Allocator>::
+                  select_on_container_copy_construction(
+                      other.allocator_)) {
+        allow_duplicates_ = other.allow_duplicates_;
+        insert(other.begin(), other.end());
+    }
+
+    map(map&& other) noexcept
+        : root_(std::exchange(other.root_, nullptr)),
+          size_(std::exchange(other.size_, 0)),
+          compare_(std::move(other.compare_)),
+          allocator_(std::move(other.allocator_)),
+          allow_duplicates_(other.allow_duplicates_) {}
+
+    ~map() {
+        clear();
+    }
+
+    map& operator=(const map& other) {
+        if (this != std::addressof(other)) {
+            map replacement(other);
+            swap(replacement);
+        }
+        return *this;
+    }
+
+    map& operator=(map&& other) noexcept {
+        if (this != std::addressof(other)) {
+            clear();
+            root_ = std::exchange(other.root_, nullptr);
+            size_ = std::exchange(other.size_, 0);
+            compare_ = std::move(other.compare_);
+            allocator_ = std::move(other.allocator_);
+            allow_duplicates_ = other.allow_duplicates_;
+        }
+        return *this;
+    }
+
+    map& operator=(initializer_list<value_type> values) {
+        clear();
+        insert(values);
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    iterator begin() noexcept {
+        return iterator(this, __tree::minimum(root_));
+    }
+    const_iterator begin() const noexcept {
+        return const_iterator(this, __tree::minimum(root_));
+    }
+    const_iterator cbegin() const noexcept { return begin(); }
+    iterator end() noexcept { return iterator(this, nullptr); }
+    const_iterator end() const noexcept {
+        return const_iterator(this, nullptr);
+    }
+    const_iterator cend() const noexcept { return end(); }
+    reverse_iterator rbegin() noexcept {
+        return reverse_iterator(end());
+    }
+    const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    const_reverse_iterator crbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    reverse_iterator rend() noexcept {
+        return reverse_iterator(begin());
+    }
+    const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+    const_reverse_iterator crend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD bool empty() const noexcept {
+        return size_ == 0;
+    }
+    _ADINKRA_NODISCARD size_type size() const noexcept {
+        return size_;
+    }
+    _ADINKRA_NODISCARD size_type max_size() const noexcept {
+        return static_cast<size_type>(-1) / sizeof(Node);
+    }
+
+    mapped_type& operator[](const Key& key) {
+        return try_emplace(key).first->second;
+    }
+    mapped_type& operator[](Key&& key) {
+        return try_emplace(std::move(key)).first->second;
+    }
+
+    mapped_type& at(const Key& key) {
+        iterator found = find(key);
+        if (found == end()) {
+            throw out_of_range("map::at");
+        }
+        return found->second;
+    }
+    const mapped_type& at(const Key& key) const {
+        const_iterator found = find(key);
+        if (found == end()) {
+            throw out_of_range("map::at");
+        }
+        return found->second;
+    }
+
+    pair<iterator, bool> insert(const value_type& value) {
+        return try_emplace(value.first, value.second);
+    }
+
+    pair<iterator, bool> insert(value_type&& value) {
+        return try_emplace(value.first, std::move(value.second));
+    }
+
+    template<class Value>
+        requires (
+            !is_same_v<remove_cvref_t<Value>, value_type> &&
+            requires(Value&& value) {
+                value.first;
+                value.second;
+            })
+    pair<iterator, bool> insert(Value&& value) {
+        return try_emplace(
+            std::forward<Value>(value).first,
+            std::forward<Value>(value).second);
+    }
+
+    iterator insert(const_iterator, const value_type& value) {
+        return insert(value).first;
+    }
+
+    template<class InputIterator>
+    void insert(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    void insert(initializer_list<value_type> values) {
+        insert(values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    pair<iterator, bool> emplace(Arguments&&... arguments) {
+        Node* candidate = new Node(
+            __direct_construct_tag{},
+            std::forward<Arguments>(arguments)...);
+        try {
+            const Key& key = candidate->value.first;
+            __tree::node_base* parent = nullptr;
+            __tree::node_base** link = std::addressof(root_);
+            while (*link != nullptr) {
+                parent = *link;
+                Node* node = static_cast<Node*>(parent);
+                if (compare_(key, node->value.first)) {
+                    link = std::addressof(parent->left);
+                } else if (compare_(node->value.first, key)) {
+                    link = std::addressof(parent->right);
+                } else if (!allow_duplicates_) {
+                    delete candidate;
+                    return {iterator(this, parent), false};
+                } else {
+                    link = std::addressof(parent->right);
+                }
+            }
+
+            candidate->parent = parent;
+            *link = candidate;
+            __tree::insert_rebalance(root_, candidate);
+            ++size_;
+            return {iterator(this, candidate), true};
+        } catch (...) {
+            delete candidate;
+            throw;
+        }
+    }
+
+    template<class... Arguments>
+    iterator emplace_hint(
+        const_iterator, Arguments&&... arguments) {
+        return emplace(
+            std::forward<Arguments>(arguments)...).first;
+    }
+
+    template<class KeyValue, class... Arguments>
+    pair<iterator, bool> try_emplace(
+        KeyValue&& key, Arguments&&... arguments) {
+        __tree::node_base* parent = nullptr;
+        __tree::node_base** link = std::addressof(root_);
+        while (*link != nullptr) {
+            parent = *link;
+            Node* node = static_cast<Node*>(parent);
+            if (compare_(key, node->value.first)) {
+                link = std::addressof(parent->left);
+            } else if (compare_(node->value.first, key)) {
+                link = std::addressof(parent->right);
+            } else if (!allow_duplicates_) {
+                return {iterator(this, parent), false};
+            } else {
+                link = std::addressof(parent->right);
+            }
+        }
+
+        Node* node = new Node(
+            std::forward<KeyValue>(key),
+            std::forward<Arguments>(arguments)...);
+        node->parent = parent;
+        *link = node;
+        __tree::insert_rebalance(root_, node);
+        ++size_;
+        return {iterator(this, node), true};
+    }
+
+    template<class KeyValue, class MappedValue>
+    pair<iterator, bool> insert_or_assign(
+        KeyValue&& key, MappedValue&& value) {
+        auto result = try_emplace(
+            std::forward<KeyValue>(key),
+            std::forward<MappedValue>(value));
+        if (!result.second) {
+            result.first->second =
+                std::forward<MappedValue>(value);
+        }
+        return result;
+    }
+
+    iterator erase(const_iterator position) {
+        __tree::node_base* node =
+            const_cast<__tree::node_base*>(position.node_);
+        iterator following(this, __tree::next(node));
+        __tree::erase_rebalance(root_, node);
+        delete static_cast<Node*>(node);
+        --size_;
+        return following;
+    }
+
+    iterator erase(const_iterator first, const_iterator last) {
+        while (first != last) {
+            first = erase(first);
+        }
+        return iterator(
+            this,
+            const_cast<__tree::node_base*>(last.node_));
+    }
+
+    size_type erase(const Key& key) {
+        iterator found = find(key);
+        if (found == end()) {
+            return 0;
+        }
+        erase(found);
+        return 1;
+    }
+
+    void clear() noexcept {
+        destroy_subtree(root_);
+        root_ = nullptr;
+        size_ = 0;
+    }
+
+    void swap(map& other) {
+        std::swap(root_, other.root_);
+        std::swap(size_, other.size_);
+        std::swap(compare_, other.compare_);
+        std::swap(allow_duplicates_, other.allow_duplicates_);
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_swap::value) {
+            std::swap(allocator_, other.allocator_);
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(
+        map<Key, Mapped, OtherCompare, Allocator>& source) {
+        if (static_cast<const void*>(this) ==
+            static_cast<const void*>(std::addressof(source))) {
+            return;
+        }
+        auto current = source.begin();
+        while (current != source.end()) {
+            const auto result = insert(*current);
+            if (result.second) {
+                current = source.erase(current);
+            } else {
+                ++current;
+            }
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(
+        map<Key, Mapped, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    template<class OtherCompare>
+    void merge(
+        multimap<Key, Mapped, OtherCompare, Allocator>& source) {
+        auto current = source.begin();
+        while (current != source.end()) {
+            const auto result = insert(*current);
+            if (result.second) {
+                current = source.erase(current);
+            } else {
+                ++current;
+            }
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(
+        multimap<Key, Mapped, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    iterator find(const Key& key) {
+        return iterator(this, find_node(key));
+    }
+    const_iterator find(const Key& key) const {
+        return const_iterator(this, find_node(key));
+    }
+
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator find(const Other& key) {
+        return iterator(this, find_node(key));
+    }
+
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    const_iterator find(const Other& key) const {
+        return const_iterator(this, find_node(key));
+    }
+
+    _ADINKRA_NODISCARD size_type count(const Key& key) const {
+        return find_node(key) == nullptr ? 0 : 1;
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    _ADINKRA_NODISCARD size_type count(const Other& key) const {
+        return find_node(key) == nullptr ? 0 : 1;
+    }
+    _ADINKRA_NODISCARD bool contains(const Key& key) const {
+        return find_node(key) != nullptr;
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    _ADINKRA_NODISCARD bool contains(const Other& key) const {
+        return find_node(key) != nullptr;
+    }
+
+    iterator lower_bound(const Key& key) {
+        return iterator(this, lower_bound_node(key));
+    }
+    const_iterator lower_bound(const Key& key) const {
+        return const_iterator(this, lower_bound_node(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator lower_bound(const Other& key) {
+        return iterator(this, lower_bound_node(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    const_iterator lower_bound(const Other& key) const {
+        return const_iterator(this, lower_bound_node(key));
+    }
+    iterator upper_bound(const Key& key) {
+        return iterator(this, upper_bound_node(key));
+    }
+    const_iterator upper_bound(const Key& key) const {
+        return const_iterator(this, upper_bound_node(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator upper_bound(const Other& key) {
+        return iterator(this, upper_bound_node(key));
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    const_iterator upper_bound(const Other& key) const {
+        return const_iterator(this, upper_bound_node(key));
+    }
+
+    pair<iterator, iterator> equal_range(const Key& key) {
+        return {lower_bound(key), upper_bound(key)};
+    }
+    pair<const_iterator, const_iterator>
+    equal_range(const Key& key) const {
+        return {lower_bound(key), upper_bound(key)};
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    pair<iterator, iterator> equal_range(const Other& key) {
+        return {lower_bound(key), upper_bound(key)};
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    pair<const_iterator, const_iterator>
+    equal_range(const Other& key) const {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
+    key_compare key_comp() const { return compare_; }
+    value_compare value_comp() const {
+        return value_compare(compare_);
+    }
+
+private:
+    __tree::node_base* root_;
+    size_type size_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Compare compare_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+    bool allow_duplicates_;
+
+    map(
+        __multi_tag, const Compare& compare_value,
+        const Allocator& allocator_value)
+        : root_(nullptr), size_(0), compare_(compare_value),
+          allocator_(allocator_value), allow_duplicates_(true) {}
+
+    void destroy_subtree(__tree::node_base* node) noexcept {
+        if (node == nullptr) {
+            return;
+        }
+        destroy_subtree(node->left);
+        destroy_subtree(node->right);
+        delete static_cast<Node*>(node);
+    }
+
+    template<class KeyValue>
+    __tree::node_base* find_node(const KeyValue& key) const {
+        __tree::node_base* node = root_;
+        while (node != nullptr) {
+            const Key& current =
+                static_cast<Node*>(node)->value.first;
+            if (compare_(key, current)) {
+                node = node->left;
+            } else if (compare_(current, key)) {
+                node = node->right;
+            } else {
+                return node;
+            }
+        }
+        return nullptr;
+    }
+
+    template<class KeyValue>
+    __tree::node_base* lower_bound_node(const KeyValue& key) const {
+        __tree::node_base* node = root_;
+        __tree::node_base* result = nullptr;
+        while (node != nullptr) {
+            const Key& current =
+                static_cast<Node*>(node)->value.first;
+            if (!compare_(current, key)) {
+                result = node;
+                node = node->left;
+            } else {
+                node = node->right;
+            }
+        }
+        return result;
+    }
+
+    template<class KeyValue>
+    __tree::node_base* upper_bound_node(const KeyValue& key) const {
+        __tree::node_base* node = root_;
+        __tree::node_base* result = nullptr;
+        while (node != nullptr) {
+            const Key& current =
+                static_cast<Node*>(node)->value.first;
+            if (compare_(key, current)) {
+                result = node;
+                node = node->left;
+            } else {
+                node = node->right;
+            }
+        }
+        return result;
+    }
+};
+
+template<class Key, class Mapped, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const map<Key, Mapped, Compare, Allocator>& left,
+    const map<Key, Mapped, Compare, Allocator>& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin());
+}
+
+template<class Key, class Mapped, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator<(
+    const map<Key, Mapped, Compare, Allocator>& left,
+    const map<Key, Mapped, Compare, Allocator>& right) {
+    auto left_iterator = left.begin();
+    auto right_iterator = right.begin();
+    while (left_iterator != left.end() &&
+           right_iterator != right.end()) {
+        if (*left_iterator < *right_iterator) {
+            return true;
+        }
+        if (*right_iterator < *left_iterator) {
+            return false;
+        }
+        ++left_iterator;
+        ++right_iterator;
+    }
+    return left.size() < right.size();
+}
+
+template<class Key, class Mapped, class Compare, class Allocator>
+_ADINKRA_NODISCARD auto operator<=>(
+    const map<Key, Mapped, Compare, Allocator>& left,
+    const map<Key, Mapped, Compare, Allocator>& right)
+    -> decltype(*left.begin() <=> *right.begin()) {
+    using Comparison = decltype(*left.begin() <=> *right.begin());
+    auto left_iterator = left.begin();
+    auto right_iterator = right.begin();
+    while (left_iterator != left.end() &&
+           right_iterator != right.end()) {
+        if (auto result = *left_iterator <=> *right_iterator;
+            result != 0) {
+            return result;
+        }
+        ++left_iterator;
+        ++right_iterator;
+    }
+    Comparison result = left.size() <=> right.size();
+    return result;
+}
+
+template<class Key, class Mapped, class Compare, class Allocator>
+void swap(
+    map<Key, Mapped, Compare, Allocator>& left,
+    map<Key, Mapped, Compare, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Key, class Mapped, class Compare,
+         class Allocator, class Predicate>
+typename map<Key, Mapped, Compare, Allocator>::size_type erase_if(
+    map<Key, Mapped, Compare, Allocator>& container,
+    Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Key, class Mapped, class Compare = less<Key>,
+         class Allocator = allocator<pair<const Key, Mapped>>>
+class multimap {
+    using storage_type = map<Key, Mapped, Compare, Allocator>;
+
+public:
+    using key_type = Key;
+    using mapped_type = Mapped;
+    using value_type = pair<const Key, Mapped>;
+    using key_compare = Compare;
+    using value_compare = typename storage_type::value_compare;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+    using iterator = typename storage_type::iterator;
+    using const_iterator = typename storage_type::const_iterator;
+    using reverse_iterator = typename storage_type::reverse_iterator;
+    using const_reverse_iterator =
+        typename storage_type::const_reverse_iterator;
+
+    multimap()
+        : values_(
+              typename storage_type::__multi_tag{},
+              Compare(), Allocator()) {}
+
+    explicit multimap(
+        const Compare& compare_value,
+        const Allocator& allocator_value = Allocator())
+        : values_(
+              typename storage_type::__multi_tag{},
+              compare_value, allocator_value) {}
+
+    explicit multimap(const Allocator& allocator_value)
+        : multimap(Compare(), allocator_value) {}
+
+    template<class InputIterator>
+    multimap(
+        InputIterator first, InputIterator last,
+        const Compare& compare_value = Compare(),
+        const Allocator& allocator_value = Allocator())
+        : multimap(compare_value, allocator_value) {
+        insert(first, last);
+    }
+
+    multimap(
+        initializer_list<value_type> values,
+        const Compare& compare_value = Compare(),
+        const Allocator& allocator_value = Allocator())
+        : multimap(
+              values.begin(), values.end(),
+              compare_value, allocator_value) {}
+
+    multimap(const multimap&) = default;
+    multimap(multimap&&) noexcept = default;
+    multimap& operator=(const multimap&) = default;
+    multimap& operator=(multimap&&) noexcept = default;
+
+    multimap& operator=(initializer_list<value_type> values) {
+        clear();
+        insert(values);
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept {
+        return values_.get_allocator();
+    }
+
+    iterator begin() noexcept { return values_.begin(); }
+    const_iterator begin() const noexcept { return values_.begin(); }
+    const_iterator cbegin() const noexcept { return values_.cbegin(); }
+    iterator end() noexcept { return values_.end(); }
+    const_iterator end() const noexcept { return values_.end(); }
+    const_iterator cend() const noexcept { return values_.cend(); }
+    reverse_iterator rbegin() noexcept { return values_.rbegin(); }
+    const_reverse_iterator rbegin() const noexcept {
+        return values_.rbegin();
+    }
+    const_reverse_iterator crbegin() const noexcept {
+        return values_.crbegin();
+    }
+    reverse_iterator rend() noexcept { return values_.rend(); }
+    const_reverse_iterator rend() const noexcept {
+        return values_.rend();
+    }
+    const_reverse_iterator crend() const noexcept {
+        return values_.crend();
+    }
+
+    _ADINKRA_NODISCARD bool empty() const noexcept {
+        return values_.empty();
+    }
+    _ADINKRA_NODISCARD size_type size() const noexcept {
+        return values_.size();
+    }
+    _ADINKRA_NODISCARD size_type max_size() const noexcept {
+        return values_.max_size();
+    }
+
+    iterator insert(const value_type& value) {
+        return values_.insert(value).first;
+    }
+
+    iterator insert(value_type&& value) {
+        return values_.insert(std::move(value)).first;
+    }
+
+    template<class Value>
+        requires (
+            !is_same_v<remove_cvref_t<Value>, value_type> &&
+            requires(Value&& value) {
+                value.first;
+                value.second;
+            })
+    iterator insert(Value&& value) {
+        return values_.insert(std::forward<Value>(value)).first;
+    }
+
+    iterator insert(const_iterator, const value_type& value) {
+        return insert(value);
+    }
+
+    iterator insert(const_iterator, value_type&& value) {
+        return insert(std::move(value));
+    }
+
+    template<class InputIterator>
+    void insert(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    void insert(initializer_list<value_type> values) {
+        insert(values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    iterator emplace(Arguments&&... arguments) {
+        return values_.emplace(
+            std::forward<Arguments>(arguments)...).first;
+    }
+
+    template<class... Arguments>
+    iterator emplace_hint(
+        const_iterator, Arguments&&... arguments) {
+        return emplace(std::forward<Arguments>(arguments)...);
+    }
+
+    iterator erase(const_iterator position) {
+        return values_.erase(position);
+    }
+
+    iterator erase(const_iterator first, const_iterator last) {
+        return values_.erase(first, last);
+    }
+
+    size_type erase(const Key& key) {
+        auto entries = equal_range(key);
+        size_type removed = 0;
+        while (entries.first != entries.second) {
+            entries.first = erase(entries.first);
+            ++removed;
+        }
+        return removed;
+    }
+
+    void clear() noexcept { values_.clear(); }
+
+    void swap(multimap& other)
+        noexcept(noexcept(values_.swap(other.values_))) {
+        values_.swap(other.values_);
+    }
+
+    template<class OtherCompare>
+    void merge(
+        map<Key, Mapped, OtherCompare, Allocator>& source) {
+        auto current = source.begin();
+        while (current != source.end()) {
+            insert(*current);
+            current = source.erase(current);
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(
+        map<Key, Mapped, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    template<class OtherCompare>
+    void merge(
+        multimap<Key, Mapped, OtherCompare, Allocator>& source) {
+        if (static_cast<const void*>(this) ==
+            static_cast<const void*>(std::addressof(source))) {
+            return;
+        }
+        auto current = source.begin();
+        while (current != source.end()) {
+            insert(*current);
+            current = source.erase(current);
+        }
+    }
+
+    template<class OtherCompare>
+    void merge(
+        multimap<Key, Mapped, OtherCompare, Allocator>&& source) {
+        merge(source);
+    }
+
+    iterator find(const Key& key) {
+        return values_.find(key);
+    }
+    const_iterator find(const Key& key) const {
+        return values_.find(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator find(const Other& key) {
+        return values_.find(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    const_iterator find(const Other& key) const {
+        return values_.find(key);
+    }
+
+    _ADINKRA_NODISCARD size_type count(const Key& key) const {
+        auto entries = equal_range(key);
+        size_type result = 0;
+        for (; entries.first != entries.second; ++entries.first) {
+            ++result;
+        }
+        return result;
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    _ADINKRA_NODISCARD size_type count(const Other& key) const {
+        auto entries = equal_range(key);
+        size_type result = 0;
+        for (; entries.first != entries.second; ++entries.first) {
+            ++result;
+        }
+        return result;
+    }
+
+    _ADINKRA_NODISCARD bool contains(const Key& key) const {
+        return values_.contains(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    _ADINKRA_NODISCARD bool contains(const Other& key) const {
+        return values_.contains(key);
+    }
+
+    iterator lower_bound(const Key& key) {
+        return values_.lower_bound(key);
+    }
+    const_iterator lower_bound(const Key& key) const {
+        return values_.lower_bound(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator lower_bound(const Other& key) {
+        return values_.lower_bound(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    const_iterator lower_bound(const Other& key) const {
+        return values_.lower_bound(key);
+    }
+    iterator upper_bound(const Key& key) {
+        return values_.upper_bound(key);
+    }
+    const_iterator upper_bound(const Key& key) const {
+        return values_.upper_bound(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    iterator upper_bound(const Other& key) {
+        return values_.upper_bound(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    const_iterator upper_bound(const Other& key) const {
+        return values_.upper_bound(key);
+    }
+
+    pair<iterator, iterator> equal_range(const Key& key) {
+        return values_.equal_range(key);
+    }
+    pair<const_iterator, const_iterator>
+    equal_range(const Key& key) const {
+        return values_.equal_range(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    pair<iterator, iterator> equal_range(const Other& key) {
+        return values_.equal_range(key);
+    }
+    template<class Other>
+        requires __transparent_ordered_lookup<Compare, Other, Key>
+    pair<const_iterator, const_iterator>
+    equal_range(const Other& key) const {
+        return values_.equal_range(key);
+    }
+
+    key_compare key_comp() const { return values_.key_comp(); }
+    value_compare value_comp() const {
+        return values_.value_comp();
+    }
+
+private:
+    storage_type values_;
+};
+
+template<class Key, class Mapped, class Compare,
+         class Allocator, class Predicate>
+typename multimap<Key, Mapped, Compare, Allocator>::size_type erase_if(
+    multimap<Key, Mapped, Compare, Allocator>& container,
+    Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Key, class Mapped, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const multimap<Key, Mapped, Compare, Allocator>& left,
+    const multimap<Key, Mapped, Compare, Allocator>& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin());
+}
+
+template<class Key, class Mapped, class Compare, class Allocator>
+_ADINKRA_NODISCARD bool operator<(
+    const multimap<Key, Mapped, Compare, Allocator>& left,
+    const multimap<Key, Mapped, Compare, Allocator>& right) {
+    return std::lexicographical_compare(
+        left.begin(), left.end(), right.begin(), right.end());
+}
+
+template<class Key, class Mapped, class Compare, class Allocator>
+void swap(
+    multimap<Key, Mapped, Compare, Allocator>& left,
+    multimap<Key, Mapped, Compare, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

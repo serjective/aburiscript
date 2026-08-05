@@ -1,266 +1,203 @@
 #include "consteval_engine.h"
 
-#include "../ast/ast.h"
-#include "../ast/ast_context.h"
-#include "../ast/special_members.h"
-#include "../numeric_utils.h"
+#include "constant_state.h"
+#include "metafn_eval.h"
+
+#include "../abi/endian.h"
+#include "../cir/layout.h"
+#include "../perf_stats.h"
 #include "eval_state.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
 #include <limits>
+#include <optional>
+#include <sstream>
+#include <string>
 #include <unordered_map>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "../numeric/floating_cir.h"
 
 namespace {
-constexpr size_t kMaxConstEvalDepth = 512;
 
-bool variable_template_specialization_still_depends_on_template_parameters(
-    const Symbol* sym) {
-    if (!sym) {
-        return false;
-    }
-    const auto* specialization_info =
-        get_symbol_variable_template_specialization(sym);
-    if (!specialization_info) {
-        return false;
-    }
-    for (const auto& argument : specialization_info->arguments) {
-        if (template_argument_depends_on_template_parameters(argument)) {
+using aburi::cir::BinaryOpKind;
+using aburi::cir::BlockId;
+using aburi::cir::InstId;
+using aburi::cir::InstKind;
+using aburi::cir::TerminatorKind;
+using aburi::cir::TypeId;
+using aburi::cir::TypeKind;
+using aburi::cir::UnaryOpKind;
+using aburi::cir::ValueRef;
+
+uint64_t inst_key(InstId id) {
+    return (uint64_t(id.generation) << 32) | id.index;
+}
+
+bool has_constexpr_unknown_representation(
+    const aburi::cir::File& file,
+    aburi::cir::TypeRef ref,
+    std::vector<TypeId>& record_stack) {
+    while (file.valid(ref.type) &&
+           file.type(ref.type).kind == TypeKind::Typedef) {
+        const auto* alias = std::get_if<aburi::cir::TypedefTypePayload>(
+            &file.type_payload(ref.type));
+        if (!alias) {
             return true;
         }
+        ref.qualifiers = static_cast<uint8_t>(
+            ref.qualifiers | alias->underlying_type.qualifiers);
+        ref.type = alias->underlying_type.type;
     }
-    return false;
-}
-
-// ====== Type infrastructure & alignment calculations ======
-
-struct IntShape {
-    uint16_t width = 64;
-    bool is_unsigned = false;
-};
-
-IntShape infer_integer_shape(QualType type) {
-    IntShape shape{};
-    if (!type) {
-        return shape;
+    ref.type = file.resolved_type(ref.type);
+    if (!file.valid(ref.type) ||
+        (ref.qualifiers & aburi::cir::QualVolatile) != 0) {
+        return true;
     }
-
-    auto resolve_to_integer_like = [](QualType current) -> QualType {
-        while (current && current->kind == TypeKind::Enum) {
-            auto en = current.as<EnumType>();
-            if (!en) {
-                break;
+    switch (file.type(ref.type).kind) {
+        case TypeKind::Pointer:
+        case TypeKind::BlockPointer:
+        case TypeKind::MemberPointer:
+            return true;
+        case TypeKind::Array: {
+            const auto* array = std::get_if<aburi::cir::ArrayTypePayload>(
+                &file.type_payload(ref.type));
+            return !array || has_constexpr_unknown_representation(
+                file, array->element_type, record_stack);
+        }
+        case TypeKind::Record: {
+            const aburi::cir::RecordFacts* facts =
+                file.record_facts_for_type(ref.type);
+            if (!facts || facts->is_incomplete ||
+                facts->kind == aburi::cir::RecordKind::Union) {
+                return true;
             }
-            auto underlying = en->semantic_underlying_type();
-            if (!underlying) {
-                break;
+            if (std::find(record_stack.begin(), record_stack.end(), ref.type) !=
+                record_stack.end()) {
+                return false;
             }
-            current = QualType(underlying);
-        }
-        return current;
-    };
-
-    QualType resolved = resolve_to_integer_like(type);
-    if (!resolved || !resolved->isInteger()) {
-        return shape;
-    }
-
-    int64_t width = resolved->getWidth();
-    if (width <= 0) {
-        width = 64;
-    }
-    if (width > 64) {
-        width = 64;
-    }
-    shape.width = static_cast<uint16_t>(width);
-    shape.is_unsigned = resolved->isUnsigned();
-    return shape;
-}
-
-bool is_integer_like_consteval_type(QualType type) {
-    if (!type) {
-        return false;
-    }
-
-    QualType resolved = desugar_type(type);
-    while (resolved && resolved->kind == TypeKind::Enum) {
-        auto en = resolved.as<EnumType>();
-        if (!en) {
-            break;
-        }
-        auto underlying = en->semantic_underlying_type();
-        if (!underlying) {
-            break;
-        }
-        resolved = QualType(underlying);
-    }
-    return resolved && resolved->isInteger();
-}
-
-IntShape infer_first_integer_shape(QualType preferred, QualType fallback) {
-    if (is_integer_like_consteval_type(preferred)) {
-        return infer_integer_shape(preferred);
-    }
-    if (is_integer_like_consteval_type(fallback)) {
-        return infer_integer_shape(fallback);
-    }
-    return infer_integer_shape(preferred ? preferred : fallback);
-}
-
-IntShape infer_binary_integer_operand_shape(BinaryOperation* bin) {
-    if (!bin) {
-        return {};
-    }
-
-    switch (bin->bop) {
-        case BinOpTypes::SHIFT_LEFT:
-        case BinOpTypes::SHIFT_RIGHT:
-            return infer_first_integer_shape(
-                bin->left ? bin->left->get_type() : QualType(),
-                bin->get_type());
-        case BinOpTypes::LESS_EQUAL_THAN:
-        case BinOpTypes::LESS_THAN:
-        case BinOpTypes::GREATER_EQUAL_THAN:
-        case BinOpTypes::GREATER_THAN:
-        case BinOpTypes::EQUAL:
-        case BinOpTypes::NOT_EQUAL:
-            return infer_first_integer_shape(
-                bin->left ? bin->left->get_type() : QualType(),
-                bin->right ? bin->right->get_type() : QualType());
-        case BinOpTypes::ADD:
-        case BinOpTypes::SUB:
-        case BinOpTypes::MULT:
-        case BinOpTypes::DIV:
-        case BinOpTypes::MOD:
-        case BinOpTypes::BITWISE_AND:
-        case BinOpTypes::BITWISE_XOR:
-        case BinOpTypes::BITWISE_OR:
-            return infer_first_integer_shape(
-                bin->get_type(),
-                bin->left ? bin->left->get_type() : QualType());
-        default:
-            return infer_first_integer_shape(
-                bin->left ? bin->left->get_type() : QualType(),
-                bin->get_type());
-    }
-}
-
-int64_t compute_type_alignment_bytes(const std::shared_ptr<CType>& type) {
-    if (!type) {
-        return 0;
-    }
-    auto canonical = desugar_type(type);
-    if (!canonical) {
-        return 0;
-    }
-    if (canonical->isVoid()) {
-        return 1;
-    }
-    if (auto obj = std::dynamic_pointer_cast<ObjectType>(canonical)) {
-        return static_cast<int64_t>(obj->getAlignment());
-    }
-    if (auto arr = std::dynamic_pointer_cast<ArrayType>(canonical)) {
-        return compute_type_alignment_bytes(arr->element_type.get_shared());
-    }
-    if (auto comp = std::dynamic_pointer_cast<ComplexType>(canonical)) {
-        return compute_type_alignment_bytes(comp->element_type);
-    }
-    if (auto enm = std::dynamic_pointer_cast<EnumType>(canonical)) {
-        return compute_type_alignment_bytes(enm->semantic_underlying_type());
-    }
-    int64_t width = canonical->getWidthBytes();
-    return width > 0 ? width : 0;
-}
-
-std::optional<int64_t> evaluate_sizeof_expr(const SizeOfExpr* sizeof_expr) {
-    if (!sizeof_expr || sizeof_expr->is_runtime_sizeof) {
-        return std::nullopt;
-    }
-
-    QualType target_type = sizeof_expr->getTargetType();
-    if (!target_type) {
-        return std::nullopt;
-    }
-    return target_type->getWidthBytes();
-}
-
-std::optional<int64_t> evaluate_alignof_expr(const AlignOfExpr* alignof_expr) {
-    if (!alignof_expr) {
-        return std::nullopt;
-    }
-
-    if (alignof_expr->expr_operand) {
-        if (auto* vref = dyn_cast<VarRef>(alignof_expr->expr_operand.get())) {
-            if (vref->symref) {
-                if (const auto* aligned = vref->symref->sym_attrs.find(AttributeKind::ALIGNED)) {
-                    if (!aligned->args.empty() &&
-                        aligned->args[0].kind == AttributeArg::Kind::INTEGER &&
-                        aligned->args[0].int_value > 0) {
-                        return aligned->args[0].int_value;
-                    }
+            record_stack.push_back(ref.type);
+            for (const aburi::cir::RecordBaseFact& base : facts->bases) {
+                if (has_constexpr_unknown_representation(
+                        file, base.type, record_stack)) {
+                    record_stack.pop_back();
+                    return true;
                 }
             }
-        }
-
-        QualType expr_type = alignof_expr->expr_operand->get_type();
-        if (expr_type) {
-            int64_t align = compute_type_alignment_bytes(expr_type.get_shared());
-            if (align > 0) {
-                return align;
+            for (const aburi::cir::RecordFieldFact& field : facts->fields) {
+                TypeId field_type = file.resolved_type(field.type.type);
+                if ((file.valid(field_type) &&
+                     (file.type(field_type).kind == TypeKind::LValueReference ||
+                      file.type(field_type).kind == TypeKind::RValueReference)) ||
+                    has_constexpr_unknown_representation(
+                        file, field.type, record_stack)) {
+                    record_stack.pop_back();
+                    return true;
+                }
             }
+            record_stack.pop_back();
+            return false;
         }
+        default:
+            return false;
     }
-
-    if (alignof_expr->type_operand) {
-        int64_t align = compute_type_alignment_bytes(alignof_expr->type_operand.get_shared());
-        if (align > 0) {
-            return align;
-        }
-    }
-
-    return std::nullopt;
 }
 
-std::optional<int64_t> evaluate_offsetof_expr(const OffsetOfExpr* offsetof_expr) {
-    if (!offsetof_expr) {
-        return std::nullopt;
-    }
-    if (offsetof_expr->computed_offset >= 0) {
-        return offsetof_expr->computed_offset;
-    }
-    return std::nullopt;
+bool has_constexpr_unknown_representation(const aburi::cir::File& file,
+                                          aburi::cir::TypeRef ref) {
+    std::vector<TypeId> record_stack;
+    return has_constexpr_unknown_representation(file, ref, record_stack);
 }
 
-// ====== Result construction helpers ======
+ConstEvalDiagnostic make_diag(ConstEvalDiagCode code,
+                              std::string message,
+                              SrcLoc loc) {
+    return ConstEvalDiagnostic::make(code, std::move(message), loc);
+}
 
-ConstEvalResult make_not_evaluated(ConstEvalDiagCode code, std::string message, SrcLoc loc) {
+ConstEvalResult make_not_evaluated(std::string message,
+                                   ConstEvalDiagCode code,
+                                   SrcLoc loc) {
     ConstEvalResult result = ConstEvalResult::not_evaluated(std::move(message));
-    result.diagnostics.push_back(ConstEvalDiagnostic::make(code, result.message, loc));
+    result.diagnostics.push_back(make_diag(code, result.message, loc));
     return result;
 }
 
-ConstEvalResult make_error(ConstEvalDiagCode code, std::string message, SrcLoc loc) {
+ConstEvalResult make_unsupported(std::string message, SrcLoc loc) {
+    return ConstEvalResult::unsupported(
+        std::move(message), ConstEvalDiagCode::UnsupportedExpression, loc);
+}
+
+ConstEvalResult make_error(ConstEvalDiagCode code,
+                           std::string message,
+                           SrcLoc loc) {
     return ConstEvalResult::error(std::move(message), code, loc);
 }
 
-ConstEvalResult make_constant_int(ConstIntValue value) {
-    return ConstEvalResult::constant(ConstValue::integer(value));
+enum class AllocationCallKind {
+    None,
+    Allocation,
+    NonallocatingPlacement,
+    Deallocation
+};
+
+// Itanium spellings of the replaceable global allocation functions:
+// `operator new`/`new[]` mangle as _Znw/_Zna plus the target's size_t code
+// (j on ILP32, m when long is 64-bit, y otherwise); `operator delete`/
+// `delete[]` as _ZdlPv/_ZdaPv, carrying that same code only in the sized
+// forms. Either family may append the align_val_t parameter. Classifying by
+// grammar rather than by a fixed list keeps every target's spelling covered:
+// matching only the LP64 names silently skipped ILP32 and the sized/aligned
+// forms, which reach the evaluator through the same call path.
+AllocationCallKind allocation_call_kind(std::string_view name) {
+    auto drop_align_suffix = [](std::string_view rest) {
+        constexpr std::string_view align_parameter = "St11align_val_t";
+        if (rest.size() >= align_parameter.size() &&
+            rest.substr(rest.size() - align_parameter.size()) ==
+                align_parameter) {
+            rest.remove_suffix(align_parameter.size());
+        }
+        return rest;
+    };
+    auto is_size_code = [](std::string_view rest) {
+        return rest.size() == 1 &&
+               (rest.front() == 'j' || rest.front() == 'm' ||
+                rest.front() == 'y');
+    };
+    if (name.rfind("_Znw", 0) == 0 || name.rfind("_Zna", 0) == 0) {
+
+        return is_size_code(drop_align_suffix(name.substr(4)))
+            ? AllocationCallKind::Allocation
+            : AllocationCallKind::None;
+    }
+    if (name.rfind("_ZdlPv", 0) == 0 || name.rfind("_ZdaPv", 0) == 0) {
+        std::string_view rest = drop_align_suffix(name.substr(6));
+        return rest.empty() || is_size_code(rest)
+            ? AllocationCallKind::Deallocation
+            : AllocationCallKind::None;
+    }
+    return AllocationCallKind::None;
 }
 
-Expr* strip_noop_implicit_casts(Expr* expr);
-
-bool const_value_to_constraint_bool(const ConstValue& value, bool& out) {
+bool is_truthy(const ConstValue& value, bool& out) {
     switch (value.kind) {
         case ConstValueKind::Integer:
-            out = value.int_value.to_unsigned_u64() != 0;
+            out = value.int_value.to_unsigned_u128() != 0;
             return true;
         case ConstValueKind::Boolean:
             out = value.bool_value;
             return true;
         case ConstValueKind::Floating:
-            out = value.float_value.value != 0.0L;
+            out = !aburi::floating::is_zero(value.float_value.value);
             return true;
-        case ConstValueKind::NullPointer:
+        case ConstValueKind::Null:
             out = false;
             return true;
         case ConstValueKind::Address:
@@ -272,4457 +209,4683 @@ bool const_value_to_constraint_bool(const ConstValue& value, bool& out) {
     }
 }
 
-struct InterpScopeBindings {
-    std::unordered_map<const Symbol*, ConstValue> symbol_values;
-    std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_owners;
-    std::unordered_map<std::string, ConstValue> named_values;
-    std::unordered_map<std::string, std::shared_ptr<Symbol>> named_symbols;
-};
-
-struct InterpFrame {
-    const FuncDecl* function_decl = nullptr;
-    std::vector<InterpScopeBindings> scopes;
-};
-
-struct InterpreterSession {
-    EvalState* state = nullptr;
-    ConstEvalMode mode = ConstEvalMode::cpp_core_constant_expression();
-    std::vector<InterpFrame> frames;
-};
-
-thread_local InterpreterSession* g_interpreter_session = nullptr;
-
-class InterpreterSessionGuard {
-public:
-    explicit InterpreterSessionGuard(InterpreterSession* session)
-        : previous_(g_interpreter_session) {
-        g_interpreter_session = session;
-    }
-
-    ~InterpreterSessionGuard() {
-        g_interpreter_session = previous_;
-    }
-
-private:
-    InterpreterSession* previous_ = nullptr;
-};
-
-class InterpreterFrameGuard {
-public:
-    InterpreterFrameGuard(InterpreterSession& session, std::string function_name,
-        const FuncDecl* function_decl)
-        : session_(session), entered_(false) {
-        if (!session_.state) {
-            return;
-        }
-        if (!session_.state->push_frame(std::move(function_name))) {
-            return;
-        }
-        entered_ = true;
-        InterpFrame frame;
-        frame.function_decl = function_decl;
-        frame.scopes.emplace_back();
-        session_.frames.push_back(std::move(frame));
-    }
-
-    ~InterpreterFrameGuard() {
-        if (!entered_) {
-            return;
-        }
-        if (!session_.frames.empty()) {
-            session_.frames.pop_back();
-        }
-        if (session_.state) {
-            session_.state->pop_frame();
-        }
-    }
-
-    bool entered() const {
-        return entered_;
-    }
-
-private:
-    InterpreterSession& session_;
-    bool entered_ = false;
-};
-
-// ====== Evaluation mode predicates & value classification ======
-
-std::string describe_function_call_target(const FuncCall* call) {
-    if (!call || !call->func) {
-        return "<unknown>";
-    }
-    if (auto* var_ref = dyn_cast<VarRef>(call->func.get())) {
-        if (!var_ref->get_name().empty()) {
-            return var_ref->get_name();
-        }
-    }
-    return "<indirect>";
-}
-
-bool mode_allows_constexpr_interpreter(ConstEvalMode mode) {
-    return mode.kind == ConstEvalModeKind::CppCoreConstantExpression ||
-           mode.kind == ConstEvalModeKind::CppNonTypeTemplateArgument ||
-           mode.kind == ConstEvalModeKind::CppImmediateFunction;
-}
-
-bool mode_requires_constexpr_call(ConstEvalMode mode) {
-    return mode.kind == ConstEvalModeKind::CppCoreConstantExpression ||
-           mode.kind == ConstEvalModeKind::CppNonTypeTemplateArgument;
-}
-
-bool is_cpp_core_constant_expression_mode(ConstEvalMode mode) {
-    return mode.kind == ConstEvalModeKind::CppCoreConstantExpression;
-}
-
-bool is_c23_constexpr_initializer_mode(ConstEvalMode mode) {
-    return mode.kind == ConstEvalModeKind::C23ConstexprInitializer;
-}
-
-bool is_cpp_non_type_template_argument_mode(ConstEvalMode mode) {
-    return mode.kind == ConstEvalModeKind::CppNonTypeTemplateArgument;
-}
-
-bool is_zero_like_constant(const ConstValue& value) {
+std::optional<ConstIntValue> value_to_int(const ConstValue& value,
+                                          aburi::cir::IntegerTypeShape shape) {
     switch (value.kind) {
         case ConstValueKind::Integer:
-            return value.int_value.cast(64, true).to_unsigned_u64() == 0;
+            return value.int_value.cast(shape.bit_width, shape.is_unsigned);
         case ConstValueKind::Boolean:
-            return !value.bool_value;
-        case ConstValueKind::Floating:
-            return value.float_value.value == 0.0L;
-        case ConstValueKind::NullPointer:
-            return true;
+            return shape.is_unsigned
+                ? ConstIntValue::from_unsigned(value.bool_value ? 1 : 0,
+                                               shape.bit_width)
+                : ConstIntValue::from_signed(value.bool_value ? 1 : 0,
+                                             shape.bit_width);
+        case ConstValueKind::Null:
+            if (value.null_kind == ConstNullKind::Pointer) {
+                return shape.is_unsigned
+                    ? ConstIntValue::from_unsigned(0, shape.bit_width)
+                    : ConstIntValue::from_signed(0, shape.bit_width);
+            }
+            return std::nullopt;
         default:
-            return false;
+            return std::nullopt;
     }
 }
 
-bool has_static_storage_duration(const Symbol* sym) {
-    if (!sym || sym->kind != SymbolKind::VARIABLE) {
+aburi::floating::FloatResult value_to_float(
+    const ConstValue& value,
+    aburi::cir::FloatingSemantics semantics) {
+    switch (value.kind) {
+        case ConstValueKind::Floating:
+            return aburi::floating::convert(value.float_value.value, semantics);
+        case ConstValueKind::Integer:
+            return aburi::floating::from_integer(
+                value.int_value.to_unsigned_u128(),
+                value.int_value.bit_width,
+                !value.int_value.is_unsigned,
+                semantics);
+        case ConstValueKind::Boolean:
+            return aburi::floating::from_integer(
+                value.bool_value ? 1 : 0, 1, false, semantics);
+        default:
+            return {{}, {}, aburi::floating::FloatError::InvalidEncoding};
+    }
+}
+
+bool floating_status_disqualifies(aburi::floating::FloatStatus status) {
+    return status.has(aburi::floating::FloatStatusFlag::Invalid) ||
+           status.has(aburi::floating::FloatStatusFlag::DivideByZero);
+}
+
+aburi::cir::FloatingValue floating_from_raw_bits(
+    aburi::cir::FloatingSemantics semantics,
+    uint64_t low,
+    uint64_t high) {
+    aburi::cir::FloatingValue value{semantics, low, high};
+    if (semantics == aburi::cir::FloatingSemantics::IEEEBinary16) {
+        value.low_bits &= 0xffffu;
+        value.high_bits = 0;
+    } else if (semantics == aburi::cir::FloatingSemantics::IEEEBinary32) {
+        value.low_bits &= 0xffffffffu;
+        value.high_bits = 0;
+    } else if (semantics == aburi::cir::FloatingSemantics::IEEEBinary64) {
+        value.high_bits = 0;
+    } else if (semantics == aburi::cir::FloatingSemantics::X87Extended80) {
+        value.high_bits &= 0xffffu;
+    }
+    return value;
+}
+
+bool is_bool_type(const aburi::cir::File& file, TypeId type) {
+    type = file.resolved_type(type);
+    if (!file.valid(type) || file.type(type).kind != TypeKind::Builtin) {
         return false;
     }
-    if (sym->storage_class == StorageClass::STATIC) {
-        return true;
-    }
-    return sym->linkage != VariableLinkage::NONE;
+    const auto* builtin = std::get_if<aburi::cir::BuiltinTypePayload>(&file.type_payload(type));
+    return builtin && builtin->kind == aburi::cir::BuiltinTypeKind::Bool;
 }
 
-// ====== Interpreter scope management ======
-
-void push_interpreter_scope() {
-    if (!g_interpreter_session || g_interpreter_session->frames.empty()) {
-        return;
-    }
-    g_interpreter_session->frames.back().scopes.emplace_back();
-}
-
-void pop_interpreter_scope() {
-    if (!g_interpreter_session || g_interpreter_session->frames.empty()) {
-        return;
-    }
-    auto& scopes = g_interpreter_session->frames.back().scopes;
-    if (!scopes.empty()) {
-        scopes.pop_back();
-    }
-}
-
-InterpScopeBindings* current_interpreter_scope() {
-    if (!g_interpreter_session || g_interpreter_session->frames.empty()) {
-        return nullptr;
-    }
-    auto& scopes = g_interpreter_session->frames.back().scopes;
-    if (scopes.empty()) {
-        return nullptr;
-    }
-    return &scopes.back();
-}
-
-bool bind_interpreter_local(
-    const std::shared_ptr<Symbol>& sym, const std::string& name, const ConstValue& value) {
-    auto* scope = current_interpreter_scope();
-    if (!scope) {
+bool is_void_type(const aburi::cir::File& file, TypeId type) {
+    type = file.resolved_type(type);
+    if (!file.valid(type) || file.type(type).kind != TypeKind::Builtin) {
         return false;
     }
-    if (sym) {
-        scope->symbol_values[sym.get()] = value;
-        scope->symbol_owners[sym.get()] = sym;
+    const auto* builtin =
+        std::get_if<aburi::cir::BuiltinTypePayload>(&file.type_payload(type));
+    return builtin && builtin->kind == aburi::cir::BuiltinTypeKind::Void;
+}
+
+ConstValue bool_result_for_type(const aburi::cir::File& file, TypeId type, bool value) {
+    if (is_bool_type(file, type)) {
+        return ConstValue::boolean(value);
     }
-    if (!name.empty()) {
-        scope->named_values[name] = value;
-        if (sym) {
-            scope->named_symbols[name] = sym;
+    if (aburi::cir::is_integer_like_type(file, type)) {
+        auto shape = aburi::cir::integer_shape_for_type(file, type);
+        return ConstValue::integer(value
+            ? ConstIntValue::from_unsigned(1, shape.bit_width).cast(shape.bit_width,
+                                                                    shape.is_unsigned)
+            : ConstIntValue::from_unsigned(0, shape.bit_width).cast(shape.bit_width,
+                                                                    shape.is_unsigned));
+    }
+    return ConstValue::boolean(value);
+}
+
+std::optional<aburi::cir::TypeRef> first_type_operand(const aburi::cir::File& file,
+                                                      const aburi::cir::Inst& inst) {
+    std::vector<aburi::cir::Operand> operands = file.operands(inst.operands);
+    for (const aburi::cir::Operand& operand : operands) {
+        if (const auto* type_ref =
+                std::get_if<aburi::cir::TypeRef>(&operand.data)) {
+            return *type_ref;
         }
     }
-    return true;
+    return std::nullopt;
 }
 
-bool assign_interpreter_symbol_value(const Symbol* sym, const ConstValue& value) {
-    if (!g_interpreter_session || g_interpreter_session->frames.empty() || !sym) {
+std::vector<ValueRef> value_operands(const aburi::cir::File& file,
+                                     const aburi::cir::Inst& inst) {
+    return file.value_operands(inst.operands);
+}
+
+uint64_t bytes_to_u64(const aburi::cir::LiteralByteArray& bytes) {
+    uint64_t value = 0;
+    size_t count = std::min<size_t>(bytes.size(), sizeof(uint64_t));
+    for (size_t index = 0; index < count; ++index) {
+        value = (value << 8) | static_cast<uint64_t>(bytes[index]);
+    }
+    return value;
+}
+
+uint64_t entity_key(aburi::cir::EntityId id) {
+    return (uint64_t(id.generation) << 32) | id.index;
+}
+
+aburi::cir::EntityId entity_operand_at(const aburi::cir::File& file,
+                                       const aburi::cir::Inst& inst,
+                                       size_t index) {
+    std::vector<aburi::cir::Operand> operands = file.operands(inst.operands);
+    if (index >= operands.size()) {
+        return {};
+    }
+    if (const auto* entity =
+            std::get_if<aburi::cir::EntityId>(&operands[index].data)) {
+        return *entity;
+    }
+    return {};
+}
+
+std::optional<size_t> pointee_size(const aburi::cir::File& file, TypeId type) {
+    type = file.resolved_type(type);
+    if (!file.valid(type) || file.type(type).kind != TypeKind::Pointer) {
+        return std::nullopt;
+    }
+    const auto* pointer =
+        std::get_if<aburi::cir::PointerTypePayload>(&file.type_payload(type));
+    if (!pointer) {
+        return std::nullopt;
+    }
+    return aburi::cir::size_of_type(file, pointer->pointee.type);
+}
+
+std::optional<ConstAddressValue> as_address(const ConstValue& value) {
+    if (value.kind == ConstValueKind::Address) {
+        return value.address_value;
+    }
+    if (value.is_null(ConstNullKind::Nullptr) ||
+        value.is_null(ConstNullKind::Pointer)) {
+        return ConstAddressValue{};
+    }
+    return std::nullopt;
+}
+
+bool address_is_null_base(const ConstAddressValue& address) {
+    return !address.entity.valid() && address.allocation_id == 0 &&
+           !address.string_literal.valid();
+}
+
+bool is_pointer_or_reference_type(const aburi::cir::File& file,
+                                  TypeId type,
+                                  bool* is_reference = nullptr) {
+    TypeId resolved = file.resolved_type(type);
+    if (!file.valid(resolved)) {
         return false;
     }
-    for (auto frame_it = g_interpreter_session->frames.rbegin();
-         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
-        for (auto scope_it = frame_it->scopes.rbegin();
-             scope_it != frame_it->scopes.rend(); ++scope_it) {
-            auto sym_it = scope_it->symbol_values.find(sym);
-            if (sym_it != scope_it->symbol_values.end()) {
-                sym_it->second = value;
-                for (auto& [name, named_sym] : scope_it->named_symbols) {
-                    if (named_sym && named_sym.get() == sym) {
-                        scope_it->named_values[name] = value;
+    TypeKind kind = file.type(resolved).kind;
+    bool reference = kind == TypeKind::LValueReference ||
+                     kind == TypeKind::RValueReference;
+    if (is_reference) {
+        *is_reference = reference;
+    }
+    return kind == TypeKind::Pointer ||
+           kind == TypeKind::BlockPointer ||
+           reference;
+}
+
+class Evaluator {
+public:
+    Evaluator(const ConstEvalContext& context, ConstEvalRequest request)
+        : context_(context),
+          request_(request),
+          state_(context.lang_options.consteval_step_limit,
+                 context.lang_options.consteval_recursion_limit) {}
+
+    ConstEvalResult evaluate_inst(InstId inst) {
+        std::unordered_map<uint64_t, ConstValue> empty_env;
+        return evaluate_inst(inst, empty_env);
+    }
+
+    AllocationCallKind callee_allocation_kind(
+        aburi::cir::EntityId callee) const {
+        if (!callee.valid() || !file().valid(callee)) {
+            return AllocationCallKind::None;
+        }
+        const aburi::cir::Entity& entity = file().entity(callee);
+        if (!entity.name.valid()) {
+            return AllocationCallKind::None;
+        }
+        AllocationCallKind kind = allocation_call_kind(
+            file().name(entity.name));
+        if (kind != AllocationCallKind::None) {
+            return kind;
+        }
+
+        // Header-defined non-allocating placement new has a source-level
+        // entity name rather than the ABI name used by an implicitly declared
+        // replaceable allocation function. Recognize its structural operator
+        // identity and canonical (size, void*) signature.
+        if (entity.kind != aburi::cir::EntityKind::Function ||
+            (entity.operator_function.kind !=
+                 aburi::cir::OperatorFunctionKind::Allocation &&
+             entity.operator_function.kind !=
+                 aburi::cir::OperatorFunctionKind::Deallocation)) {
+            return AllocationCallKind::None;
+        }
+        TypeId function_type = file().resolved_type(entity.type);
+        if (!file().valid(function_type) ||
+            file().type(function_type).kind != TypeKind::Function) {
+            return AllocationCallKind::None;
+        }
+        const auto* function =
+            std::get_if<aburi::cir::FunctionTypePayload>(
+                &file().type_payload(function_type));
+        if (!function || function->parameters.empty() ||
+            function->parameters.size() > 2) {
+            return AllocationCallKind::None;
+        }
+        if (function->parameters.size() == 1) {
+            return entity.operator_function.kind ==
+                    aburi::cir::OperatorFunctionKind::Allocation
+                ? AllocationCallKind::Allocation
+                : AllocationCallKind::Deallocation;
+        }
+        TypeId placement_type =
+            file().resolved_type(function->parameters[1].type);
+        bool has_void_pointer_placement =
+            file().valid(placement_type) &&
+            file().type(placement_type).kind == TypeKind::Pointer &&
+            is_void_type(file(),
+                         file().pointer_pointee_type(placement_type));
+        if (entity.operator_function.kind ==
+            aburi::cir::OperatorFunctionKind::Deallocation) {
+            return has_void_pointer_placement
+                ? AllocationCallKind::None
+                : AllocationCallKind::Deallocation;
+        }
+        return has_void_pointer_placement
+            ? AllocationCallKind::NonallocatingPlacement
+            : AllocationCallKind::Allocation;
+    }
+
+    bool is_std_construct_at(aburi::cir::EntityId callee) const {
+        if (!callee.valid() || !file().valid(callee)) {
+            return false;
+        }
+        aburi::cir::EntityId declaration = callee;
+        if (const aburi::cir::TemplateSpecializationFact* specialization =
+                file().template_specialization(callee)) {
+            declaration = specialization->selected_template_entity.valid()
+                ? specialization->selected_template_entity
+                : specialization->template_entity;
+        }
+        if (!declaration.valid() || !file().valid(declaration)) {
+            return false;
+        }
+        const aburi::cir::Entity& function = file().entity(declaration);
+        if (!function.name.valid() ||
+            file().name(function.name) != "construct_at") {
+            return false;
+        }
+
+        aburi::cir::DeclContextId context = function.semantic_context;
+        while (context.valid() && file().valid(context)) {
+            const aburi::cir::DeclContext& declaration_context =
+                file().decl_context(context);
+            aburi::cir::EntityId owner = declaration_context.owner;
+            if (owner.valid() && file().valid(owner) &&
+                file().entity(owner).kind ==
+                    aburi::cir::EntityKind::Namespace) {
+                const aburi::cir::Entity& namespace_entity =
+                    file().entity(owner);
+                if (namespace_entity.name.valid() &&
+                    file().name(namespace_entity.name) == "std") {
+                    return true;
+                }
+                if (!declaration_context.is_inline_namespace) {
+                    return false;
+                }
+            }
+            context = declaration_context.parent;
+        }
+        return false;
+    }
+
+    bool demand_block_function_definitions(BlockId block_id) const {
+        if (!context_.demand_function_definition) {
+            return true;
+        }
+        if (!file().valid(block_id)) {
+            return true;
+        }
+
+        std::vector<InstId> instructions =
+            file().block(block_id).instructions;
+        for (InstId inst_id : instructions) {
+            if (!file().valid(inst_id)) {
+                continue;
+            }
+            const aburi::cir::Inst& inst = file().inst(inst_id);
+            size_t entity_index = 0;
+            switch (inst.kind) {
+                case InstKind::Call:
+                    entity_index = 0;
+                    break;
+                case InstKind::ConstructInPlace:
+                case InstKind::Destroy:
+                    entity_index = 1;
+                    break;
+                default:
+                    continue;
+            }
+            aburi::cir::EntityId callee =
+                entity_operand_at(file(), inst, entity_index);
+
+            if (callee_allocation_kind(callee) != AllocationCallKind::None) {
+                continue;
+            }
+            if (callee.valid() &&
+                !context_.demand_function_definition(callee, inst.loc) &&
+                request_.required) {
+                return false;
+            }
+        }
+        return true;
+    }
+    ConstEvalResult evaluate_direct_entity_call(
+        aburi::cir::EntityId callee,
+        std::vector<ConstValue> arg_values,
+        SrcLoc loc,
+        bool allow_void_return) {
+        if (!context_.lang_options
+                 .consteval_function_interpreter_enabled()) {
+            return make_unsupported(
+                "function call is not a constant expression in this mode",
+                loc);
+        }
+        if (!callee.valid() || !file().valid(callee)) {
+            return make_unsupported("indirect call is not a constant expression",
+                                    loc);
+        }
+
+        AllocationCallKind allocation_kind = callee_allocation_kind(callee);
+        if (context_.lang_options.is_cxx20_or_later() &&
+            allocation_kind != AllocationCallKind::None) {
+            if (allocation_kind == AllocationCallKind::Allocation) {
+                if (arg_values.empty() || arg_values.size() > 2) {
+                    return make_unsupported(
+                        "allocation call arguments are not supported in "
+                        "constant evaluation",
+                        loc);
+                }
+                std::optional<int64_t> size = arg_values[0].try_as_int64();
+                if (!size.has_value() || *size < 0) {
+                    return make_unsupported(
+                        "allocation size is not a constant expression", loc);
+                }
+                uint64_t allocation = state_.memory().allocate_dynamic(
+                    static_cast<size_t>(*size));
+                ConstAddressValue address;
+                address.allocation_id = allocation;
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(address));
+            }
+            if (allocation_kind ==
+                AllocationCallKind::NonallocatingPlacement) {
+                if (construct_at_call_depth_ == 0 ||
+                    arg_values.size() != 2) {
+                    return make_unsupported(
+                        "placement allocation is only permitted through "
+                        "std::construct_at in constant evaluation",
+                        loc);
+                }
+                std::optional<ConstAddressValue> address =
+                    as_address(arg_values[1]);
+                if (!address.has_value() || address->allocation_id == 0) {
+                    return make_unsupported(
+                        "std::construct_at destination is not "
+                        "evaluator-owned memory",
+                        loc);
+                }
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(*address));
+            }
+            if (allocation_kind == AllocationCallKind::Deallocation) {
+                if (arg_values.empty()) {
+                    return make_unsupported(
+                        "deallocation call has no pointer operand", loc);
+                }
+                const ConstValue& pointer = arg_values[0];
+                if (pointer.is_null(ConstNullKind::Pointer) ||
+                    pointer.is_null(ConstNullKind::Nullptr)) {
+
+                    return ConstEvalResult::constant(ConstValue::void_value());
+                }
+                std::optional<ConstAddressValue> address = as_address(pointer);
+                if (!address.has_value() || address->allocation_id == 0 ||
+                    address->byte_offset != 0) {
+                    return make_error(
+                        ConstEvalDiagCode::InvalidDeallocation,
+                        "deallocation of a pointer that is not the result of "
+                        "a constexpr allocation",
+                        loc);
+                }
+                switch (state_.memory().deallocate_dynamic(
+                    address->allocation_id)) {
+                    case EvalDeallocStatus::Ok:
+                        return ConstEvalResult::constant(
+                            ConstValue::void_value());
+                    case EvalDeallocStatus::AlreadyDeallocated:
+                        return make_error(
+                            ConstEvalDiagCode::InvalidDeallocation,
+                            "constexpr memory was deallocated twice", loc);
+                    case EvalDeallocStatus::NotDynamic:
+                    case EvalDeallocStatus::NotAnAllocation:
+                        return make_error(
+                            ConstEvalDiagCode::InvalidDeallocation,
+                            "deallocation of a pointer that is not the result "
+                            "of a constexpr allocation",
+                            loc);
+                }
+            }
+        }
+
+        if (context_.lang_options.is_cxx_mode()) {
+            const aburi::cir::Entity& callee_entity = file().entity(callee);
+            if (!callee_entity.decl_flags.is_constexpr &&
+                !callee_entity.decl_flags.is_consteval) {
+                std::string name = callee_entity.name.valid()
+                    ? std::string(file().name(callee_entity.name))
+                    : std::string("<function>");
+                return make_unsupported(
+                    "call to non-constexpr function '" + name +
+                        "' is not a constant expression",
+                    loc);
+            }
+        }
+        if (context_.demand_function_definition) {
+            bool definition_available =
+                context_.demand_function_definition(callee, loc);
+            if (request_.required && !definition_available) {
+                return make_unsupported(
+                    "required function definition could not be instantiated "
+                    "for constant evaluation",
+                    loc);
+            }
+        }
+        const aburi::cir::Function* body = nullptr;
+        for (aburi::cir::FunctionId id : file().function_ids()) {
+            const aburi::cir::Function& candidate = file().function(id);
+            if (candidate.entity == callee &&
+                !file().entity(candidate.entity).is_template_pattern) {
+                body = &candidate;
+                break;
+            }
+        }
+        if (!body || !file().valid(body->entry_block)) {
+            return make_unsupported(
+                "call to a function with no available body is not a "
+                "constant expression",
+                loc);
+        }
+        if (arg_values.size() != body->parameters.size()) {
+            return make_unsupported(
+                "call argument count does not match for constant evaluation",
+                loc);
+        }
+
+        aburi::cir::Fragment callee_fragment;
+        callee_fragment.blocks = body->blocks;
+        callee_fragment.entry = body->entry_block;
+        callee_fragment.exit =
+            body->blocks.empty() ? body->entry_block : body->blocks.back();
+
+        std::string frame_name = "<function>";
+        if (file().entity(callee).name.valid()) {
+            frame_name = std::string(file().name(file().entity(callee).name));
+        }
+        if (!state_.push_frame(std::move(frame_name))) {
+            return make_error(ConstEvalDiagCode::RecursionLimitExceeded,
+                              "constant evaluation recursion limit exceeded",
+                              loc);
+        }
+
+        std::unordered_map<uint64_t, uint64_t> saved_locals =
+            std::move(local_allocations_);
+        local_allocations_.clear();
+        bool construct_at_call = is_std_construct_at(callee);
+        if (construct_at_call) {
+            ++construct_at_call_depth_;
+        }
+        ConstEvalResult result = evaluate_frame(callee_fragment,
+                                                std::move(arg_values),
+                                                allow_void_return);
+        if (construct_at_call) {
+            --construct_at_call_depth_;
+        }
+        local_allocations_ = std::move(saved_locals);
+        state_.pop_frame();
+        return result;
+    }
+
+    ConstEvalResult evaluate_call(const aburi::cir::Inst& inst,
+                                  std::unordered_map<uint64_t, ConstValue>& env) {
+        std::vector<aburi::cir::Operand> operands = file().operands(inst.operands);
+        if (operands.empty()) {
+            return make_unsupported("call has no callee", inst.loc);
+        }
+        std::vector<ConstValue> arg_values;
+        arg_values.reserve(operands.size() - 1);
+        for (size_t index = 1; index < operands.size(); ++index) {
+            const auto* value = std::get_if<ValueRef>(&operands[index].data);
+            if (!value) {
+                continue;
+            }
+            ConstEvalResult evaluated = value_for_ref(*value, env);
+            if (evaluated.status != ConstEvalStatus::Constant ||
+                !evaluated.value.has_value()) {
+                return evaluated;
+            }
+            arg_values.push_back(*evaluated.value);
+        }
+
+        aburi::cir::EntityId resolved_callee{};
+        const aburi::cir::RecordFacts* virtual_facts = nullptr;
+        const aburi::cir::VirtualOverrideEdgeFact* covariant_edge = nullptr;
+        const auto* virtual_call = std::get_if<aburi::cir::CallPayload>(
+            &file().payload(inst.payload_index));
+        if (virtual_call && virtual_call->virtual_declaration.valid()) {
+            if (arg_values.empty()) {
+                return make_unsupported("virtual call has no object argument",
+                                        inst.loc);
+            }
+            std::optional<ConstAddressValue> object =
+                as_address(arg_values.front());
+            if (!object.has_value() || !object->entity.valid() ||
+                !file().valid(object->entity)) {
+                return make_unsupported(
+                    "virtual call object has no constant dynamic type",
+                    inst.loc);
+            }
+            TypeId dynamic_type =
+                file().resolved_type(file().entity(object->entity).type);
+            virtual_facts = file().record_facts_for_type(dynamic_type);
+            if (!virtual_facts) {
+                return make_unsupported(
+                    "virtual call dynamic type has no record facts",
+                    inst.loc);
+            }
+
+            std::vector<aburi::cir::EntityId> object_path;
+            for (const ConstSubobjectPathEntry& step : object->subobjects) {
+                if (!step.is_array_element && step.entity.valid()) {
+                    object_path.push_back(step.entity);
+                }
+            }
+            uint32_t declaration_subobject = 0;
+            bool found_subobject = false;
+            for (const aburi::cir::VirtualSubobjectFact& subobject :
+                 virtual_facts->virtual_subobjects) {
+                if (subobject.storage_path == object_path) {
+                    declaration_subobject = subobject.id;
+                    found_subobject = true;
+                    break;
+                }
+            }
+            const aburi::cir::VirtualFinalOverriderFact* selected = nullptr;
+            for (const aburi::cir::VirtualFinalOverriderFact& final :
+                 virtual_facts->virtual_final_overriders) {
+                if (final.virtual_declaration !=
+                        virtual_call->virtual_declaration ||
+                    !final.final_overrider.valid() || final.has_conflict()) {
+                    continue;
+                }
+                if (found_subobject &&
+                    final.declaration_subobject == declaration_subobject) {
+                    selected = &final;
+                    break;
+                }
+                if (!selected) {
+                    selected = &final;
+                } else if (!found_subobject) {
+                    selected = nullptr;
+                    break;
+                }
+            }
+            if (!selected) {
+                return make_unsupported(
+                    "virtual call has no constant final overrider", inst.loc);
+            }
+            resolved_callee = selected->final_overrider;
+            const aburi::cir::VirtualSubobjectFact& declaration_object =
+                virtual_facts->virtual_subobjects[
+                    selected->declaration_subobject];
+            const aburi::cir::VirtualSubobjectFact& final_object =
+                virtual_facts->virtual_subobjects[selected->final_subobject];
+            object->byte_offset +=
+                static_cast<int64_t>(final_object.static_offset_bytes) -
+                static_cast<int64_t>(
+                    declaration_object.static_offset_bytes);
+            object->subobjects.clear();
+            for (aburi::cir::EntityId step : final_object.storage_path) {
+                object->subobjects.push_back(
+                    ConstSubobjectPathEntry{step, 0, false});
+            }
+            arg_values.front() = ConstValue::address_value_of(*object);
+            for (const aburi::cir::VirtualOverrideEdgeFact& edge :
+                 virtual_facts->virtual_override_edges) {
+                if (edge.overriding == resolved_callee &&
+                    edge.overridden == virtual_call->virtual_declaration &&
+                    edge.return_relation ==
+                        aburi::cir::VirtualReturnRelation::Covariant) {
+                    covariant_edge = &edge;
+                    break;
+                }
+            }
+        } else if (const auto* direct =
+                std::get_if<aburi::cir::EntityId>(&operands[0].data)) {
+            resolved_callee = *direct;
+        } else if (const auto* indirect =
+                       std::get_if<ValueRef>(&operands[0].data)) {
+            ConstEvalResult pointer = value_for_ref(*indirect, env);
+            if (pointer.status != ConstEvalStatus::Constant ||
+                !pointer.value.has_value()) {
+                return pointer;
+            }
+            std::optional<ConstAddressValue> address =
+                as_address(*pointer.value);
+            if (!address.has_value() || !address->entity.valid() ||
+                address->allocation_id != 0 || address->byte_offset != 0) {
+                return make_unsupported(
+                    "indirect call target is not a constant function address",
+                    inst.loc);
+            }
+            resolved_callee = address->entity;
+        }
+        if (!resolved_callee.valid() || !file().valid(resolved_callee)) {
+            return make_unsupported("indirect call is not a constant expression",
+                                    inst.loc);
+        }
+        ConstEvalResult result = evaluate_direct_entity_call(
+            resolved_callee,
+            std::move(arg_values),
+            inst.loc,
+            is_void_type(file(), inst.result_type));
+        if (!covariant_edge || result.status != ConstEvalStatus::Constant ||
+            !result.value.has_value() ||
+            result.value->kind != ConstValueKind::Address) {
+            return result;
+        }
+        ConstAddressValue adjusted = result.value->address_value;
+        for (aburi::cir::EntityId step : covariant_edge->covariance_path) {
+            const aburi::cir::RecordFieldFact* field =
+                file().field_fact(step);
+            if (!field) {
+                return make_unsupported(
+                    "covariant virtual result has an invalid base path",
+                    inst.loc);
+            }
+            adjusted.byte_offset += static_cast<int64_t>(field->offset);
+            adjusted.subobjects.push_back(
+                ConstSubobjectPathEntry{step, 0, false});
+        }
+        result.value = ConstValue::address_value_of(std::move(adjusted));
+        return result;
+    }
+
+    ConstEvalResult activate_union_member_for_address(
+        const ConstAddressValue& address,
+        SrcLoc loc) {
+        if (address.subobjects.empty()) {
+            return ConstEvalResult::constant(ConstValue::void_value());
+        }
+        for (const ConstSubobjectPathEntry& step : address.subobjects) {
+            if (step.is_array_element || !step.entity.valid() ||
+                !file().valid(step.entity)) {
+                continue;
+            }
+            aburi::cir::EntityId parent = file().entity(step.entity).parent;
+            const aburi::cir::RecordFacts* parent_facts =
+                parent.valid() ? file().record_facts(parent) : nullptr;
+            if (!parent_facts ||
+                parent_facts->kind != aburi::cir::RecordKind::Union) {
+                continue;
+            }
+            if (step.containing_object_offset < 0 ||
+                !state_.memory().set_active_union(
+                    address.allocation_id,
+                    static_cast<size_t>(step.containing_object_offset),
+                    step.entity)) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constant evaluation could not activate union member",
+                    loc);
+            }
+        }
+        return ConstEvalResult::constant(ConstValue::void_value());
+    }
+
+    ConstEvalResult evaluate_construct_in_place(
+        const aburi::cir::Inst& inst,
+        std::unordered_map<uint64_t, ConstValue>& env) {
+        std::vector<aburi::cir::Operand> operands = file().operands(inst.operands);
+        if (operands.size() < 2) {
+            return make_unsupported("construct_in_place is malformed",
+                                    inst.loc);
+        }
+        const auto* place_ref = std::get_if<ValueRef>(&operands[0].data);
+        const auto* constructor =
+            std::get_if<aburi::cir::EntityId>(&operands[1].data);
+        if (!place_ref || !constructor) {
+            return make_unsupported("construct_in_place has invalid operands",
+                                    inst.loc);
+        }
+        ConstEvalResult place = value_for_ref(*place_ref, env);
+        if (place.status != ConstEvalStatus::Constant ||
+            !place.value.has_value()) {
+            return place;
+        }
+        std::optional<ConstAddressValue> this_address =
+            as_address(*place.value);
+        if (!this_address.has_value()) {
+            return make_unsupported(
+                "construct_in_place destination is not an address constant",
+                inst.loc);
+        }
+
+        ConstEvalResult activated =
+            activate_union_member_for_address(*this_address, inst.loc);
+        if (activated.status != ConstEvalStatus::Constant) {
+            return activated;
+        }
+
+        std::vector<ConstValue> arg_values;
+        arg_values.reserve(operands.size() - 1);
+        arg_values.push_back(ConstValue::address_value_of(*this_address));
+        for (size_t index = 2; index < operands.size(); ++index) {
+            const auto* value = std::get_if<ValueRef>(&operands[index].data);
+            if (!value) {
+                continue;
+            }
+            ConstEvalResult evaluated = value_for_ref(*value, env);
+            if (evaluated.status != ConstEvalStatus::Constant ||
+                !evaluated.value.has_value()) {
+                return evaluated;
+            }
+            arg_values.push_back(*evaluated.value);
+        }
+
+        ConstEvalResult result = evaluate_direct_entity_call(
+            *constructor,
+            std::move(arg_values),
+            inst.loc,
+            /*allow_void_return=*/true);
+        if (result.status != ConstEvalStatus::Constant) {
+            return result;
+        }
+        return ConstEvalResult::constant(ConstValue::void_value());
+    }
+
+    bool is_constant_p_result(ValueRef result) const {
+        if (!result.valid() || !file().valid(result.inst)) {
+            return false;
+        }
+        const aburi::cir::Inst& inst = file().inst(result.inst);
+        if (inst.kind != InstKind::BuiltinCall) {
+            return false;
+        }
+        const aburi::cir::InstPayload& payload =
+            file().payload(inst.payload_index);
+        const auto* builtin =
+            std::get_if<aburi::cir::BuiltinCallPayload>(&payload);
+        return builtin && builtin->kind == BuiltinKind::CONSTANT_P;
+    }
+
+    ConstEvalResult evaluate_fragment(const aburi::cir::Fragment& fragment,
+                                      ValueRef result) {
+        if (!result.valid()) {
+            return make_error(ConstEvalDiagCode::NullExpression,
+                              "constant evaluation has no result value",
+                              request_.loc);
+        }
+        if (fragment.empty()) {
+            return apply_request_target(evaluate_inst(result.inst));
+        }
+        ConstEvalResult walked =
+            apply_request_target(walk_blocks(fragment, result, {}));
+
+        if (walked.status != ConstEvalStatus::Constant &&
+            walked.status != ConstEvalStatus::Dependent &&
+            is_constant_p_result(result)) {
+            return apply_request_target(evaluate_inst(result.inst));
+        }
+        return walked;
+    }
+
+    ConstEvalResult evaluate_fragment_with_object_seeds(
+        const aburi::cir::Fragment& fragment,
+        ValueRef result,
+        const std::vector<ConstEvalObjectSeed>& object_seeds) {
+        for (const ConstEvalObjectSeed& seed : object_seeds) {
+            ConstEvalResult seeded = seed_local_object(seed);
+            if (seeded.status != ConstEvalStatus::Constant) {
+                return seeded;
+            }
+        }
+        return evaluate_fragment(fragment, result);
+    }
+
+    ConstEvalResult evaluate_frame(const aburi::cir::Fragment& fragment,
+                                   std::vector<ConstValue> arg_values,
+                                   bool allow_void_return = false) {
+
+        return walk_blocks(fragment,
+                           ValueRef{},
+                           std::move(arg_values),
+                           allow_void_return);
+    }
+
+    ConstEvalResult walk_blocks(const aburi::cir::Fragment& fragment,
+                                ValueRef result,
+                                std::vector<ConstValue> initial_args,
+                                bool allow_void_return = false) {
+        std::unordered_map<uint64_t, ConstValue> env;
+        if (!file().valid(fragment.entry)) {
+            return make_error(ConstEvalDiagCode::NullExpression,
+                              "constant evaluation fragment has no entry block",
+                              request_.loc);
+        }
+
+        BlockId current = fragment.entry;
+        std::vector<ConstValue> incoming_args = std::move(initial_args);
+
+        for (;;) {
+            if (!state_.consume_step()) {
+                return make_error(ConstEvalDiagCode::StepLimitExceeded,
+                                  "constant evaluation step limit exceeded",
+                                  request_.loc);
+            }
+            if (!file().valid(current)) {
+                return make_error(ConstEvalDiagCode::NullExpression,
+                                  "constant evaluation reached an invalid block",
+                                  request_.loc);
+            }
+
+            demand_block_function_definitions(current);
+
+            const aburi::cir::Block& block = file().block(current);
+
+            for (InstId inst : block.instructions) {
+                env.erase(inst_key(inst));
+            }
+            for (size_t index = 0; index < block.parameters.size(); ++index) {
+                if (index >= incoming_args.size()) {
+                    return make_unsupported(
+                        "constant evaluation cannot bind block parameter",
+                        request_.loc);
+                }
+                env[inst_key(block.parameters[index])] = incoming_args[index];
+            }
+            incoming_args.clear();
+
+            for (InstId inst : block.instructions) {
+                ConstEvalResult inst_result = evaluate_inst(inst, env);
+                if (inst_result.status == ConstEvalStatus::Constant &&
+                    inst_result.value.has_value()) {
+                    env[inst_key(inst)] = *inst_result.value;
+                    continue;
+                }
+
+                if (inst_result.status == ConstEvalStatus::Dependent) {
+                    return inst_result;
+                }
+
+                if (inst_result.status == ConstEvalStatus::Error &&
+                    !inst_result.diagnostics.empty() &&
+                    inst_result.diagnostics.front().code ==
+                        ConstEvalDiagCode::InvalidDeallocation) {
+                    return inst_result;
+                }
+
+                if (inst_result.status == ConstEvalStatus::Unsupported ||
+                    inst_result.status == ConstEvalStatus::NotConstant) {
+                    continue;
+                }
+            }
+
+            auto result_it = env.find(inst_key(result.inst));
+            if (current == fragment.exit && result_it != env.end() &&
+                block.terminator.kind == TerminatorKind::Invalid) {
+                return ConstEvalResult::constant(result_it->second);
+            }
+
+            const aburi::cir::Terminator& term = block.terminator;
+            switch (term.kind) {
+                case TerminatorKind::Invalid:
+                    if (result_it != env.end()) {
+                        return ConstEvalResult::constant(result_it->second);
+                    }
+
+                    return value_for_ref(result, env);
+                case TerminatorKind::Branch: {
+                    auto args = evaluate_value_operands(term.operands, env);
+                    if (!args.has_value()) {
+                        return args.error();
+                    }
+                    incoming_args = std::move(args.value());
+                    current = term.target;
+                    break;
+                }
+                case TerminatorKind::CondBranch: {
+                    std::vector<ValueRef> operands = file().value_operands(term.operands);
+                    if (operands.empty()) {
+                        return make_unsupported(
+                            "constant evaluation conditional branch has no condition",
+                            term.loc);
+                    }
+                    ConstEvalResult cond = value_for_ref(operands[0], env);
+                    if (cond.status != ConstEvalStatus::Constant ||
+                        !cond.value.has_value()) {
+                        return cond;
+                    }
+                    bool condition = false;
+                    if (!is_truthy(*cond.value, condition)) {
+                        return make_unsupported(
+                            "constant evaluation condition is not scalar",
+                            term.loc);
+                    }
+                    incoming_args.clear();
+                    for (size_t index = 1; index < operands.size(); ++index) {
+                        ConstEvalResult arg = value_for_ref(operands[index], env);
+                        if (arg.status != ConstEvalStatus::Constant ||
+                            !arg.value.has_value()) {
+                            return arg;
+                        }
+                        incoming_args.push_back(*arg.value);
+                    }
+                    current = condition ? term.target : term.false_target;
+                    break;
+                }
+                case TerminatorKind::Return: {
+                    auto args = evaluate_value_operands(term.operands, env);
+                    if (!args.has_value()) {
+                        return args.error();
+                    }
+                    if (!args->empty()) {
+                        return ConstEvalResult::constant(args->front());
+                    }
+                    if (allow_void_return) {
+                        return ConstEvalResult::constant(
+                            ConstValue::void_value());
+                    }
+                    return make_unsupported(
+                        "void return is not a constant expression value",
+                        term.loc);
+                }
+                case TerminatorKind::Switch:
+                    return make_unsupported(
+                        "switch is not a constant expression",
+                        term.loc);
+                case TerminatorKind::IndirectBranch:
+                    return make_unsupported(
+                        "computed goto is not a constant expression",
+                        term.loc);
+                case TerminatorKind::AsmGoto:
+                    return make_unsupported(
+                        "asm goto is not a constant expression",
+                        term.loc);
+                case TerminatorKind::Unreachable:
+                    return make_unsupported(
+                        "constant evaluation reached unreachable code",
+                        term.loc);
+                case TerminatorKind::Throw:
+                case TerminatorKind::Rethrow:
+
+                    return make_unsupported(
+                        "throwing an exception is not a constant expression",
+                        term.loc);
+                case TerminatorKind::Resume:
+                    return make_unsupported(
+                        "stack unwinding is not a constant expression",
+                        term.loc);
+                case TerminatorKind::CoroSuspend:
+                case TerminatorKind::CoroEnd:
+
+                    return make_unsupported(
+                        "a coroutine suspension is not a constant expression",
+                        term.loc);
+            }
+        }
+    }
+
+private:
+    template <typename T>
+    class Expected {
+    public:
+        Expected(T value) : value_(std::move(value)) {}
+        Expected(ConstEvalResult error) : error_(std::move(error)) {}
+
+        bool has_value() const { return value_.has_value(); }
+        T& value() { return *value_; }
+        const T& value() const { return *value_; }
+        T* operator->() { return &*value_; }
+        ConstEvalResult error() const { return *error_; }
+
+    private:
+        std::optional<T> value_;
+        std::optional<ConstEvalResult> error_;
+    };
+
+    const aburi::cir::File& file() const {
+        return *context_.file;
+    }
+
+    bool request_is_non_type_template_argument() const {
+        return request_.mode.kind ==
+            ConstEvalModeKind::CppNonTypeTemplateArgument;
+    }
+
+    ConstEvalResult apply_request_target(ConstEvalResult result) {
+        if (!request_is_non_type_template_argument() ||
+            !request_.target_type.valid() ||
+            result.status != ConstEvalStatus::Constant ||
+            !result.value.has_value()) {
+            return result;
+        }
+        return convert_non_type_template_argument_to_target(*result.value);
+    }
+
+    ConstEvalResult convert_non_type_template_argument_to_target(
+        const ConstValue& value) const {
+        TypeId target = file().resolved_type(request_.target_type);
+        if (!file().valid(target)) {
+            return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                              "non-type template argument target type is invalid",
+                              request_.loc);
+        }
+
+        TypeKind target_kind = file().type(target).kind;
+        if (target_kind == TypeKind::Builtin) {
+            const auto* builtin =
+                std::get_if<aburi::cir::BuiltinTypePayload>(
+                    &file().type_payload(target));
+            if (builtin &&
+                builtin->kind == aburi::cir::BuiltinTypeKind::NullPtr) {
+                if (value.is_null(ConstNullKind::Nullptr)) {
+                    return ConstEvalResult::constant(value);
+                }
+                if (value.kind == ConstValueKind::Integer &&
+                    value.int_value.to_unsigned_u128() == 0) {
+                    return ConstEvalResult::constant(
+                        ConstValue::nullptr_value());
+                }
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "non-type template argument is not a converted constant expression",
+                    request_.loc);
+            }
+        }
+        if (target_kind == TypeKind::Pointer ||
+            target_kind == TypeKind::BlockPointer) {
+            if (value.is_null(ConstNullKind::Nullptr)) {
+                return ConstEvalResult::constant(ConstValue::null_pointer());
+            }
+            if (value.is_null(ConstNullKind::Pointer) ||
+                value.kind == ConstValueKind::Address) {
+                return ConstEvalResult::constant(value);
+            }
+            return make_error(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "non-type template argument is not a converted constant expression",
+                request_.loc);
+        }
+        if (target_kind == TypeKind::MemberPointer) {
+            if (value.is_null(ConstNullKind::Nullptr)) {
+                return ConstEvalResult::constant(
+                    ConstValue::null_member_pointer());
+            }
+            if (value.is_null(ConstNullKind::MemberPointer) ||
+                value.kind == ConstValueKind::MemberPointer) {
+                return ConstEvalResult::constant(value);
+            }
+            return make_error(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "non-type template argument is not a converted constant expression",
+                request_.loc);
+        }
+
+        if (is_bool_type(file(), target)) {
+            if (value.kind == ConstValueKind::Boolean) {
+                return ConstEvalResult::constant(value);
+            }
+            if (value.kind == ConstValueKind::Integer) {
+                if (!const_int_value_representable(value.int_value,
+                                                   1,
+                                                   true)) {
+                    return make_error(
+                        ConstEvalDiagCode::UnsupportedExpression,
+                        "non-type template argument conversion is narrowing",
+                        request_.loc);
+                }
+                return ConstEvalResult::constant(
+                    ConstValue::boolean(value.int_value.to_unsigned_u128() != 0));
+            }
+            return make_error(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "non-type template argument is not a converted constant expression",
+                request_.loc);
+        }
+
+        if (aburi::cir::is_integer_like_type(file(), target)) {
+            aburi::cir::IntegerTypeShape shape =
+                aburi::cir::integer_shape_for_type(file(), target);
+            if (value.kind == ConstValueKind::Boolean) {
+                ConstIntValue converted =
+                    ConstIntValue::from_unsigned(value.bool_value ? 1 : 0,
+                                                 shape.bit_width)
+                        .cast(shape.bit_width, shape.is_unsigned);
+                return ConstEvalResult::constant(ConstValue::integer(converted));
+            }
+            if (value.kind != ConstValueKind::Integer) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    value.kind == ConstValueKind::Floating
+                        ? "non-type template argument conversion is narrowing"
+                        : "non-type template argument is not a converted constant expression",
+                    request_.loc);
+            }
+            if (!const_int_value_representable(value.int_value,
+                                               shape.bit_width,
+                                               shape.is_unsigned)) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "non-type template argument conversion is narrowing",
+                    request_.loc);
+            }
+            return ConstEvalResult::constant(ConstValue::integer(
+                value.int_value.cast(shape.bit_width, shape.is_unsigned)));
+        }
+
+        return ConstEvalResult::constant(value);
+    }
+    ConstEvalResult bytes_to_value(const std::vector<uint8_t>& bytes,
+                                   TypeId type,
+                                   SrcLoc loc) {
+        TypeId resolved = file().resolved_type(type);
+        if (!file().valid(resolved)) {
+            return make_unsupported("loaded value has invalid type", loc);
+        }
+        if (file().type(resolved).kind == TypeKind::Array) {
+            const auto* array =
+                std::get_if<aburi::cir::ArrayTypePayload>(
+                    &file().type_payload(resolved));
+            if (!array || !array->size.has_value()) {
+                return make_unsupported(
+                    "array load has incomplete type in constant evaluation",
+                    loc);
+            }
+            std::optional<size_t> element_size =
+                aburi::cir::size_of_type(file(), array->element_type.type);
+            if (!element_size.has_value()) {
+                return make_unsupported(
+                    "array element size is not supported in constant evaluation",
+                    loc);
+            }
+            std::vector<ConstValue> elements;
+            elements.reserve(*array->size);
+            for (size_t index = 0; index < *array->size; ++index) {
+                size_t element_offset = index * *element_size;
+                if (element_offset + *element_size > bytes.size()) {
+                    return make_unsupported(
+                        "array load is outside object bounds in constant evaluation",
+                        loc);
+                }
+                std::vector<uint8_t> element_bytes(
+                    bytes.begin() + static_cast<int64_t>(element_offset),
+                    bytes.begin() + static_cast<int64_t>(
+                                        element_offset + *element_size));
+                ConstEvalResult element =
+                    bytes_to_value(element_bytes, array->element_type.type, loc);
+                if (element.status != ConstEvalStatus::Constant ||
+                    !element.value.has_value()) {
+                    return element;
+                }
+                elements.push_back(*element.value);
+            }
+            return ConstEvalResult::constant(
+                ConstValue::object(ConstObjectValueKind::Array,
+                                   std::move(elements)));
+        }
+        if (file().type(resolved).kind == TypeKind::Record) {
+            const aburi::cir::RecordFacts* facts =
+                file().record_facts_for_type(resolved);
+            if (!facts || facts->is_incomplete) {
+                return make_unsupported(
+                    "record load has incomplete type in constant evaluation",
+                    loc);
+            }
+            std::vector<ConstValue> elements;
+            for (const aburi::cir::RecordFieldFact& field : facts->fields) {
+                if (field.is_virtual_base_storage ||
+                    field.is_flexible_array_member) {
+                    continue;
+                }
+                if (field.is_bitfield) {
+                    return make_unsupported(
+                        "bit-field object loads are not supported in constant evaluation",
+                        loc);
+                }
+                std::optional<size_t> field_size =
+                    aburi::cir::size_of_type(file(), field.type.type);
+                if (!field_size.has_value() ||
+                    field.offset + *field_size > bytes.size()) {
+                    return make_unsupported(
+                        "record field load is outside object bounds in constant evaluation",
+                        loc);
+                }
+                std::vector<uint8_t> field_bytes(
+                    bytes.begin() + static_cast<int64_t>(field.offset),
+                    bytes.begin() + static_cast<int64_t>(
+                                        field.offset + *field_size));
+                ConstEvalResult field_value =
+                    bytes_to_value(field_bytes, field.type.type, loc);
+                if (field_value.status != ConstEvalStatus::Constant ||
+                    !field_value.value.has_value()) {
+                    return field_value;
+                }
+                elements.push_back(*field_value.value);
+            }
+            return ConstEvalResult::constant(
+                ConstValue::object(ConstObjectValueKind::Record,
+                                   std::move(elements)));
+        }
+        if (file().type(resolved).kind == TypeKind::Pointer ||
+            file().type(resolved).kind == TypeKind::BlockPointer) {
+            bool all_zero = std::all_of(bytes.begin(), bytes.end(),
+                                        [](uint8_t byte) {
+                                            return byte == 0;
+                                        });
+            if (all_zero) {
+                return ConstEvalResult::constant(ConstValue::null_pointer());
+            }
+            return make_unsupported(
+                "non-null pointer bytes require a relocation in constant "
+                "evaluation",
+                loc);
+        }
+        if (aburi::cir::is_integer_like_type(file(), resolved)) {
+            if (bytes.size() > 16) {
+                return make_unsupported(
+                    "loads wider than 128 bits are not supported in constant evaluation",
+                    loc);
+            }
+            aburi::abi::ScalarBits raw_bits = aburi::abi::read_scalar_bits(
+                bytes.data(), bytes.size(), file().target_info().endianness);
+            unsigned __int128 raw =
+                (static_cast<unsigned __int128>(raw_bits.high) << 64) |
+                raw_bits.low;
+            auto shape = aburi::cir::integer_shape_for_type(file(), resolved);
+            if (is_bool_type(file(), resolved)) {
+                return ConstEvalResult::constant(ConstValue::boolean(raw != 0));
+            }
+            return ConstEvalResult::constant(ConstValue::integer(
+                ConstIntValue::from_bits128(raw, shape.bit_width,
+                                            shape.is_unsigned)));
+        }
+        if (file().type(resolved).kind == TypeKind::Builtin) {
+            const auto* builtin =
+                std::get_if<aburi::cir::BuiltinTypePayload>(
+                    &file().type_payload(resolved));
+            if (builtin &&
+                builtin->kind == aburi::cir::BuiltinTypeKind::NullPtr) {
+                bool all_zero = true;
+                for (uint8_t byte : bytes) {
+                    all_zero = all_zero && byte == 0;
+                }
+                if (all_zero) {
+                    return ConstEvalResult::constant(
+                        ConstValue::nullptr_value());
+                }
+                return make_unsupported(
+                    "nullptr_t loads from non-zero bytes are not supported",
+                    loc);
+            }
+        }
+        if (aburi::cir::is_floating_type(file(), resolved)) {
+            aburi::cir::FloatingSemantics semantics =
+                aburi::floating::semantics_for_type(file(), resolved);
+            if (semantics != aburi::cir::FloatingSemantics::Invalid &&
+                bytes.size() <= 16) {
+                aburi::abi::ScalarBits bits = aburi::abi::read_scalar_bits(
+                    bytes.data(), bytes.size(),
+                    file().target_info().endianness);
+                return ConstEvalResult::constant(ConstValue::floating(
+                    floating_from_raw_bits(semantics, bits.low, bits.high)));
+            }
+            return make_unsupported(
+                "floating load width is not supported in constant evaluation",
+                loc);
+        }
+        if (file().type(resolved).kind == TypeKind::Pointer) {
+            bool all_zero = true;
+            for (uint8_t byte : bytes) {
+                all_zero = all_zero && byte == 0;
+            }
+            if (all_zero) {
+                return ConstEvalResult::constant(ConstValue::null_pointer());
+            }
+            return make_unsupported(
+                "pointer loads from evaluator memory are not supported", loc);
+        }
+        return make_unsupported(
+            "loaded type is not supported in constant evaluation", loc);
+    }
+
+    std::optional<std::vector<uint8_t>> value_to_bytes(const ConstValue& value,
+                                                       TypeId type) {
+        std::optional<size_t> size;
+        if (file().valid(type)) {
+            size = aburi::cir::size_of_type(file(), type);
+        }
+        TypeId resolved = file().resolved_type(type);
+        if (value.kind == ConstValueKind::Object) {
+            if (!file().valid(resolved) || !size.has_value() ||
+                !value.object_value) {
+                return std::nullopt;
+            }
+            if (file().type(resolved).kind == TypeKind::Array) {
+                const auto* array =
+                    std::get_if<aburi::cir::ArrayTypePayload>(
+                        &file().type_payload(resolved));
+                if (!array || !array->size.has_value() ||
+                    value.object_value->kind != ConstObjectValueKind::Array ||
+                    value.object_value->elements.size() != *array->size) {
+                    return std::nullopt;
+                }
+                std::optional<size_t> element_size =
+                    aburi::cir::size_of_type(file(), array->element_type.type);
+                if (!element_size.has_value()) {
+                    return std::nullopt;
+                }
+                std::vector<uint8_t> out(*size, 0);
+                for (size_t index = 0; index < *array->size; ++index) {
+                    size_t element_offset = index * *element_size;
+                    if (element_offset + *element_size > out.size()) {
+                        return std::nullopt;
+                    }
+                    std::optional<std::vector<uint8_t>> element_bytes =
+                        value_to_bytes(value.object_value->elements[index],
+                                       array->element_type.type);
+                    if (!element_bytes.has_value() ||
+                        element_bytes->size() != *element_size) {
+                        return std::nullopt;
+                    }
+                    std::copy(element_bytes->begin(),
+                              element_bytes->end(),
+                              out.begin() + static_cast<int64_t>(element_offset));
+                }
+                return out;
+            }
+            if (file().type(resolved).kind == TypeKind::Record) {
+                const aburi::cir::RecordFacts* facts =
+                    file().record_facts_for_type(resolved);
+                if (!facts || facts->is_incomplete ||
+                    value.object_value->kind != ConstObjectValueKind::Record) {
+                    return std::nullopt;
+                }
+                bool sparse_union =
+                    facts->kind == aburi::cir::RecordKind::Union &&
+                    value.object_value->active_union_member.valid() &&
+                    value.object_value->elements.size() == 1;
+                std::vector<uint8_t> out(*size, 0);
+                size_t element_index = 0;
+                for (const aburi::cir::RecordFieldFact& field : facts->fields) {
+                    if (field.is_virtual_base_storage ||
+                        field.is_flexible_array_member) {
+                        continue;
+                    }
+                    if (sparse_union &&
+                        field.entity !=
+                            value.object_value->active_union_member) {
+                        continue;
+                    }
+                    if (field.is_bitfield ||
+                        element_index >= value.object_value->elements.size()) {
+                        return std::nullopt;
+                    }
+                    std::optional<size_t> field_size =
+                        aburi::cir::size_of_type(file(), field.type.type);
+                    if (!field_size.has_value() ||
+                        field.offset + *field_size > out.size()) {
+                        return std::nullopt;
+                    }
+                    std::optional<std::vector<uint8_t>> field_bytes =
+                        value_to_bytes(value.object_value->elements[element_index],
+                                       field.type.type);
+                    if (!field_bytes.has_value() ||
+                        field_bytes->size() != *field_size) {
+                        return std::nullopt;
+                    }
+                    std::copy(field_bytes->begin(),
+                              field_bytes->end(),
+                              out.begin() + static_cast<int64_t>(field.offset));
+                    ++element_index;
+                }
+                if (element_index != value.object_value->elements.size()) {
+                    return std::nullopt;
+                }
+                return out;
+            }
+            return std::nullopt;
+        }
+        switch (value.kind) {
+            case ConstValueKind::Integer: {
+                size_t width = size.value_or((value.int_value.bit_width + 7) / 8);
+                if (width > 16) {
+                    return std::nullopt;
+                }
+                unsigned __int128 raw = static_cast<unsigned __int128>(
+                    value.int_value.to_signed_i128());
+                std::vector<uint8_t> out(width, 0);
+                aburi::abi::write_scalar_bits(
+                    out.data(), width, static_cast<uint64_t>(raw),
+                    static_cast<uint64_t>(raw >> 64),
+                    file().target_info().endianness);
+                return out;
+            }
+            case ConstValueKind::Boolean: {
+                std::vector<uint8_t> out(size.value_or(1), 0);
+                if (!out.empty()) {
+                    out[0] = value.bool_value ? 1 : 0;
+                }
+                return out;
+            }
+            case ConstValueKind::Floating: {
+                size_t width = size.value_or(8);
+                if (width <= 16 && value.float_value.value.canonical()) {
+                    std::vector<uint8_t> out(width, 0);
+                    aburi::abi::write_scalar_bits(
+                        out.data(), width,
+                        value.float_value.value.low_bits,
+                        value.float_value.value.high_bits,
+                        file().target_info().endianness);
+                    return out;
+                }
+                return std::nullopt;
+            }
+            case ConstValueKind::Null:
+                return std::vector<uint8_t>(size.value_or(8), 0);
+            default:
+                return std::nullopt;
+        }
+    }
+
+    const aburi::cir::ConstantStateFact* constant_state_at_offset(
+        const aburi::cir::ConstantStateFact& root,
+        int64_t byte_offset,
+        TypeId want) {
+        TypeId target = file().resolved_type(want);
+        if (byte_offset < 0 || !file().valid(target)) {
+            return nullptr;
+        }
+        const aburi::cir::ConstantStateFact* state = &root;
+        int64_t remaining = byte_offset;
+        while (state != nullptr) {
+            TypeId current = file().resolved_type(state->type.type);
+            if (!file().valid(current)) {
+                return nullptr;
+            }
+            if (remaining == 0 && current == target) {
+                return state;
+            }
+            if (file().type(current).kind == TypeKind::Array) {
+                const auto* array = std::get_if<aburi::cir::ArrayTypePayload>(
+                    &file().type_payload(current));
+                if (!array) {
+                    return nullptr;
+                }
+                std::optional<size_t> element_size =
+                    aburi::cir::size_of_type(file(), array->element_type.type);
+                if (!element_size.has_value() || *element_size == 0) {
+                    return nullptr;
+                }
+                size_t index =
+                    static_cast<size_t>(remaining) / *element_size;
+                if (index >= state->elements.size()) {
+                    return nullptr;
+                }
+                remaining -=
+                    static_cast<int64_t>(index * *element_size);
+                state = &state->elements[index];
+                continue;
+            }
+            if (file().type(current).kind != TypeKind::Record) {
+                return nullptr;
+            }
+            const aburi::cir::RecordFacts* facts =
+                file().record_facts_for_type(current);
+            if (!facts) {
+                return nullptr;
+            }
+            bool is_union = facts->kind == aburi::cir::RecordKind::Union;
+            bool sparse_union = is_union &&
+                state->active_union_member.valid() &&
+                state->elements.size() == 1;
+            const aburi::cir::ConstantStateFact* next = nullptr;
+            size_t element_index = 0;
+            for (const aburi::cir::RecordFieldFact& field : facts->fields) {
+                if (field.is_virtual_base_storage ||
+                    field.is_flexible_array_member) {
+                    continue;
+                }
+                if (sparse_union &&
+                    field.entity != state->active_union_member) {
+                    continue;
+                }
+                if (element_index >= state->elements.size()) {
+                    break;
+                }
+                size_t selected_index = element_index++;
+
+                std::optional<size_t> field_size =
+                    aburi::cir::size_of_type(file(), field.type.type);
+                if (field.is_bitfield || !field_size.has_value()) {
+                    continue;
+                }
+
+                if (is_union && state->active_union_member != field.entity) {
+                    continue;
+                }
+                int64_t start = static_cast<int64_t>(field.offset);
+                if (remaining < start ||
+                    remaining >= start + static_cast<int64_t>(*field_size)) {
+                    continue;
+                }
+                next = &state->elements[selected_index];
+                remaining -= start;
+                break;
+            }
+            state = next;
+        }
+        return nullptr;
+    }
+
+    std::optional<uint64_t> materialize_string_literal(
+        aburi::cir::InstId literal_id) {
+        if (!literal_id.valid() || !file().valid(literal_id)) {
+            return std::nullopt;
+        }
+        uint64_t key = inst_key(literal_id);
+        auto found = string_literal_allocations_.find(key);
+        if (found != string_literal_allocations_.end()) {
+            return found->second;
+        }
+        const aburi::cir::Inst& literal_inst = file().inst(literal_id);
+        if (literal_inst.kind != InstKind::StringLiteral) {
+            return std::nullopt;
+        }
+        const auto* literal =
+            std::get_if<aburi::cir::LiteralPayload>(
+                &file().payload(literal_inst.payload_index));
+        const auto* bytes = literal
+            ? std::get_if<aburi::cir::LiteralByteArray>(&literal->value)
+            : nullptr;
+        if (!bytes) {
+            return std::nullopt;
+        }
+        TypeId object_type =
+            file().place_object_type(literal_inst.result_type);
+        std::optional<size_t> object_size =
+            aburi::cir::size_of_type(file(), object_type);
+        if (!object_size.has_value() || *object_size < bytes->size()) {
+            return std::nullopt;
+        }
+
+        uint64_t allocation = state_.memory().allocate(*object_size, false);
+        std::vector<uint8_t> data(*object_size, 0);
+        std::copy(bytes->begin(), bytes->end(), data.begin());
+        if (!state_.memory().store_bytes(allocation, 0, data)) {
+            return std::nullopt;
+        }
+        string_literal_allocations_.emplace(key, allocation);
+        return allocation;
+    }
+
+    ConstEvalResult load_value_from_memory(ConstAddressValue address,
+                                           TypeId type,
+                                           SrcLoc loc) {
+        if (address.allocation_id == 0 &&
+            address.string_literal.valid()) {
+            std::optional<uint64_t> allocation =
+                materialize_string_literal(address.string_literal);
+            if (!allocation.has_value()) {
+                return make_unsupported(
+                    "string literal object could not be materialized in "
+                    "constant evaluation",
+                    loc);
+            }
+            address.allocation_id = *allocation;
+        }
+        TypeId resolved = file().resolved_type(type);
+        std::optional<size_t> size = aburi::cir::size_of_type(file(), type);
+        if (!file().valid(resolved) || !size.has_value() ||
+            address.byte_offset < 0 || address.allocation_id == 0) {
+            return make_unsupported(
+                "load target is not evaluator-owned memory", loc);
+        }
+
+        if (!address.subobjects.empty()) {
+            aburi::cir::EntityId member =
+                address.subobjects.back().entity;
+            if (member.valid() && file().valid(member)) {
+                aburi::cir::EntityId parent = file().entity(member).parent;
+                const aburi::cir::RecordFacts* parent_facts =
+                    parent.valid() ? file().record_facts(parent) : nullptr;
+                if (parent_facts &&
+                    parent_facts->kind == aburi::cir::RecordKind::Union) {
+                    aburi::cir::EntityId active =
+                        state_.memory().active_union_member(
+                            address.allocation_id,
+                            static_cast<size_t>(
+                                address.containing_object_offset));
+                    if (active.valid() && active != member) {
+                        return make_error(
+                            ConstEvalDiagCode::UnsupportedExpression,
+                            "read of an inactive union member is not a constant expression",
+                            loc);
                     }
                 }
-                return true;
             }
         }
-    }
-    return false;
-}
 
-bool assign_interpreter_local(const VarRef* var_ref, const ConstValue& value) {
-    if (!var_ref) {
-        return false;
-    }
-    if (var_ref->symref &&
-        assign_interpreter_symbol_value(var_ref->symref.get(), value)) {
-        return true;
-    }
-    if (!g_interpreter_session || g_interpreter_session->frames.empty()) {
-        return false;
-    }
-    auto& current_frame = g_interpreter_session->frames.back();
-    for (auto scope_it = current_frame.scopes.rbegin();
-         scope_it != current_frame.scopes.rend(); ++scope_it) {
-        if (!var_ref->get_name().empty()) {
-            auto name_it = scope_it->named_values.find(var_ref->get_name());
-            if (name_it != scope_it->named_values.end()) {
-                name_it->second = value;
-                if (auto sym_it = scope_it->named_symbols.find(var_ref->get_name());
-                    sym_it != scope_it->named_symbols.end() &&
-                    sym_it->second) {
-                    scope_it->symbol_values[sym_it->second.get()] = value;
+        if (address.bitfield_entity.valid()) {
+            size_t storage_bytes =
+                (static_cast<size_t>(address.bit_storage_bits) + 7) / 8;
+            std::optional<std::vector<uint8_t>> stored =
+                state_.memory().load_bytes(
+                    address.allocation_id,
+                    static_cast<size_t>(address.byte_offset),
+                    storage_bytes);
+            if (!stored.has_value() || address.bit_width == 0 ||
+                address.bit_width > 64) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constant evaluation read an uninitialized bit-field",
+                    loc);
+            }
+            uint64_t raw = aburi::abi::read_scalar_bits(
+                stored->data(), stored->size(),
+                file().target_info().endianness).low;
+            uint64_t mask = address.bit_width == 64
+                ? ~uint64_t{0}
+                : ((uint64_t{1} << address.bit_width) - 1);
+            raw = (raw >> address.bit_offset) & mask;
+            aburi::cir::IntegerTypeShape shape =
+                aburi::cir::integer_shape_for_type(file(), resolved);
+            if (!shape.is_unsigned && address.bit_width < 64 &&
+                (raw & (uint64_t{1} << (address.bit_width - 1))) != 0) {
+                raw |= ~mask;
+            }
+            return ConstEvalResult::constant(ConstValue::integer(
+                ConstIntValue::from_bits128(raw, shape.bit_width,
+                                            shape.is_unsigned)));
+        }
+
+        if (file().type(resolved).kind == TypeKind::Array) {
+            const auto* array =
+                std::get_if<aburi::cir::ArrayTypePayload>(
+                    &file().type_payload(resolved));
+            if (!array || !array->size.has_value()) {
+                return make_unsupported(
+                    "array load has incomplete type in constant evaluation",
+                    loc);
+            }
+            std::optional<size_t> element_size =
+                aburi::cir::size_of_type(file(), array->element_type.type);
+            if (!element_size.has_value()) {
+                return make_unsupported(
+                    "array element size is not supported in constant evaluation",
+                    loc);
+            }
+            std::vector<ConstValue> elements;
+            elements.reserve(*array->size);
+            for (size_t index = 0; index < *array->size; ++index) {
+                ConstAddressValue element_address = address;
+                element_address.byte_offset +=
+                    static_cast<int64_t>(index * *element_size);
+                ConstEvalResult element =
+                    load_value_from_memory(element_address,
+                                           array->element_type.type,
+                                           loc);
+                if (element.status != ConstEvalStatus::Constant ||
+                    !element.value.has_value()) {
+                    return element;
                 }
-                return true;
+                elements.push_back(*element.value);
+            }
+            return ConstEvalResult::constant(
+                ConstValue::object(ConstObjectValueKind::Array,
+                                   std::move(elements)));
+        }
+
+        if (file().type(resolved).kind == TypeKind::Record) {
+            const aburi::cir::RecordFacts* facts =
+                file().record_facts_for_type(resolved);
+            if (!facts || facts->is_incomplete) {
+                return make_unsupported(
+                    "record load has incomplete type in constant evaluation",
+                    loc);
+            }
+            bool is_union =
+                facts->kind == aburi::cir::RecordKind::Union;
+            aburi::cir::EntityId active_union_member = is_union
+                ? state_.memory().active_union_member(
+                      address.allocation_id,
+                      static_cast<size_t>(address.byte_offset))
+                : aburi::cir::EntityId{};
+            if (is_union && !active_union_member.valid()) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constant evaluation read a union with no active member",
+                    loc);
+            }
+            std::vector<ConstValue> elements;
+            for (const aburi::cir::RecordFieldFact& field : facts->fields) {
+                if (field.is_virtual_base_storage ||
+                    field.is_flexible_array_member) {
+                    continue;
+                }
+                if (is_union && field.entity != active_union_member) {
+                    continue;
+                }
+                ConstAddressValue field_address = address;
+                field_address.containing_object_offset = address.byte_offset;
+                field_address.byte_offset +=
+                    static_cast<int64_t>(field.offset);
+                field_address.subobjects.push_back(
+                    ConstSubobjectPathEntry{
+                        field.entity, 0, false, address.byte_offset});
+                if (field.is_bitfield) {
+                    field_address.bitfield_entity = field.entity;
+                    field_address.bit_offset = field.bit_offset;
+                    field_address.bit_width =
+                        aburi::cir::bitfield_value_width(file(), field);
+                    field_address.bit_storage_bits =
+                        field.storage_size == 0 ? 32 : field.storage_size;
+                }
+                ConstEvalResult field_value =
+                    load_value_from_memory(field_address,
+                                           field.type.type,
+                                           loc);
+                if (field_value.status != ConstEvalStatus::Constant ||
+                    !field_value.value.has_value()) {
+                    return field_value;
+                }
+                elements.push_back(*field_value.value);
+            }
+            ConstValue object = ConstValue::object(
+                ConstObjectValueKind::Record, std::move(elements));
+            if (is_union) {
+                object.object_value->active_union_member = active_union_member;
+            }
+            return ConstEvalResult::constant(std::move(object));
+        }
+
+        {
+
+            const auto* builtin = std::get_if<aburi::cir::BuiltinTypePayload>(
+                &file().type_payload(resolved));
+            if (builtin &&
+                builtin->kind == aburi::cir::BuiltinTypeKind::MetaInfo) {
+                size_t byte_offset = static_cast<size_t>(address.byte_offset);
+                if (std::optional<ConstValue> stored =
+                        state_.memory().load_meta(address.allocation_id,
+                                                  byte_offset,
+                                                  *size)) {
+                    return ConstEvalResult::constant(*stored);
+                }
+                std::optional<std::vector<uint8_t>> bytes =
+                    state_.memory().load_bytes(address.allocation_id,
+                                               byte_offset,
+                                               *size);
+                if (bytes.has_value()) {
+                    bool all_zero = true;
+                    for (uint8_t byte : *bytes) {
+                        all_zero = all_zero && byte == 0;
+                    }
+                    if (all_zero) {
+                        return ConstEvalResult::constant(
+                            ConstValue::meta_info_null());
+                    }
+                }
+                return make_unsupported(
+                    "reflection load has no handle identity in constant "
+                    "evaluation",
+                    loc);
             }
         }
-    }
-    return false;
-}
 
-bool lookup_interpreter_symbol_value(const Symbol* sym, ConstValue& value_out) {
-    if (!g_interpreter_session || !sym) {
-        return false;
+        bool is_reference = false;
+        if (is_pointer_or_reference_type(file(), resolved, &is_reference)) {
+            size_t byte_offset = static_cast<size_t>(address.byte_offset);
+            if (std::optional<ConstAddressValue> stored =
+                    state_.memory().load_address(address.allocation_id,
+                                                 byte_offset,
+                                                 *size)) {
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(*stored));
+            }
+            std::optional<std::vector<uint8_t>> bytes =
+                state_.memory().load_bytes(address.allocation_id,
+                                           byte_offset,
+                                           *size);
+            if (!bytes.has_value()) {
+                return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                                  "constant evaluation read outside object bounds",
+                                  loc);
+            }
+            bool all_zero = true;
+            for (uint8_t byte : *bytes) {
+                all_zero = all_zero && byte == 0;
+            }
+            if (!is_reference && all_zero) {
+                return ConstEvalResult::constant(ConstValue::null_pointer());
+            }
+            return make_unsupported(
+                is_reference
+                    ? "reference load has no address identity in constant evaluation"
+                    : "pointer load has no address identity in constant evaluation",
+                loc);
+        }
+
+        std::optional<std::vector<uint8_t>> bytes =
+            state_.memory().load_bytes(
+                address.allocation_id,
+                static_cast<size_t>(address.byte_offset),
+                *size);
+        if (!bytes.has_value()) {
+            return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                              "constant evaluation read outside object bounds",
+                              loc);
+        }
+        return bytes_to_value(*bytes, type, loc);
     }
-    for (auto frame_it = g_interpreter_session->frames.rbegin();
-         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
-        for (auto scope_it = frame_it->scopes.rbegin();
-             scope_it != frame_it->scopes.rend(); ++scope_it) {
-            auto sym_it = scope_it->symbol_values.find(sym);
-            if (sym_it != scope_it->symbol_values.end()) {
-                value_out = sym_it->second;
-                return true;
+
+    ConstEvalResult store_value_to_memory(const ConstAddressValue& address,
+                                          const ConstValue& value,
+                                          TypeId type,
+                                          SrcLoc loc) {
+        TypeId resolved = file().resolved_type(type);
+        std::optional<size_t> size = aburi::cir::size_of_type(file(), type);
+        if (!file().valid(resolved) || !size.has_value() ||
+            address.byte_offset < 0 || address.allocation_id == 0) {
+            return make_unsupported(
+                "store target is not evaluator-owned memory", loc);
+        }
+
+        ConstEvalResult activated =
+            activate_union_member_for_address(address, loc);
+        if (activated.status != ConstEvalStatus::Constant) {
+            return activated;
+        }
+
+        if (value.kind == ConstValueKind::Object) {
+            if (!value.object_value) {
+                return make_unsupported(
+                    "object store value is invalid in constant evaluation",
+                    loc);
+            }
+            if (file().type(resolved).kind == TypeKind::Array) {
+                const auto* array =
+                    std::get_if<aburi::cir::ArrayTypePayload>(
+                        &file().type_payload(resolved));
+                if (!array || !array->size.has_value() ||
+                    value.object_value->kind != ConstObjectValueKind::Array ||
+                    value.object_value->elements.size() != *array->size) {
+                    return make_unsupported(
+                        "array object store shape is invalid in constant evaluation",
+                        loc);
+                }
+                std::optional<size_t> element_size =
+                    aburi::cir::size_of_type(file(), array->element_type.type);
+                if (!element_size.has_value()) {
+                    return make_unsupported(
+                        "array element size is not supported in constant evaluation",
+                        loc);
+                }
+                for (size_t index = 0; index < *array->size; ++index) {
+                    ConstAddressValue element_address = address;
+                    element_address.byte_offset +=
+                        static_cast<int64_t>(index * *element_size);
+                    ConstEvalResult stored =
+                        store_value_to_memory(element_address,
+                                              value.object_value->elements[index],
+                                              array->element_type.type,
+                                              loc);
+                    if (stored.status != ConstEvalStatus::Constant) {
+                        return stored;
+                    }
+                }
+                return ConstEvalResult::constant(ConstValue::void_value());
+            }
+            if (file().type(resolved).kind == TypeKind::Record) {
+                const aburi::cir::RecordFacts* facts =
+                    file().record_facts_for_type(resolved);
+                if (!facts || facts->is_incomplete ||
+                    value.object_value->kind != ConstObjectValueKind::Record) {
+                    return make_unsupported(
+                        "record object store shape is invalid in constant evaluation",
+                        loc);
+                }
+                bool sparse_union =
+                    facts->kind == aburi::cir::RecordKind::Union &&
+                    value.object_value->active_union_member.valid() &&
+                    value.object_value->elements.size() == 1;
+                if (facts->kind == aburi::cir::RecordKind::Union &&
+                    value.object_value->active_union_member.valid() &&
+                    !state_.memory().set_active_union(
+                        address.allocation_id,
+                        static_cast<size_t>(address.byte_offset),
+                        value.object_value->active_union_member)) {
+                    return make_error(
+                        ConstEvalDiagCode::UnsupportedExpression,
+                        "constant evaluation could not copy union member state",
+                        loc);
+                }
+                size_t element_index = 0;
+                for (const aburi::cir::RecordFieldFact& field : facts->fields) {
+                    if (field.is_virtual_base_storage ||
+                        field.is_flexible_array_member) {
+                        continue;
+                    }
+                    if (sparse_union &&
+                        field.entity !=
+                            value.object_value->active_union_member) {
+                        continue;
+                    }
+                    if (element_index >= value.object_value->elements.size()) {
+                        return make_unsupported(
+                            "record object store field is invalid in constant evaluation",
+                            loc);
+                    }
+                    if (facts->kind == aburi::cir::RecordKind::Union &&
+                        value.object_value->active_union_member.valid() &&
+                        field.entity !=
+                            value.object_value->active_union_member) {
+                        ++element_index;
+                        continue;
+                    }
+                    ConstAddressValue field_address = address;
+                    field_address.containing_object_offset =
+                        address.byte_offset;
+                    field_address.byte_offset +=
+                        static_cast<int64_t>(field.offset);
+                    field_address.subobjects.push_back(
+                        ConstSubobjectPathEntry{
+                            field.entity, 0, false, address.byte_offset});
+                    if (field.is_bitfield) {
+                        field_address.bitfield_entity = field.entity;
+                        field_address.bit_offset = field.bit_offset;
+                        field_address.bit_width =
+                            aburi::cir::bitfield_value_width(file(), field);
+                        field_address.bit_storage_bits =
+                            field.storage_size == 0 ? 32 : field.storage_size;
+                    }
+                    ConstEvalResult stored =
+                        store_value_to_memory(field_address,
+                                              value.object_value
+                                                  ->elements[element_index],
+                                              field.type.type,
+                                              loc);
+                    if (stored.status != ConstEvalStatus::Constant) {
+                        return stored;
+                    }
+                    ++element_index;
+                }
+                if (element_index != value.object_value->elements.size()) {
+                    return make_unsupported(
+                        "record object store has extra elements in constant evaluation",
+                        loc);
+                }
+                return ConstEvalResult::constant(ConstValue::void_value());
             }
         }
-    }
-    return false;
-}
 
-bool lookup_interpreter_local(const VarRef* var_ref, ConstValue& value_out) {
-    if (!g_interpreter_session || !var_ref) {
-        return false;
+        if (value.kind == ConstValueKind::MetaInfo) {
+            if (!state_.memory().store_meta(
+                    address.allocation_id,
+                    static_cast<size_t>(address.byte_offset),
+                    *size,
+                    value)) {
+                return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                                  "constant evaluation wrote outside object bounds",
+                                  loc);
+            }
+            return ConstEvalResult::constant(ConstValue::void_value());
+        }
+
+        if (address.bitfield_entity.valid()) {
+            std::optional<int64_t> field_value = value.try_as_int64();
+            size_t storage_bytes =
+                (static_cast<size_t>(address.bit_storage_bits) + 7) / 8;
+            if (!field_value.has_value() || address.bit_width == 0 ||
+                address.bit_width > 64 || storage_bytes > 8) {
+                return make_unsupported(
+                    "bit-field value is not supported in constant evaluation",
+                    loc);
+            }
+            std::optional<std::vector<uint8_t>> existing =
+                state_.memory().load_bytes(
+                    address.allocation_id,
+                    static_cast<size_t>(address.byte_offset),
+                    storage_bytes);
+            std::vector<uint8_t> bytes =
+                existing.value_or(std::vector<uint8_t>(storage_bytes, 0));
+            uint64_t storage = aburi::abi::read_scalar_bits(
+                bytes.data(), bytes.size(),
+                file().target_info().endianness).low;
+            uint64_t value_mask = address.bit_width == 64
+                ? ~uint64_t{0}
+                : ((uint64_t{1} << address.bit_width) - 1);
+            uint64_t shifted_mask = value_mask << address.bit_offset;
+            storage = (storage & ~shifted_mask) |
+                ((static_cast<uint64_t>(*field_value) & value_mask)
+                 << address.bit_offset);
+            aburi::abi::write_scalar_bits(
+                bytes.data(), bytes.size(), storage, 0,
+                file().target_info().endianness);
+            if (!state_.memory().store_bytes(
+                    address.allocation_id,
+                    static_cast<size_t>(address.byte_offset), bytes)) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constant evaluation wrote outside bit-field storage",
+                    loc);
+            }
+            return ConstEvalResult::constant(ConstValue::void_value());
+        }
+
+        bool is_reference = false;
+        if (is_pointer_or_reference_type(file(), resolved, &is_reference)) {
+            if (value.kind == ConstValueKind::Address) {
+                if (!state_.memory().store_address(
+                        address.allocation_id,
+                        static_cast<size_t>(address.byte_offset),
+                        *size,
+                        value.address_value)) {
+                    return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                                      "constant evaluation wrote outside object bounds",
+                                      loc);
+                }
+                return ConstEvalResult::constant(ConstValue::void_value());
+            }
+            if (!is_reference &&
+                (value.is_null(ConstNullKind::Pointer) ||
+                 value.is_null(ConstNullKind::Nullptr))) {
+                std::vector<uint8_t> zeros(*size, 0);
+                if (!state_.memory().store_bytes(
+                        address.allocation_id,
+                        static_cast<size_t>(address.byte_offset),
+                        zeros)) {
+                    return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                                      "constant evaluation wrote outside object bounds",
+                                      loc);
+                }
+                return ConstEvalResult::constant(ConstValue::void_value());
+            }
+            return make_unsupported(
+                is_reference
+                    ? "reference store value has no address identity in constant evaluation"
+                    : "pointer store value has no address identity in constant evaluation",
+                loc);
+        }
+
+        std::optional<std::vector<uint8_t>> bytes =
+            value_to_bytes(value, type);
+        if (!bytes.has_value()) {
+            return make_unsupported(
+                "store value cannot be serialized in constant evaluation",
+                loc);
+        }
+        if (!state_.memory().store_bytes(
+                address.allocation_id,
+                static_cast<size_t>(address.byte_offset),
+                *bytes)) {
+            return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                              "constant evaluation wrote outside object bounds",
+                              loc);
+        }
+        return ConstEvalResult::constant(ConstValue::void_value());
     }
-    if (var_ref->symref &&
-        lookup_interpreter_symbol_value(var_ref->symref.get(), value_out)) {
-        return true;
+
+    ConstEvalResult seed_local_object(const ConstEvalObjectSeed& seed) {
+        if (!seed.entity.valid() || !file().valid(seed.entity)) {
+            return make_unsupported(
+                "constant evaluation object seed has no entity",
+                seed.loc);
+        }
+        TypeId type = seed.type.valid() ? seed.type : file().entity(seed.entity).type;
+        std::optional<size_t> size = aburi::cir::size_of_type(file(), type);
+        if (!size.has_value()) {
+            return make_unsupported(
+                "constant evaluation object seed has no constant size",
+                seed.loc);
+        }
+        uint64_t key = entity_key(seed.entity);
+        if (local_allocations_.find(key) != local_allocations_.end()) {
+            return make_unsupported(
+                "constant evaluation object seed aliases an existing local object",
+                seed.loc);
+        }
+        uint64_t allocation = state_.memory().allocate(*size);
+        local_allocations_[key] = allocation;
+        ConstAddressValue address;
+        address.entity = seed.entity;
+        address.allocation_id = allocation;
+        return store_value_to_memory(address, seed.value, type, seed.loc);
     }
-    for (auto frame_it = g_interpreter_session->frames.rbegin();
-         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
-        for (auto scope_it = frame_it->scopes.rbegin();
-             scope_it != frame_it->scopes.rend(); ++scope_it) {
-            if (!var_ref->get_name().empty()) {
-                auto name_it = scope_it->named_values.find(var_ref->get_name());
-                if (name_it != scope_it->named_values.end()) {
-                    value_out = name_it->second;
+
+    ConstEvalResult evaluate_inst(InstId inst_id,
+                                  std::unordered_map<uint64_t, ConstValue>& env) {
+        if (!state_.consume_step()) {
+            return make_error(ConstEvalDiagCode::StepLimitExceeded,
+                              "constant evaluation step limit exceeded",
+                              request_.loc);
+        }
+        if (auto found = env.find(inst_key(inst_id)); found != env.end()) {
+            return ConstEvalResult::constant(found->second);
+        }
+        if (!file().valid(inst_id)) {
+            return make_error(ConstEvalDiagCode::NullExpression,
+                              "cannot evaluate an invalid CIR instruction",
+                              request_.loc);
+        }
+
+        const aburi::cir::Inst& inst = file().inst(inst_id);
+        const aburi::cir::InstPayload& payload = file().payload(inst.payload_index);
+        switch (inst.kind) {
+            case InstKind::IntegerLiteral: {
+                const auto* literal = std::get_if<aburi::cir::LiteralPayload>(&payload);
+                const auto* value = literal
+                    ? std::get_if<aburi::cir::IntegerValue>(&literal->value)
+                    : nullptr;
+                if (!value) {
+                    return make_unsupported("integer literal payload is missing",
+                                            inst.loc);
+                }
+                auto shape =
+                    aburi::cir::integer_shape_for_type(file(), inst.result_type);
+                return ConstEvalResult::constant(ConstValue::integer(
+                    value->cast(shape.bit_width, shape.is_unsigned)));
+            }
+            case InstKind::BooleanLiteral: {
+                const auto* literal = std::get_if<aburi::cir::LiteralPayload>(&payload);
+                const auto* value =
+                    literal ? std::get_if<bool>(&literal->value) : nullptr;
+                if (!value) {
+                    return make_unsupported("boolean literal payload is missing",
+                                            inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::boolean(*value));
+            }
+            case InstKind::NullptrLiteral:
+                return ConstEvalResult::constant(ConstValue::nullptr_value());
+            case InstKind::FloatingLiteral: {
+                const auto* literal = std::get_if<aburi::cir::LiteralPayload>(&payload);
+                const auto* value =
+                    literal
+                        ? std::get_if<aburi::cir::FloatingValue>(&literal->value)
+                        : nullptr;
+                if (!value) {
+                    return make_unsupported("floating literal payload is missing",
+                                            inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::floating(*value));
+            }
+            case InstKind::CharacterLiteral: {
+                const auto* literal = std::get_if<aburi::cir::LiteralPayload>(&payload);
+                const auto* bytes =
+                    literal ? std::get_if<aburi::cir::LiteralByteArray>(&literal->value)
+                            : nullptr;
+                if (!bytes) {
+                    return make_unsupported("character literal payload is missing",
+                                            inst.loc);
+                }
+                auto shape =
+                    aburi::cir::integer_shape_for_type(file(), inst.result_type);
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_unsigned(bytes_to_u64(*bytes), shape.bit_width)
+                        .cast(shape.bit_width, shape.is_unsigned)));
+            }
+            case InstKind::SizeofType: {
+                auto type_ref = first_type_operand(file(), inst);
+                if (!type_ref.has_value()) {
+                    return make_unsupported("sizeof has no type operand", inst.loc);
+                }
+                auto size = aburi::cir::size_of_type(file(), type_ref->type);
+                if (!size.has_value()) {
+                    return make_unsupported(
+                        "sizeof operand type is not complete for constant evaluation",
+                        inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_unsigned(*size, 64)));
+            }
+            case InstKind::AlignofType: {
+                auto type_ref = first_type_operand(file(), inst);
+                if (!type_ref.has_value()) {
+                    return make_unsupported("alignof has no type operand", inst.loc);
+                }
+                auto align = aburi::cir::align_of_type(file(), type_ref->type);
+                if (!align.has_value()) {
+                    return make_unsupported(
+                        "alignof operand type is not complete for constant evaluation",
+                        inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_unsigned(*align, 64)));
+            }
+            case InstKind::UnaryOp:
+                return evaluate_unary(inst, payload, env);
+            case InstKind::BinaryOp:
+                return evaluate_binary(inst, payload, env);
+            case InstKind::Cast:
+                return evaluate_cast(inst, env);
+            case InstKind::Param:
+                return make_unsupported(
+                    "function or block parameter is not bound in constant evaluation",
+                    inst.loc);
+            case InstKind::LocalPlace: {
+                aburi::cir::EntityId entity = entity_operand_at(file(), inst, 0);
+                if (!entity.valid()) {
+                    return make_unsupported("local place has no entity", inst.loc);
+                }
+                uint64_t key = entity_key(entity);
+                auto found = local_allocations_.find(key);
+                uint64_t allocation = 0;
+                if (found != local_allocations_.end()) {
+                    allocation = found->second;
+                } else {
+                    std::optional<size_t> size =
+                        aburi::cir::size_of_type(file(), file().entity(entity).type);
+                    if (!size.has_value()) {
+                        return make_unsupported(
+                            "local object has no constant size", inst.loc);
+                    }
+                    allocation = state_.memory().allocate(*size);
+                    local_allocations_[key] = allocation;
+                }
+                ConstAddressValue address;
+                address.entity = entity;
+                address.allocation_id = allocation;
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(address));
+            }
+            case InstKind::GlobalPlace: {
+                aburi::cir::EntityId entity = entity_operand_at(file(), inst, 0);
+                if (!entity.valid()) {
+                    return make_unsupported("global place has no entity", inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::address(entity));
+            }
+            case InstKind::ComplexMake: {
+                std::vector<aburi::cir::ValueRef> operands =
+                    file().value_operands(inst.operands);
+                if (operands.size() != 2) {
+                    return make_unsupported("complex_make operand mismatch", inst.loc);
+                }
+                ConstEvalResult real = value_for_ref(operands[0], env);
+                if (real.status != ConstEvalStatus::Constant) {
+                    return real;
+                }
+                ConstEvalResult imag = value_for_ref(operands[1], env);
+                if (imag.status != ConstEvalStatus::Constant) {
+                    return imag;
+                }
+                aburi::cir::TypeId resolved =
+                    file().resolved_type(inst.result_type);
+                const auto* complex = file().valid(resolved)
+                    ? std::get_if<aburi::cir::ComplexTypePayload>(
+                          &file().type_payload(resolved))
+                    : nullptr;
+                if (complex && aburi::cir::is_integer_like_type(
+                                   file(), complex->element_type.type)) {
+                    aburi::cir::IntegerTypeShape shape =
+                        aburi::cir::integer_shape_for_type(
+                            file(), complex->element_type.type);
+                    auto re = value_to_int(*real.value, shape);
+                    auto im = value_to_int(*imag.value, shape);
+                    if (!re || !im) {
+                        return make_unsupported(
+                            "complex_make operands are not integer constants",
+                            inst.loc);
+                    }
+                    return ConstEvalResult::constant(
+                        ConstValue::complex_integer(*re, *im));
+                }
+                aburi::cir::FloatingSemantics semantics = complex
+                    ? aburi::floating::semantics_for_type(
+                          file(), complex->element_type.type)
+                    : aburi::cir::FloatingSemantics::Invalid;
+                auto re = value_to_float(*real.value, semantics);
+                auto im = value_to_float(*imag.value, semantics);
+                if (!re || !im || floating_status_disqualifies(re.status) ||
+                    floating_status_disqualifies(im.status)) {
+                    return make_unsupported("complex_make operands are not constant",
+                                            inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::complex(*re, *im));
+            }
+            case InstKind::ComplexReal:
+            case InstKind::ComplexImag: {
+                std::vector<aburi::cir::ValueRef> operands =
+                    file().value_operands(inst.operands);
+                if (operands.size() != 1) {
+                    return make_unsupported("complex extraction operand mismatch",
+                                            inst.loc);
+                }
+                ConstEvalResult operand = value_for_ref(operands[0], env);
+                if (operand.status != ConstEvalStatus::Constant) {
+                    return operand;
+                }
+                if (operand.value->kind != ConstValueKind::Complex) {
+                    return make_unsupported("complex extraction operand is not complex",
+                                            inst.loc);
+                }
+                if (operand.value->complex_value.has_integer_components) {
+                    aburi::cir::IntegerTypeShape shape =
+                        aburi::cir::integer_shape_for_type(
+                            file(), inst.result_type);
+                    ConstIntValue part = inst.kind == InstKind::ComplexImag
+                        ? operand.value->complex_value.integer_imag
+                        : operand.value->complex_value.integer_real;
+                    return ConstEvalResult::constant(
+                        ConstValue::integer(
+                            part.cast(shape.bit_width, shape.is_unsigned)));
+                }
+                aburi::cir::FloatingValue part = inst.kind == InstKind::ComplexImag
+                    ? operand.value->complex_value.imag
+                    : operand.value->complex_value.real;
+                aburi::cir::FloatingSemantics semantics =
+                    aburi::floating::semantics_for_type(file(), inst.result_type);
+                auto converted = aburi::floating::convert(part, semantics);
+                if (!converted || floating_status_disqualifies(converted.status)) {
+                    return make_unsupported(
+                        "complex extraction cannot represent its real component",
+                        inst.loc);
+                }
+                return ConstEvalResult::constant(
+                    ConstValue::floating(*converted));
+            }
+            case InstKind::StringLiteral: {
+                std::optional<uint64_t> allocation =
+                    materialize_string_literal(inst_id);
+                if (!allocation.has_value()) {
+                    return make_unsupported(
+                        "string literal object could not be materialized in "
+                        "constant evaluation",
+                        inst.loc);
+                }
+                ConstAddressValue address;
+                address.allocation_id = *allocation;
+                address.string_literal = inst_id;
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(address));
+            }
+            case InstKind::AddrOf: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.empty()) {
+                    return make_unsupported("address-of has no operand", inst.loc);
+                }
+                return value_for_ref(operands[0], env);
+            }
+            case InstKind::Deref: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.empty()) {
+                    return make_unsupported("dereference has no operand", inst.loc);
+                }
+                ConstEvalResult pointer = value_for_ref(operands[0], env);
+                if (pointer.status != ConstEvalStatus::Constant ||
+                    !pointer.value.has_value()) {
+                    return pointer;
+                }
+                std::optional<ConstAddressValue> address = as_address(*pointer.value);
+                if (!address.has_value()) {
+                    return make_unsupported(
+                        "dereference operand is not an address constant", inst.loc);
+                }
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(*address));
+            }
+            case InstKind::FieldAddr: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.empty()) {
+                    return make_unsupported("field address has no base", inst.loc);
+                }
+                ConstEvalResult base = value_for_ref(operands[0], env);
+                if (base.status != ConstEvalStatus::Constant ||
+                    !base.value.has_value()) {
+                    return base;
+                }
+                std::optional<ConstAddressValue> address = as_address(*base.value);
+                if (!address.has_value()) {
+                    return make_unsupported(
+                        "field base is not an address constant", inst.loc);
+                }
+                aburi::cir::EntityId field = entity_operand_at(file(), inst, 1);
+                const aburi::cir::RecordFieldFact* fact = file().field_fact(field);
+                if (!fact) {
+                    return make_unsupported(
+                        "field offset is unavailable in constant evaluation",
+                        inst.loc);
+                }
+                int64_t containing_offset = address->byte_offset;
+                address->byte_offset += static_cast<int64_t>(fact->offset);
+                address->containing_object_offset = containing_offset;
+                address->subobjects.push_back(
+                    ConstSubobjectPathEntry{
+                        field, 0, false, containing_offset});
+                if (fact->is_bitfield) {
+                    address->bitfield_entity = field;
+                    address->bit_offset = fact->bit_offset;
+                    address->bit_width = aburi::cir::bitfield_value_width(
+                        file(), *fact);
+                    address->bit_storage_bits =
+                        fact->storage_size == 0 ? 32 : fact->storage_size;
+                }
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(*address));
+            }
+            case InstKind::ArrayElementPlace: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.size() < 2) {
+                    return make_unsupported("array element place is malformed",
+                                            inst.loc);
+                }
+                ConstEvalResult base = value_for_ref(operands[0], env);
+                if (base.status != ConstEvalStatus::Constant ||
+                    !base.value.has_value()) {
+                    return base;
+                }
+                ConstEvalResult index = value_for_ref(operands[1], env);
+                if (index.status != ConstEvalStatus::Constant ||
+                    !index.value.has_value()) {
+                    return index;
+                }
+                std::optional<ConstAddressValue> address = as_address(*base.value);
+                std::optional<int64_t> index_value = index.value->try_as_int64();
+                if (!address.has_value() || !index_value.has_value()) {
+                    return make_unsupported(
+                        "array element base is not an address constant", inst.loc);
+                }
+                TypeId element =
+                    file().place_object_type(inst.result_type);
+                std::optional<size_t> element_size =
+                    aburi::cir::size_of_type(file(), element);
+                if (!element_size.has_value()) {
+                    return make_unsupported(
+                        "array element size is unavailable in constant evaluation",
+                        inst.loc);
+                }
+                address->byte_offset +=
+                    *index_value * static_cast<int64_t>(*element_size);
+                address->subobjects.push_back(ConstSubobjectPathEntry{
+                    {}, static_cast<uint64_t>(*index_value), true});
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(*address));
+            }
+            case InstKind::Load:
+            case InstKind::LValueToRValue: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.empty()) {
+                    return make_unsupported("load has no place operand", inst.loc);
+                }
+                ConstEvalResult place = value_for_ref(operands[0], env);
+                if (place.status != ConstEvalStatus::Constant ||
+                    !place.value.has_value()) {
+                    return place;
+                }
+                std::optional<ConstAddressValue> address = as_address(*place.value);
+                if (!address.has_value()) {
+                    return make_unsupported(
+                        "load target is not an address constant", inst.loc);
+                }
+                std::optional<size_t> size =
+                    aburi::cir::size_of_type(file(), inst.result_type);
+                if (!size.has_value() || address->byte_offset < 0) {
+                    return make_unsupported(
+                        "load size is unavailable in constant evaluation",
+                        inst.loc);
+                }
+
+                if (address->entity.valid()) {
+                    const aburi::cir::Entity& entity =
+                        file().entity(address->entity);
+                    if (entity.has_constant_value &&
+                        address->byte_offset == 0 &&
+                        address->subobjects.empty() &&
+                        aburi::cir::is_integer_like_type(
+                            file(), inst.result_type)) {
+                        aburi::cir::IntegerTypeShape shape =
+                            aburi::cir::integer_shape_for_type(
+                                file(), inst.result_type);
+                        return ConstEvalResult::constant(
+                            ConstValue::integer(
+                                entity.constant_integer_value.cast(
+                                    shape.bit_width,
+                                    shape.is_unsigned)));
+                    }
+                    if (entity.constant_state.valid() &&
+                        file().valid(entity.constant_state)) {
+                        const aburi::cir::ConstantStateFact* state =
+                            &file().constant_state(entity.constant_state);
+                        bool path_ok = true;
+                        for (const ConstSubobjectPathEntry& step :
+                             address->subobjects) {
+                            const aburi::cir::ConstantStateFact* next = nullptr;
+                            if (step.is_array_element) {
+                                if (step.array_index < state->elements.size()) {
+                                    next = &state->elements[step.array_index];
+                                }
+                            } else {
+                                if (state->active_union_member.valid() &&
+                                    state->active_union_member != step.entity) {
+                                    return make_error(
+                                        ConstEvalDiagCode::UnsupportedExpression,
+                                        "read of an inactive union member is not a constant expression",
+                                        inst.loc);
+                                }
+                                for (const aburi::cir::ConstantStateFact& child :
+                                     state->elements) {
+                                    if (child.subobject_entity == step.entity) {
+                                        next = &child;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!next) {
+                                path_ok = false;
+                                break;
+                            }
+                            state = next;
+                        }
+                        bool selected_subobject =
+                            !address->subobjects.empty();
+                        bool loads_complete_entity =
+                            address->byte_offset == 0 &&
+                            file().resolved_type(inst.result_type) ==
+                                file().resolved_type(entity.type);
+                        const aburi::cir::ConstantStateFact* selected =
+                            path_ok &&
+                                    (selected_subobject ||
+                                     loads_complete_entity)
+                                ? state
+                                : nullptr;
+                        if ((!selected ||
+                             file().resolved_type(selected->type.type) !=
+                                 file().resolved_type(inst.result_type)) &&
+                            !address->bitfield_entity.valid()) {
+                            if (const aburi::cir::ConstantStateFact* by_layout =
+                                    constant_state_at_offset(
+                                        file().constant_state(
+                                            entity.constant_state),
+                                        address->byte_offset,
+                                        inst.result_type)) {
+                                selected = by_layout;
+                            }
+                        }
+                        if (selected) {
+                            std::optional<ConstValue> durable =
+                                const_value_from_constant_state(*selected);
+                            if (durable.has_value()) {
+                                return ConstEvalResult::constant(
+                                    std::move(*durable));
+                            }
+                        }
+                    }
+                    bool evaluator_visible_abi_table =
+                        entity.generated_symbol_role ==
+                            aburi::cir::GeneratedSymbolRole::VTable ||
+                        entity.generated_symbol_role ==
+                            aburi::cir::GeneratedSymbolRole::ConstructionVTable;
+                    bool evaluator_visible_initializer =
+                        entity.decl_flags.is_constexpr ||
+                        entity.has_constant_value ||
+                        entity.object_origin ==
+                            aburi::cir::EntityObjectOrigin::StringLiteral ||
+                        evaluator_visible_abi_table;
+                    if (evaluator_visible_initializer &&
+                        entity.has_static_initializer &&
+                        address->byte_offset >= 0) {
+                        size_t byte_offset =
+                            static_cast<size_t>(address->byte_offset);
+                        for (const aburi::cir::StaticInitializerRelocation&
+                                 relocation :
+                             entity.static_initializer_relocations) {
+                            if (relocation.offset == byte_offset &&
+                                !relocation.block.valid() &&
+                                !relocation.subtract_block.valid() &&
+                                relocation.entity.valid()) {
+                                return ConstEvalResult::constant(
+                                    ConstValue::address(
+                                        relocation.entity,
+                                        relocation.addend));
+                            }
+                        }
+                    }
+                    if (evaluator_visible_initializer &&
+                        entity.has_static_initializer &&
+                        address->byte_offset >= 0) {
+                        if (address->bitfield_entity.valid()) {
+                            size_t storage_bytes =
+                                (static_cast<size_t>(
+                                     address->bit_storage_bits) + 7) / 8;
+                            size_t storage_offset = static_cast<size_t>(
+                                address->byte_offset);
+                            if (storage_offset >
+                                    entity.static_initializer_bytes.size() ||
+                                storage_bytes >
+                                    entity.static_initializer_bytes.size() -
+                                        storage_offset ||
+                                address->bit_width == 0 ||
+                                address->bit_width > 64) {
+                                return make_unsupported(
+                                    "bit-field load is outside static initializer bytes",
+                                    inst.loc);
+                            }
+                            uint64_t raw = aburi::abi::read_scalar_bits(
+                                entity.static_initializer_bytes.data() +
+                                    storage_offset,
+                                storage_bytes,
+                                file().target_info().endianness).low;
+                            uint64_t mask = address->bit_width == 64
+                                ? ~uint64_t{0}
+                                : ((uint64_t{1} << address->bit_width) - 1);
+                            raw = (raw >> address->bit_offset) & mask;
+                            aburi::cir::IntegerTypeShape shape =
+                                aburi::cir::integer_shape_for_type(
+                                    file(), inst.result_type);
+                            if (!shape.is_unsigned &&
+                                address->bit_width < 64 &&
+                                (raw & (uint64_t{1}
+                                        << (address->bit_width - 1))) != 0) {
+                                raw |= ~mask;
+                            }
+                            return ConstEvalResult::constant(
+                                ConstValue::integer(
+                                    ConstIntValue::from_bits128(
+                                        raw, shape.bit_width,
+                                        shape.is_unsigned)));
+                        }
+                        size_t byte_offset =
+                            static_cast<size_t>(address->byte_offset);
+                        size_t initializer_size =
+                            entity.static_initializer_bytes.size();
+                        if (byte_offset > initializer_size ||
+                            *size > initializer_size - byte_offset) {
+                            return make_unsupported(
+                                "load target is outside static initializer bytes",
+                                inst.loc);
+                        }
+                        size_t byte_end = byte_offset + *size;
+                        for (const aburi::cir::StaticInitializerRelocation&
+                                 relocation :
+                             entity.static_initializer_relocations) {
+                            if (relocation.offset >= byte_offset &&
+                                relocation.offset < byte_end) {
+                                return make_unsupported(
+                                    "relocation-bearing static object loads are not supported in constant evaluation",
+                                    inst.loc);
+                            }
+                        }
+                        std::vector<uint8_t> bytes(
+                            entity.static_initializer_bytes.begin() +
+                                static_cast<int64_t>(byte_offset),
+                            entity.static_initializer_bytes.begin() +
+                                static_cast<int64_t>(byte_end));
+                        return bytes_to_value(bytes, inst.result_type, inst.loc);
+                    }
+
+                    if (entity.decl_flags.is_constexpr &&
+                        !address->subobjects.empty()) {
+                        const ConstSubobjectPathEntry& last =
+                            address->subobjects.back();
+                        bool is_vptr = !last.is_array_element &&
+                            last.entity.valid() && file().valid(last.entity) &&
+                            file().entity(last.entity).name.valid() &&
+                            file().name(file().entity(last.entity).name) ==
+                                ".vptr";
+                        const aburi::cir::RecordFacts* dynamic = is_vptr
+                            ? file().record_facts_for_type(
+                                  file().entity(address->entity).type)
+                            : nullptr;
+                        if (dynamic && dynamic->vtable_entity.valid()) {
+                            size_t address_point =
+                                dynamic->vtable_address_point;
+                            size_t best_secondary_path = 0;
+                            std::vector<aburi::cir::EntityId> object_path;
+                            object_path.reserve(address->subobjects.size());
+                            for (const ConstSubobjectPathEntry& step :
+                                 address->subobjects) {
+                                if (!step.is_array_element &&
+                                    step.entity.valid() &&
+                                    step.entity != last.entity) {
+                                    object_path.push_back(step.entity);
+                                }
+                            }
+                            for (const aburi::cir::RecordFacts::SecondaryVtable&
+                                     secondary :
+                                 dynamic->secondary_vtables) {
+                                bool names_secondary =
+                                    secondary.storage_path.size() <=
+                                        object_path.size() &&
+                                    std::equal(
+                                        secondary.storage_path.begin(),
+                                        secondary.storage_path.end(),
+                                        object_path.begin());
+                                if (names_secondary &&
+                                    secondary.storage_path.size() >=
+                                        best_secondary_path) {
+                                    address_point =
+                                        secondary.address_point_bytes;
+                                    best_secondary_path =
+                                        secondary.storage_path.size();
+                                }
+                            }
+                            return ConstEvalResult::constant(
+                                ConstValue::address(dynamic->vtable_entity,
+                                                    static_cast<int64_t>(
+                                                        address_point)));
+                        }
+                    }
+                }
+                if (address->allocation_id == 0 &&
+                    !address->string_literal.valid()) {
+                    bool deferred_static_member = false;
+                    if (address->entity.valid() &&
+                        file().valid(address->entity)) {
+                        const aburi::cir::Entity& object =
+                            file().entity(address->entity);
+                        const aburi::cir::RecordFacts* owner_facts =
+                            object.parent.valid() &&
+                                    file().valid(object.parent)
+                                ? file().record_facts(object.parent)
+                                : nullptr;
+                        deferred_static_member =
+                            owner_facts &&
+                            std::any_of(
+                                owner_facts->static_data_members.begin(),
+                                owner_facts->static_data_members.end(),
+                                [&](const auto& member) {
+                                    return member.entity ==
+                                               address->entity &&
+                                        member.has_in_class_initializer &&
+                                        member.initializer_begin <
+                                            member.initializer_end;
+                                });
+                    }
+                    if (deferred_static_member) {
+                        ConstEvalResult dependency =
+                            ConstEvalResult::dependent(
+                                "static object constant initializer is not "
+                                "materialized");
+                        dependency.dependency_entity = address->entity;
+                        return dependency;
+                    }
+                    return make_unsupported(
+                        "load target is not evaluator-owned memory", inst.loc);
+                }
+                return load_value_from_memory(*address,
+                                              inst.result_type,
+                                              inst.loc);
+            }
+            case InstKind::Store: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.size() < 2) {
+                    return make_unsupported("store is malformed", inst.loc);
+                }
+                ConstEvalResult place = value_for_ref(operands[0], env);
+                if (place.status != ConstEvalStatus::Constant ||
+                    !place.value.has_value()) {
+                    return place;
+                }
+                ConstEvalResult value = value_for_ref(operands[1], env);
+                if (value.status != ConstEvalStatus::Constant ||
+                    !value.value.has_value()) {
+                    return value;
+                }
+                std::optional<ConstAddressValue> address = as_address(*place.value);
+                if (!address.has_value() || address->allocation_id == 0) {
+                    return make_unsupported(
+                        "store target is not evaluator-owned memory", inst.loc);
+                }
+                TypeId value_type = file().valid(operands[1].inst)
+                    ? file().inst(operands[1].inst).result_type
+                    : TypeId{};
+                return store_value_to_memory(*address,
+                                             *value.value,
+                                             value_type,
+                                             inst.loc);
+            }
+            case InstKind::ZeroObject: {
+                std::vector<ValueRef> operands = value_operands(file(), inst);
+                if (operands.empty()) {
+                    return make_unsupported("zero_object has no place", inst.loc);
+                }
+                ConstEvalResult place = value_for_ref(operands[0], env);
+                if (place.status != ConstEvalStatus::Constant ||
+                    !place.value.has_value()) {
+                    return place;
+                }
+                std::optional<ConstAddressValue> address = as_address(*place.value);
+                if (!address.has_value() || address->allocation_id == 0) {
+                    return make_unsupported(
+                        "zero_object target is not evaluator-owned memory",
+                        inst.loc);
+                }
+                TypeId object = file().place_object_type(
+                    file().valid(operands[0].inst)
+                        ? file().inst(operands[0].inst).result_type
+                        : TypeId{});
+                std::optional<size_t> size = aburi::cir::size_of_type(file(), object);
+                if (!size.has_value() || address->byte_offset < 0) {
+                    return make_unsupported(
+                        "zero_object size is unavailable in constant evaluation",
+                        inst.loc);
+                }
+                std::vector<uint8_t> zeros(*size, 0);
+                if (!state_.memory().store_bytes(
+                        address->allocation_id,
+                        static_cast<size_t>(address->byte_offset),
+                        zeros)) {
+                    return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                                      "constant evaluation zeroed outside object bounds",
+                                      inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::void_value());
+            }
+            case InstKind::FunctionToPointer: {
+                aburi::cir::EntityId entity = entity_operand_at(file(), inst, 0);
+                if (!entity.valid()) {
+                    return make_unsupported("function pointer has no entity",
+                                            inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::address(entity));
+            }
+            case InstKind::NameRef:
+            case InstKind::MemberPointerValue:
+            case InstKind::DataMemberPointerPlace:
+            case InstKind::MemberFunctionPointerCallee:
+            case InstKind::MemberFunctionPointerThis:
+            case InstKind::StackAlloc:
+            case InstKind::AtomicLoad:
+            case InstKind::AtomicStore:
+            case InstKind::AtomicRmw:
+            case InstKind::AtomicCmpXchg:
+            case InstKind::AtomicFence:
+            case InstKind::ComplexRealPlace:
+            case InstKind::ComplexImagPlace:
+            case InstKind::StackSave:
+            case InstKind::StackRestore:
+            case InstKind::VectorElementPlace:
+            case InstKind::VectorExtract:
+            case InstKind::Call:
+                return evaluate_call(inst, env);
+            case InstKind::ConstructInPlace:
+                return evaluate_construct_in_place(inst, env);
+            case InstKind::BuiltinCall:
+                return evaluate_builtin_call(inst_id, inst, payload, env);
+            case InstKind::ReflectValue: {
+                const auto* reflect =
+                    std::get_if<aburi::cir::ReflectPayload>(&payload);
+                if (!reflect) {
+                    return make_unsupported("reflect payload is missing",
+                                            inst.loc);
+                }
+                std::vector<aburi::cir::Operand> operands =
+                    file().operands(inst.operands);
+                if (operands.size() != 1) {
+                    return make_unsupported("reflect operand is malformed",
+                                            inst.loc);
+                }
+                if (reflect->kind == aburi::cir::MetaInfoKind::Type) {
+                    const auto* type =
+                        std::get_if<aburi::cir::TypeRef>(&operands[0].data);
+                    if (!type || !type->type.valid()) {
+                        return make_unsupported(
+                            "reflected type operand is invalid", inst.loc);
+                    }
+                    return ConstEvalResult::constant(
+                        ConstValue::meta_info_type(*type));
+                }
+                const auto* entity =
+                    std::get_if<aburi::cir::EntityId>(&operands[0].data);
+                if (!entity || !entity->valid()) {
+                    return make_unsupported(
+                        "reflected entity operand is invalid", inst.loc);
+                }
+                return ConstEvalResult::constant(
+                    ConstValue::meta_info_entity(reflect->kind, *entity));
+            }
+            case InstKind::Destroy:
+                return evaluate_destroy(inst, env);
+            case InstKind::LifetimeStart:
+            case InstKind::LifetimeEnd:
+
+                return ConstEvalResult::constant(ConstValue::void_value());
+            case InstKind::LabelAddress:
+            case InstKind::InlineAsm:
+            case InstKind::VaStart:
+            case InstKind::VaArg:
+            case InstKind::VaEnd:
+            case InstKind::VaCopy:
+            case InstKind::DependentCall:
+            case InstKind::DependentRegion:
+                return make_unsupported(
+                    std::string(file().format_inst(inst_id)) +
+                        " is not supported by the CIR constant evaluator yet",
+                    inst.loc);
+            case InstKind::Error:
+            case InstKind::Invalid:
+                return make_error(ConstEvalDiagCode::UnsupportedExpression,
+                                  "cannot evaluate invalid CIR instruction",
+                                  inst.loc);
+        }
+        return make_unsupported("CIR instruction is not a constant expression",
+                                inst.loc);
+    }
+
+    ConstEvalResult evaluate_builtin_call(InstId inst_id,
+                                          const aburi::cir::Inst& inst,
+                                          const aburi::cir::InstPayload& payload,
+                                          std::unordered_map<uint64_t, ConstValue>& env) {
+        const auto* builtin =
+            std::get_if<aburi::cir::BuiltinCallPayload>(&payload);
+        if (!builtin) {
+            return make_unsupported("builtin call payload is missing", inst.loc);
+        }
+        if (builtin->kind == BuiltinKind::CONSTANT_P) {
+
+            bool is_const = false;
+            if (inst.operands.count != 0) {
+                is_const = evaluate_value_operands(inst.operands, env).has_value();
+            }
+            auto shape =
+                aburi::cir::integer_shape_for_type(file(), inst.result_type);
+            return ConstEvalResult::constant(ConstValue::integer(
+                ConstIntValue::from_signed(is_const ? 1 : 0, shape.bit_width)
+                    .cast(shape.bit_width, shape.is_unsigned)));
+        }
+
+        if (builtin->kind == BuiltinKind::EXPECT ||
+            builtin->kind == BuiltinKind::EXPECT_WITH_PROBABILITY) {
+
+            auto args = evaluate_value_operands(inst.operands, env);
+            if (!args.has_value()) {
+                return args.error();
+            }
+            if (args->empty()) {
+                return make_unsupported(
+                    "__builtin_expect requires an operand", inst.loc);
+            }
+            return ConstEvalResult::constant(args.value()[0]);
+        }
+
+        if (builtin->kind == BuiltinKind::FABS ||
+            builtin->kind == BuiltinKind::FABSF ||
+            builtin->kind == BuiltinKind::FABSL) {
+            auto args = evaluate_value_operands(inst.operands, env);
+            if (!args.has_value()) {
+                return args.error();
+            }
+            aburi::cir::FloatingSemantics semantics =
+                aburi::floating::semantics_for_type(file(), inst.result_type);
+            if (args->size() != 1 ||
+                semantics == aburi::cir::FloatingSemantics::Invalid) {
+                return make_unsupported(
+                    builtin->name + " has invalid constant operands",
+                    inst.loc);
+            }
+            aburi::floating::FloatResult value =
+                value_to_float(args.value()[0], semantics);
+            if (!value || floating_status_disqualifies(value.status)) {
+                return make_unsupported(
+                    builtin->name + " operand is not a floating constant",
+                    inst.loc);
+            }
+            if (aburi::floating::is_negative(*value)) {
+                value.value = aburi::floating::negate(*value);
+            }
+            return ConstEvalResult::constant(
+                ConstValue::floating(value.value));
+        }
+
+        if (builtin->kind == BuiltinKind::ASSUME_ALIGNED ||
+            builtin->kind == BuiltinKind::LAUNDER) {
+
+            auto args = evaluate_value_operands(inst.operands, env);
+            if (!args.has_value()) {
+                return args.error();
+            }
+            size_t maximum_operands =
+                builtin->kind == BuiltinKind::LAUNDER ? 1 : 2;
+            if (args->empty() || args->size() > maximum_operands) {
+                return make_unsupported(
+                    builtin->name + " has invalid constant operands",
+                    inst.loc);
+            }
+            return ConstEvalResult::constant(args.value()[0]);
+        }
+
+        if (builtin->kind == BuiltinKind::STRLEN) {
+            auto args = evaluate_value_operands(inst.operands, env);
+            if (!args.has_value()) {
+                return args.error();
+            }
+            if (args->size() != 1) {
+                return make_unsupported(
+                    "__builtin_strlen requires one pointer operand", inst.loc);
+            }
+            std::optional<ConstAddressValue> cursor =
+                as_address(args.value()[0]);
+            if (!cursor.has_value() || address_is_null_base(*cursor)) {
+                return make_error(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "__builtin_strlen cannot read through a null pointer",
+                    inst.loc);
+            }
+
+            uint64_t length = 0;
+            TypeId char_type =
+                file().builtin_type(aburi::cir::BuiltinTypeKind::Char);
+            for (;;) {
+
+                if (!state_.consume_step()) {
+                    return make_error(
+                        ConstEvalDiagCode::StepLimitExceeded,
+                        "constant evaluation step limit exceeded",
+                        inst.loc);
+                }
+                ConstEvalResult character =
+                    load_value_from_memory(*cursor, char_type, inst.loc);
+                if (character.status != ConstEvalStatus::Constant ||
+                    !character.value.has_value()) {
+                    return character;
+                }
+                std::optional<int64_t> code_unit =
+                    character.value->try_as_int64();
+                if (!code_unit.has_value()) {
+                    return make_unsupported(
+                        "__builtin_strlen character is not an integer constant",
+                        inst.loc);
+                }
+                if (*code_unit == 0) {
+                    break;
+                }
+                if (cursor->byte_offset ==
+                    std::numeric_limits<int64_t>::max()) {
+                    return make_error(
+                        ConstEvalDiagCode::UnsupportedExpression,
+                        "__builtin_strlen exceeded evaluator address range",
+                        inst.loc);
+                }
+                ++cursor->byte_offset;
+                ++length;
+                if (!cursor->subobjects.empty() &&
+                    cursor->subobjects.back().is_array_element) {
+                    ++cursor->subobjects.back().array_index;
+                }
+            }
+
+            auto shape =
+                aburi::cir::integer_shape_for_type(file(), inst.result_type);
+            return ConstEvalResult::constant(ConstValue::integer(
+                ConstIntValue::from_bits128(
+                    static_cast<unsigned __int128>(length),
+                    shape.bit_width,
+                    shape.is_unsigned)));
+        }
+
+        if (builtin->kind == BuiltinKind::BIT_CAST) {
+            std::vector<aburi::cir::Operand> operands =
+                file().operands(inst.operands);
+            if (operands.size() != 1) {
+                return make_unsupported(
+                    "__builtin_bit_cast requires one value operand", inst.loc);
+            }
+            const auto* source_ref =
+                std::get_if<ValueRef>(&operands.front().data);
+            if (!source_ref || !file().valid(source_ref->inst)) {
+                return make_unsupported(
+                    "__builtin_bit_cast source operand is malformed", inst.loc);
+            }
+            TypeId source_type = file().inst(source_ref->inst).result_type;
+            aburi::cir::TypeRef target_ref = builtin->type_operand.type.valid()
+                ? builtin->type_operand
+                : file().type_ref(inst.result_type);
+            if (has_constexpr_unknown_representation(
+                    file(), file().type_ref(source_type)) ||
+                has_constexpr_unknown_representation(file(), target_ref)) {
+                return make_unsupported(
+                    "__builtin_bit_cast involving a type with constexpr-unknown "
+                    "representation is not a constant expression",
+                    inst.loc);
+            }
+            auto args = evaluate_value_operands(inst.operands, env);
+            if (!args.has_value()) {
+                return args.error();
+            }
+            if (args->size() != 1) {
+                return make_unsupported(
+                    "__builtin_bit_cast requires one constant operand", inst.loc);
+            }
+            std::optional<std::vector<uint8_t>> bytes =
+                value_to_bytes(args.value()[0], source_type);
+            if (!bytes.has_value()) {
+                return make_unsupported(
+                    "__builtin_bit_cast source object representation is not "
+                    "available in constant evaluation",
+                    inst.loc);
+            }
+            return bytes_to_value(*bytes, inst.result_type, inst.loc);
+        }
+
+        switch (builtin->kind) {
+            case BuiltinKind::METAFN_QUERY_INT:
+            case BuiltinKind::METAFN_QUERY_INFO:
+            case BuiltinKind::METAFN_NAME_DATA:
+            case BuiltinKind::METAFN_NAME_SIZE:
+            case BuiltinKind::METAFN_RANGE_COUNT:
+            case BuiltinKind::METAFN_RANGE_AT: {
+                auto operands = evaluate_value_operands(inst.operands, env);
+                if (!operands.has_value()) {
+                    return operands.error();
+                }
+                return evaluate_metafunction(builtin->kind,
+                                             file(),
+                                             context_.mutable_file,
+                                             state_.memory(),
+                                             operands.value(),
+                                             inst.result_type,
+                                             inst.loc);
+            }
+            case BuiltinKind::IS_CONSTANT_EVALUATED:
+
+                return ConstEvalResult::constant(
+                    bool_result_for_type(file(), inst.result_type, true));
+            default:
+                break;
+        }
+
+        enum class BitOp {
+            Clz,
+            Ctz,
+            Popcount,
+            Parity,
+            Ffs,
+            Bswap,
+        };
+        std::optional<BitOp> bit_op;
+        uint16_t width = 0;
+        const uint16_t target_long_width = static_cast<uint16_t>(
+            file().target_info_ptr() ? file().target_info_ptr()->long_width : 64);
+        switch (builtin->kind) {
+            case BuiltinKind::CLZ:
+                bit_op = BitOp::Clz;
+                width = 32;
+                break;
+            case BuiltinKind::CLZL:
+                bit_op = BitOp::Clz;
+                width = target_long_width;
+                break;
+            case BuiltinKind::CLZLL:
+                bit_op = BitOp::Clz;
+                width = 64;
+                break;
+            case BuiltinKind::CLZG:
+                bit_op = BitOp::Clz;
+                break;
+            case BuiltinKind::CTZ:
+                bit_op = BitOp::Ctz;
+                width = 32;
+                break;
+            case BuiltinKind::CTZL:
+                bit_op = BitOp::Ctz;
+                width = target_long_width;
+                break;
+            case BuiltinKind::CTZLL:
+                bit_op = BitOp::Ctz;
+                width = 64;
+                break;
+            case BuiltinKind::CTZG:
+                bit_op = BitOp::Ctz;
+                break;
+            case BuiltinKind::POPCOUNT:
+                bit_op = BitOp::Popcount;
+                width = 32;
+                break;
+            case BuiltinKind::POPCOUNTL:
+                bit_op = BitOp::Popcount;
+                width = target_long_width;
+                break;
+            case BuiltinKind::POPCOUNTLL:
+                bit_op = BitOp::Popcount;
+                width = 64;
+                break;
+            case BuiltinKind::POPCOUNTG:
+                bit_op = BitOp::Popcount;
+                break;
+            case BuiltinKind::PARITY:
+                bit_op = BitOp::Parity;
+                width = 32;
+                break;
+            case BuiltinKind::PARITYL:
+                bit_op = BitOp::Parity;
+                width = target_long_width;
+                break;
+            case BuiltinKind::PARITYLL:
+                bit_op = BitOp::Parity;
+                width = 64;
+                break;
+            case BuiltinKind::FFS:
+                bit_op = BitOp::Ffs;
+                width = 32;
+                break;
+            case BuiltinKind::FFSL:
+                bit_op = BitOp::Ffs;
+                width = target_long_width;
+                break;
+            case BuiltinKind::FFSLL:
+                bit_op = BitOp::Ffs;
+                width = 64;
+                break;
+            case BuiltinKind::BSWAP16:
+                bit_op = BitOp::Bswap;
+                width = 16;
+                break;
+            case BuiltinKind::BSWAP32:
+                bit_op = BitOp::Bswap;
+                width = 32;
+                break;
+            case BuiltinKind::BSWAP64:
+                bit_op = BitOp::Bswap;
+                width = 64;
+                break;
+            default:
+                break;
+        }
+        if (!bit_op.has_value()) {
+            return make_unsupported(
+                std::string(file().format_inst(inst_id)) +
+                    " is not supported by the CIR constant evaluator yet",
+                inst.loc);
+        }
+
+        auto args = evaluate_value_operands(inst.operands, env);
+        if (!args.has_value()) {
+            return args.error();
+        }
+        bool generic_count_zero =
+            builtin->kind == BuiltinKind::CLZG ||
+            builtin->kind == BuiltinKind::CTZG;
+        bool generic_width =
+            generic_count_zero ||
+            builtin->kind == BuiltinKind::POPCOUNTG;
+        bool valid_count =
+            generic_count_zero
+            ? (args->size() == 1 || args->size() == 2)
+            : args->size() == 1;
+        bool integer_operand =
+            !args->empty() &&
+            (args.value()[0].kind == ConstValueKind::Integer ||
+             (generic_width &&
+              args.value()[0].kind == ConstValueKind::Boolean));
+        if (!valid_count || !integer_operand ||
+            (args->size() == 2 &&
+             args.value()[1].kind != ConstValueKind::Integer)) {
+            return make_unsupported(
+                "bit builtin has invalid constant operands", inst.loc);
+        }
+        if (generic_width && width == 0) {
+            width = args.value()[0].kind == ConstValueKind::Boolean
+                ? 1
+                : args.value()[0].int_value.bit_width;
+        }
+
+        const unsigned __int128 mask = width >= 128
+            ? ~static_cast<unsigned __int128>(0)
+            : ((static_cast<unsigned __int128>(1) << width) - 1);
+        const unsigned __int128 bits = args.value()[0].kind ==
+                ConstValueKind::Boolean
+            ? static_cast<unsigned __int128>(
+                  args.value()[0].bool_value ? 1 : 0)
+            : args.value()[0].int_value.to_unsigned_u128() & mask;
+        auto count_set = [](unsigned __int128 value) {
+            int64_t count = 0;
+            while (value != 0) {
+                count += static_cast<int64_t>(value & 1);
+                value >>= 1;
+            }
+            return count;
+        };
+
+        int64_t result = 0;
+        switch (*bit_op) {
+            case BitOp::Clz: {
+                if (bits == 0) {
+                    if (generic_count_zero && args->size() == 2) {
+                        result =
+                            args.value()[1].int_value.to_signed_i64();
+                        break;
+                    }
+                    return make_unsupported(
+                        "__builtin_clz family is undefined for zero", inst.loc);
+                }
+                int64_t highest = -1;
+                for (uint16_t bit = 0; bit < width; ++bit) {
+                    if ((bits >> bit) & 1) {
+                        highest = bit;
+                    }
+                }
+                result = width - 1 - highest;
+                break;
+            }
+            case BitOp::Ctz: {
+                if (bits == 0) {
+                    if (generic_count_zero && args->size() == 2) {
+                        result =
+                            args.value()[1].int_value.to_signed_i64();
+                        break;
+                    }
+                    return make_unsupported(
+                        "__builtin_ctz family is undefined for zero", inst.loc);
+                }
+                uint16_t lowest = 0;
+                while (((bits >> lowest) & 1) == 0) {
+                    ++lowest;
+                }
+                result = lowest;
+                break;
+            }
+            case BitOp::Popcount:
+                result = count_set(bits);
+                break;
+            case BitOp::Parity:
+                result = count_set(bits) & 1;
+                break;
+            case BitOp::Ffs:
+                if (bits == 0) {
+                    result = 0;
+                } else {
+                    uint16_t lowest = 0;
+                    while (((bits >> lowest) & 1) == 0) {
+                        ++lowest;
+                    }
+                    result = lowest + 1;
+                }
+                break;
+            case BitOp::Bswap: {
+                unsigned __int128 swapped = 0;
+                for (uint16_t byte = 0; byte < width / 8; ++byte) {
+                    swapped =
+                        (swapped << 8) | ((bits >> (byte * 8)) & 0xff);
+                }
+                auto shape =
+                    aburi::cir::integer_shape_for_type(file(), inst.result_type);
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_bits128(swapped, width, true)
+                        .cast(shape.bit_width, shape.is_unsigned)));
+            }
+        }
+
+        auto shape =
+            aburi::cir::integer_shape_for_type(file(), inst.result_type);
+        return ConstEvalResult::constant(ConstValue::integer(
+            ConstIntValue::from_signed(result, shape.bit_width)
+                .cast(shape.bit_width, shape.is_unsigned)));
+    }
+
+    ConstEvalResult evaluate_destroy(
+        const aburi::cir::Inst& inst,
+        std::unordered_map<uint64_t, ConstValue>& env) {
+        std::vector<aburi::cir::Operand> operands = file().operands(inst.operands);
+        if (operands.empty()) {
+            return make_unsupported("destroy has no place operand", inst.loc);
+        }
+        const aburi::cir::EntityId* destructor = operands.size() > 1
+            ? std::get_if<aburi::cir::EntityId>(&operands[1].data)
+            : nullptr;
+        if (!destructor || !destructor->valid()) {
+
+            return ConstEvalResult::constant(ConstValue::void_value());
+        }
+        const auto* place_ref = std::get_if<ValueRef>(&operands[0].data);
+        if (!place_ref) {
+            return make_unsupported("destroy has an invalid place operand",
+                                    inst.loc);
+        }
+        ConstEvalResult place = value_for_ref(*place_ref, env);
+        if (place.status != ConstEvalStatus::Constant ||
+            !place.value.has_value()) {
+            return place;
+        }
+        std::optional<ConstAddressValue> this_address = as_address(*place.value);
+        if (!this_address.has_value()) {
+            return make_unsupported(
+                "destroy target is not an address constant", inst.loc);
+        }
+        std::vector<ConstValue> arg_values;
+        arg_values.push_back(ConstValue::address_value_of(*this_address));
+        ConstEvalResult result = evaluate_direct_entity_call(
+            *destructor, std::move(arg_values), inst.loc,
+            /*allow_void_return=*/true);
+        if (result.status != ConstEvalStatus::Constant) {
+            return result;
+        }
+        return ConstEvalResult::constant(ConstValue::void_value());
+    }
+
+public:
+    ConstEvalResult apply_transient_allocation_rules(ConstEvalResult result) {
+        if (result.status != ConstEvalStatus::Constant) {
+            return result;
+        }
+        if (result.value.has_value() &&
+            value_references_dynamic_allocation(*result.value)) {
+            return make_error(
+                ConstEvalDiagCode::DynamicAllocationEscaped,
+                "pointer to constexpr-allocated memory escapes the constant "
+                "evaluation",
+                request_.loc);
+        }
+        if (state_.memory().live_dynamic_count() > 0) {
+            return make_error(
+                ConstEvalDiagCode::DynamicAllocationLeaked,
+                "constexpr allocation was not deallocated within the constant "
+                "evaluation",
+                request_.loc);
+        }
+        return result;
+    }
+
+private:
+    bool value_references_dynamic_allocation(const ConstValue& value) const {
+        if (value.kind == ConstValueKind::Address) {
+            return value.address_value.allocation_id != 0 &&
+                   state_.memory().is_dynamic_allocation(
+                       value.address_value.allocation_id);
+        }
+        if (value.kind == ConstValueKind::Object && value.object_value) {
+            for (const ConstValue& element : value.object_value->elements) {
+                if (value_references_dynamic_allocation(element)) {
                     return true;
                 }
             }
         }
-    }
-    return false;
-}
-
-bool lookup_interpreter_named_value(const std::string& name, ConstValue& value_out) {
-    if (!g_interpreter_session || name.empty()) {
         return false;
     }
-    for (auto frame_it = g_interpreter_session->frames.rbegin();
-         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
-        for (auto scope_it = frame_it->scopes.rbegin();
-             scope_it != frame_it->scopes.rend(); ++scope_it) {
-            auto name_it = scope_it->named_values.find(name);
-            if (name_it != scope_it->named_values.end()) {
-                value_out = name_it->second;
-                return true;
+
+    ConstEvalResult value_for_ref(ValueRef ref,
+                                  std::unordered_map<uint64_t, ConstValue>& env) {
+        if (!ref.valid()) {
+            return make_error(ConstEvalDiagCode::NullExpression,
+                              "constant evaluation encountered an invalid value",
+                              request_.loc);
+        }
+        if (auto found = env.find(inst_key(ref.inst)); found != env.end()) {
+            return ConstEvalResult::constant(found->second);
+        }
+        return evaluate_inst(ref.inst, env);
+    }
+
+    Expected<std::vector<ConstValue>> evaluate_value_operands(
+        aburi::cir::OperandRange range,
+        std::unordered_map<uint64_t, ConstValue>& env) {
+        std::vector<ConstValue> out;
+        std::vector<ValueRef> operands = file().value_operands(range);
+        out.reserve(operands.size());
+        for (ValueRef operand : operands) {
+            ConstEvalResult result = value_for_ref(operand, env);
+            if (result.status != ConstEvalStatus::Constant ||
+                !result.value.has_value()) {
+                return result;
             }
+            out.push_back(*result.value);
         }
+        return out;
     }
-    return false;
-}
 
-std::shared_ptr<Symbol> lookup_interpreter_named_symbol(const std::string& name) {
-    if (!g_interpreter_session || name.empty()) {
-        return nullptr;
-    }
-    for (auto frame_it = g_interpreter_session->frames.rbegin();
-         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
-        for (auto scope_it = frame_it->scopes.rbegin();
-             scope_it != frame_it->scopes.rend(); ++scope_it) {
-            auto name_it = scope_it->named_symbols.find(name);
-            if (name_it != scope_it->named_symbols.end()) {
-                return name_it->second;
-            }
-        }
-    }
-    return nullptr;
-}
-
-namespace {
-std::shared_ptr<ConstObjectValue> clone_const_object_value(
-    const std::shared_ptr<ConstObjectValue>& object_value);
-
-ConstValue clone_const_value(const ConstValue& value) {
-    ConstValue cloned = value;
-    if (value.kind == ConstValueKind::Object && value.object_value) {
-        cloned.object_value = clone_const_object_value(value.object_value);
-    }
-    return cloned;
-}
-
-std::shared_ptr<ConstObjectValue> clone_const_object_value(
-    const std::shared_ptr<ConstObjectValue>& object_value) {
-    if (!object_value) {
-        return nullptr;
-    }
-    auto cloned = std::make_shared<ConstObjectValue>();
-    cloned->kind = object_value->kind;
-    cloned->elements.reserve(object_value->elements.size());
-    for (const auto& element : object_value->elements) {
-        cloned->elements.push_back(clone_const_value(element));
-    }
-    return cloned;
-}
-} // namespace
-
-enum class InterpLocationComponentKind : uint8_t {
-    RecordField,
-    ArrayElement,
-};
-
-struct InterpLocationComponent {
-    InterpLocationComponentKind kind = InterpLocationComponentKind::RecordField;
-    size_t index = 0;
-};
-
-struct InterpLocation {
-    std::shared_ptr<Symbol> root_symbol = nullptr;
-    QualType root_type;
-    QualType value_type;
-    int64_t byte_offset = 0;
-    std::vector<InterpLocationComponent> path;
-};
-
-ConstEvalResult eval_constexpr_variable_initializer(
-    const Symbol* sym,
-    ConstEvalMode mode,
-    size_t depth,
-    bool allow_static_storage_duration);
-
-bool append_record_field_to_location(InterpLocation& location, size_t field_index) {
-    auto record_type =
-        desugar_type(remove_reference(location.value_type)).as_shared<ObjectType>();
-    if (!record_type) {
-        return false;
-    }
-    const auto& fields = record_type->semantic_fields();
-    if (field_index >= fields.size()) {
-        return false;
-    }
-    const auto& field = fields[field_index];
-    location.path.push_back(
-        {InterpLocationComponentKind::RecordField, field_index});
-    location.byte_offset += static_cast<int64_t>(field.offset);
-    location.value_type = field.type;
-    return true;
-}
-
-bool append_array_index_to_location(InterpLocation& location, size_t array_index) {
-    auto array_type =
-        desugar_type(remove_reference(location.value_type)).as_shared<ArrayType>();
-    if (!array_type || !array_type->element_type) {
-        return false;
-    }
-    if (array_type->size_kind == ArraySizeKind::Constant &&
-        array_type->size.has_value() &&
-        array_index >= *array_type->size) {
-        return false;
-    }
-    int64_t element_size = array_type->element_type->getWidthBytes();
-    if (element_size <= 0) {
-        return false;
-    }
-    location.path.push_back(
-        {InterpLocationComponentKind::ArrayElement, array_index});
-    location.byte_offset +=
-        element_size * static_cast<int64_t>(array_index);
-    location.value_type = array_type->element_type;
-    return true;
-}
-
-bool append_location_path_for_byte_offset(InterpLocation& location,
-                                          int64_t remaining_offset) {
-    if (remaining_offset < 0) {
-        return false;
-    }
-    if (remaining_offset == 0) {
-        return true;
-    }
-
-    QualType current_type = desugar_type(remove_reference(location.value_type));
-    if (auto array_type = current_type.as_shared<ArrayType>()) {
-        if (!array_type->element_type) {
-            return false;
-        }
-        int64_t element_size = array_type->element_type->getWidthBytes();
-        if (element_size <= 0 || remaining_offset % element_size != 0) {
-            return false;
-        }
-        size_t array_index = static_cast<size_t>(remaining_offset / element_size);
-        if (!append_array_index_to_location(location, array_index)) {
-            return false;
-        }
-        return true;
-    }
-
-    auto record_type = current_type.as_shared<ObjectType>();
-    if (!record_type) {
-        return false;
-    }
-
-    const auto& fields = record_type->semantic_fields();
-    for (size_t field_index = 0; field_index < fields.size(); ++field_index) {
-        const auto& field = fields[field_index];
-        int64_t field_offset = static_cast<int64_t>(field.offset);
-        if (field_offset > remaining_offset) {
-            continue;
-        }
-
-        int64_t field_size = 0;
-        if (field.storage_size_override > 0) {
-            field_size =
-                static_cast<int64_t>((field.storage_size_override + 7) / 8);
-        } else if (field.type) {
-            field_size = field.type->getWidthBytes();
-        }
-
-        bool maybe_matches =
-            remaining_offset == field_offset ||
-            (field_size > 0 && remaining_offset < field_offset + field_size);
-        if (!maybe_matches) {
-            continue;
-        }
-
-        if (!append_record_field_to_location(location, field_index)) {
-            return false;
-        }
-        return append_location_path_for_byte_offset(
-            location, remaining_offset - field_offset);
-    }
-    return false;
-}
-
-bool resolve_location_from_address_value(const ConstAddressValue& address_value,
-                                         InterpLocation& location_out) {
-    if (!address_value.symbol ||
-        address_value.symbol->kind != SymbolKind::VARIABLE) {
-        return false;
-    }
-    location_out = {};
-    location_out.root_symbol = address_value.symbol;
-    location_out.root_type = address_value.symbol->type;
-    location_out.value_type = address_value.symbol->type;
-    if (!location_out.root_type) {
-        return false;
-    }
-    if (address_value.byte_offset == 0) {
-        return true;
-    }
-    return append_location_path_for_byte_offset(
-        location_out, address_value.byte_offset);
-}
-
-bool location_type_matches_desired(QualType location_type,
-                                   QualType desired_type) {
-    if (!location_type || !desired_type) {
-        return false;
-    }
-    QualType current = desugar_type(remove_reference(location_type));
-    QualType desired = desugar_type(remove_reference(desired_type));
-    return current && desired && current.equals_unqualified(desired);
-}
-
-bool specialize_location_to_value_type(InterpLocation& location,
-                                       QualType desired_type) {
-    if (!desired_type) {
-        return true;
-    }
-    if (location_type_matches_desired(location.value_type, desired_type)) {
-        return true;
-    }
-
-    QualType current_type = desugar_type(remove_reference(location.value_type));
-    if (auto array_type = current_type.as_shared<ArrayType>()) {
-        InterpLocation element_location = location;
-        if (append_array_index_to_location(element_location, 0) &&
-            specialize_location_to_value_type(element_location, desired_type)) {
-            location = std::move(element_location);
-            return true;
-        }
-    }
-
-    if (auto record_type = current_type.as_shared<ObjectType>()) {
-        const auto& fields = record_type->semantic_fields();
-        for (size_t field_index = 0; field_index < fields.size(); ++field_index) {
-            if (fields[field_index].offset != 0) {
-                continue;
-            }
-            InterpLocation field_location = location;
-            if (append_record_field_to_location(field_location, field_index) &&
-                specialize_location_to_value_type(field_location, desired_type)) {
-                location = std::move(field_location);
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-bool resolve_location_from_address_value_as(const ConstAddressValue& address_value,
-                                            QualType desired_type,
-                                            InterpLocation& location_out) {
-    if (!resolve_location_from_address_value(address_value, location_out)) {
-        return false;
-    }
-    return specialize_location_to_value_type(location_out, desired_type);
-}
-
-QualType pointer_pointee_type_from_expr(Expr* expr) {
-    if (!expr || !expr->get_type()) {
-        return nullptr;
-    }
-    auto pointer_type =
-        desugar_type(remove_reference(expr->get_type())).as_shared<PointerType>();
-    return pointer_type ? pointer_type->pointed_type : QualType();
-}
-
-bool load_interpreter_root_symbol_value(const std::shared_ptr<Symbol>& sym,
-                                        ConstEvalMode mode,
-                                        size_t depth,
-                                        ConstValue& value_out) {
-    if (!sym || sym->kind != SymbolKind::VARIABLE) {
-        return false;
-    }
-    if (lookup_interpreter_symbol_value(sym.get(), value_out)) {
-        return true;
-    }
-    if (is_cpp_core_constant_expression_mode(mode) ||
-        is_cpp_non_type_template_argument_mode(mode)) {
-        ConstEvalResult constexpr_value =
-            eval_constexpr_variable_initializer(
-                sym.get(),
-                mode,
-                depth + 1,
-                true);
-        if (constexpr_value.status == ConstEvalStatus::Constant &&
-            constexpr_value.value.has_value()) {
-            value_out = *constexpr_value.value;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool load_const_subvalue(const ConstValue& current,
-                         const std::vector<InterpLocationComponent>& path,
-                         size_t path_index,
-                         ConstValue& value_out) {
-    if (path_index >= path.size()) {
-        value_out = current;
-        return true;
-    }
-    if (current.kind != ConstValueKind::Object || !current.object_value) {
-        return false;
-    }
-    size_t element_index = path[path_index].index;
-    if (element_index >= current.object_value->elements.size()) {
-        return false;
-    }
-    return load_const_subvalue(
-        current.object_value->elements[element_index],
-        path,
-        path_index + 1,
-        value_out);
-}
-
-bool store_const_subvalue(ConstValue& current,
-                          const std::vector<InterpLocationComponent>& path,
-                          size_t path_index,
-                          const ConstValue& replacement) {
-    if (path_index >= path.size()) {
-        current = clone_const_value(replacement);
-        return true;
-    }
-    if (current.kind != ConstValueKind::Object || !current.object_value) {
-        return false;
-    }
-    current.object_value = clone_const_object_value(current.object_value);
-    size_t element_index = path[path_index].index;
-    if (element_index >= current.object_value->elements.size()) {
-        return false;
-    }
-    return store_const_subvalue(
-        current.object_value->elements[element_index],
-        path,
-        path_index + 1,
-        replacement);
-}
-
-bool load_interpreter_location_value(const InterpLocation& location,
-                                     ConstEvalMode mode,
-                                     size_t depth,
-                                     ConstValue& value_out) {
-    if (!location.root_symbol) {
-        return false;
-    }
-    ConstValue root_value;
-    if (!load_interpreter_root_symbol_value(
-            location.root_symbol, mode, depth, root_value)) {
-        return false;
-    }
-    return load_const_subvalue(root_value, location.path, 0, value_out);
-}
-
-bool store_interpreter_location_value(const InterpLocation& location,
-                                      const ConstValue& value) {
-    if (!location.root_symbol) {
-        return false;
-    }
-    ConstValue root_value;
-    if (!lookup_interpreter_symbol_value(location.root_symbol.get(), root_value)) {
-        return false;
-    }
-    if (!store_const_subvalue(root_value, location.path, 0, value)) {
-        return false;
-    }
-    return assign_interpreter_symbol_value(location.root_symbol.get(), root_value);
-}
-
-bool materialize_interpreter_temporary(QualType type,
-                                       const ConstValue& value,
-                                       std::shared_ptr<Symbol>& symbol_out) {
-    static size_t temporary_counter = 0;
-    std::string temporary_name =
-        "__constexpr_tmp_" + std::to_string(++temporary_counter);
-    auto temporary_symbol = std::make_shared<Symbol>(
-        temporary_name,
-        SymbolKind::VARIABLE,
-        type,
-        StorageClass::AUTO,
-        VariableLinkage::NONE);
-    if (!bind_interpreter_local(temporary_symbol, temporary_name, value)) {
-        return false;
-    }
-    symbol_out = std::move(temporary_symbol);
-    return true;
-}
-
-// ====== Type conversion & casting ======
-
-bool const_value_to_bool(const ConstValue& value, bool& out) {
-    switch (value.kind) {
-        case ConstValueKind::Integer:
-            out = value.int_value.to_unsigned_u64() != 0;
-            return true;
-        case ConstValueKind::Boolean:
-            out = value.bool_value;
-            return true;
-        case ConstValueKind::Floating:
-            out = value.float_value.value != 0.0L;
-            return true;
-        case ConstValueKind::NullPointer:
-            out = false;
-            return true;
-        case ConstValueKind::Address:
-        case ConstValueKind::MemberPointer:
-            out = true;
-            return true;
-        default:
-            return false;
-    }
-}
-
-bool const_value_to_int(const ConstValue& value, IntShape target_shape, ConstIntValue& out) {
-    if (value.kind == ConstValueKind::Integer) {
-        out = value.int_value.cast(target_shape.width, target_shape.is_unsigned);
-        return true;
-    }
-    if (value.kind == ConstValueKind::Boolean) {
-        out = target_shape.is_unsigned
-            ? ConstIntValue::from_unsigned(value.bool_value ? 1u : 0u, target_shape.width)
-            : ConstIntValue::from_signed(value.bool_value ? 1 : 0, target_shape.width);
-        return true;
-    }
-    return false;
-}
-
-bool is_pointer_like_const_value(const ConstValue& value) {
-    return value.kind == ConstValueKind::NullPointer ||
-           value.kind == ConstValueKind::Address ||
-           value.kind == ConstValueKind::MemberPointer;
-}
-
-bool try_compare_pointer_like_const_values(const ConstValue& lhs,
-                                           const ConstValue& rhs,
-                                           bool& equal_out) {
-    if (!is_pointer_like_const_value(lhs) || !is_pointer_like_const_value(rhs)) {
-        return false;
-    }
-
-    if (lhs.kind == ConstValueKind::NullPointer &&
-        rhs.kind == ConstValueKind::NullPointer) {
-        equal_out = true;
-        return true;
-    }
-
-    if (lhs.kind == ConstValueKind::Address &&
-        rhs.kind == ConstValueKind::Address) {
-        equal_out =
-            lhs.address_value.symbol.get() == rhs.address_value.symbol.get() &&
-            lhs.address_value.byte_offset == rhs.address_value.byte_offset;
-        return true;
-    }
-
-    if (lhs.kind == ConstValueKind::MemberPointer &&
-        rhs.kind == ConstValueKind::MemberPointer) {
-        equal_out =
-            lhs.member_pointer_value.byte_offset ==
-                rhs.member_pointer_value.byte_offset &&
-            lhs.member_pointer_value.method_symbol.get() ==
-                rhs.member_pointer_value.method_symbol.get() &&
-            lhs.member_pointer_value.virtual_slot_index ==
-                rhs.member_pointer_value.virtual_slot_index &&
-            lhs.member_pointer_value.member_name ==
-                rhs.member_pointer_value.member_name &&
-            lhs.member_pointer_value.is_function_member ==
-                rhs.member_pointer_value.is_function_member;
-        return true;
-    }
-
-    equal_out = false;
-    return true;
-}
-
-Expr* strip_noop_implicit_casts(Expr* expr) {
-    while (auto* cast = dyn_cast<ImplicitCast>(expr)) {
-        switch (cast->kind) {
-            case ImplicitCastTypes::LVALUE_TO_RVALUE:
-            case ImplicitCastTypes::ARRAY_TO_POINTER:
-            case ImplicitCastTypes::FUNCTION_TO_POINTER:
-            case ImplicitCastTypes::RAW_CAST:
-            case ImplicitCastTypes::ARITH_CAST:
-                expr = cast->expr.get();
-                continue;
-            default:
-                return expr;
-        }
-    }
-    return expr;
-}
-
-Expr* strip_noop_implicit_casts_and_parens(Expr* expr) {
-    while (expr) {
-        if (auto* paren = dyn_cast<ParenExpr>(expr)) {
-            expr = paren->subexpr.get();
-            continue;
-        }
-        auto* cast = dyn_cast<ImplicitCast>(expr);
-        if (!cast) {
-            break;
-        }
-        switch (cast->kind) {
-            case ImplicitCastTypes::LVALUE_TO_RVALUE:
-            case ImplicitCastTypes::ARRAY_TO_POINTER:
-            case ImplicitCastTypes::FUNCTION_TO_POINTER:
-            case ImplicitCastTypes::RAW_CAST:
-            case ImplicitCastTypes::ARITH_CAST:
-                expr = cast->expr.get();
-                continue;
-            default:
-                return expr;
-        }
-    }
-    return expr;
-}
-
-std::optional<ConstValue> cast_const_value_to_type(
-    const ConstValue& input, QualType target_type) {
-    if (!target_type) {
-        return input;
-    }
-
-    QualType resolved = target_type;
-    if (resolved->kind == TypeKind::Enum) {
-        auto enum_type = resolved.as_shared<EnumType>();
-        if (enum_type) {
-            auto underlying = enum_type->semantic_underlying_type();
-            if (underlying) {
-                resolved = underlying;
-            }
-        }
-    }
-
-    if (resolved->isInteger()) {
-        IntShape shape = infer_integer_shape(resolved);
-        ConstIntValue int_value{};
-        if (!const_value_to_int(input, shape, int_value)) {
-            if (input.kind == ConstValueKind::Floating) {
-                long double truncated = std::trunc(input.float_value.value);
-                int64_t as_i64 = static_cast<int64_t>(truncated);
-                int_value = shape.is_unsigned
-                    ? ConstIntValue::from_unsigned(static_cast<uint64_t>(as_i64), shape.width)
-                    : ConstIntValue::from_signed(as_i64, shape.width);
-            } else {
-                return std::nullopt;
-            }
-        }
-        return ConstValue::integer(int_value.cast(shape.width, shape.is_unsigned));
-    }
-
-    if (resolved->isFloatingPoint()) {
-        long double value = 0.0L;
-        switch (input.kind) {
-            case ConstValueKind::Floating:
-                value = input.float_value.value;
-                break;
-            case ConstValueKind::Integer:
-                value = input.int_value.is_unsigned
-                    ? static_cast<long double>(input.int_value.to_unsigned_u64())
-                    : static_cast<long double>(input.int_value.to_signed_i64());
-                break;
-            case ConstValueKind::Boolean:
-                value = input.bool_value ? 1.0L : 0.0L;
-                break;
-            default:
-                return std::nullopt;
-        }
-
-        uint16_t width = 64;
-        int64_t target_width = resolved->getWidth();
-        if (target_width > 0 && target_width <= std::numeric_limits<uint16_t>::max()) {
-            width = static_cast<uint16_t>(target_width);
-        }
-        return ConstValue::floating(value, width);
-    }
-
-    if (resolved->kind == TypeKind::Pointer ||
-        resolved->kind == TypeKind::MemberPointer ||
-        (resolved->kind == TypeKind::Builtin &&
-         static_cast<const BuiltinType*>(resolved.get_shared().get())->builtin_kind ==
-             BuiltinTypes::NullPtr)) {
-        switch (input.kind) {
-            case ConstValueKind::NullPointer:
-                return ConstValue::null_pointer();
-            case ConstValueKind::Address:
-                if (resolved->kind == TypeKind::Pointer) {
-                    return std::optional<ConstValue>(input);
-                }
-                return std::nullopt;
-            case ConstValueKind::MemberPointer:
-                if (resolved->kind == TypeKind::MemberPointer) {
-                    return std::optional<ConstValue>(input);
-                }
-                return std::nullopt;
-            default:
-                break;
-        }
-    }
-
-    if (resolved->kind == TypeKind::Object &&
-        input.kind == ConstValueKind::Object &&
-        input.object_value &&
-        input.object_value->kind == ConstObjectValueKind::Record) {
-        return input;
-    }
-    if (resolved->kind == TypeKind::Array &&
-        input.kind == ConstValueKind::Object &&
-        input.object_value &&
-        input.object_value->kind == ConstObjectValueKind::Array) {
-        return input;
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ConstValue> default_const_value_for_type(QualType type) {
-    if (!type) {
-        return std::nullopt;
-    }
-    if (type->kind == TypeKind::Enum) {
-        auto enum_type = type.as_shared<EnumType>();
-        if (enum_type) {
-            auto underlying = enum_type->semantic_underlying_type();
-            if (underlying) {
-                type = underlying;
-            }
-        }
-    }
-    if (type->isInteger()) {
-        IntShape shape = infer_integer_shape(type);
-        return ConstValue::integer(shape.is_unsigned
-            ? ConstIntValue::from_unsigned(0, shape.width)
-            : ConstIntValue::from_signed(0, shape.width));
-    }
-    if (type->isFloatingPoint()) {
-        uint16_t width = 64;
-        int64_t type_width = type->getWidth();
-        if (type_width > 0 && type_width <= std::numeric_limits<uint16_t>::max()) {
-            width = static_cast<uint16_t>(type_width);
-        }
-        return ConstValue::floating(0.0L, width);
-    }
-    if (type->kind == TypeKind::Pointer ||
-        type->kind == TypeKind::MemberPointer ||
-        (type->kind == TypeKind::Builtin &&
-         static_cast<const BuiltinType*>(type.get_shared().get())->builtin_kind ==
-             BuiltinTypes::NullPtr)) {
-        return ConstValue::null_pointer();
-    }
-    if (type->kind == TypeKind::Array) {
-        auto array = type.as_shared<ArrayType>();
-        if (!array || array->size_kind != ArraySizeKind::Constant ||
-            !array->size.has_value()) {
-            return std::nullopt;
-        }
-        std::vector<ConstValue> elements;
-        elements.reserve(*array->size);
-        for (size_t idx = 0; idx < *array->size; ++idx) {
-            auto element = default_const_value_for_type(array->element_type);
-            if (!element.has_value()) {
-                return std::nullopt;
-            }
-            elements.push_back(*element);
-        }
-        return ConstValue::object(ConstObjectValueKind::Array, std::move(elements));
-    }
-    if (type->kind == TypeKind::Object) {
-        auto object = type.as_shared<ObjectType>();
-        if (!object || object->isIncomplete()) {
-            return std::nullopt;
-        }
-        std::vector<ConstValue> fields;
-        const auto& semantic_fields = object->semantic_fields();
-        fields.reserve(semantic_fields.size());
-        for (const auto& field : semantic_fields) {
-            auto field_value = default_const_value_for_type(field.type);
-            if (!field_value.has_value()) {
-                return std::nullopt;
-            }
-            fields.push_back(*field_value);
-        }
-        return ConstValue::object(ConstObjectValueKind::Record, std::move(fields));
-    }
-    return std::nullopt;
-}
-
-// ====== Typed expression evaluation & initialization ======
-
-ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth);
-
-ConstEvalResult eval_requires_expr(RequiresExpr* requires_expr,
-                                   ConstEvalMode mode,
-                                   size_t depth) {
-    if (!requires_expr) {
-        return make_error(
-            ConstEvalDiagCode::NullExpression,
-            "cannot evaluate a null requires-expression",
-            SrcLoc());
-    }
-    if (requires_expr->satisfaction.has_value()) {
-        return ConstEvalResult::constant(
-            ConstValue::boolean(*requires_expr->satisfaction));
-    }
-
-    for (const auto& parameter : requires_expr->parameters) {
-        if (!parameter) {
-            continue;
-        }
-        if (type_depends_on_template_parameters(parameter->type) ||
-            type_depends_on_template_parameters(
-                QualType(parameter->original_type))) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "requires-expression parameter is still dependent",
-                requires_expr->location);
-        }
-    }
-
-    for (const auto& requirement : requires_expr->requirements) {
-        switch (requirement.kind) {
-            case ConstraintRequirementKind::Simple:
-                if (!requirement.expr ||
-                    isa<ErrorExpr>(requirement.expr.get())) {
-                    return ConstEvalResult::constant(ConstValue::boolean(false));
-                }
-                break;
-            case ConstraintRequirementKind::Type:
-                if (!requirement.type_requirement ||
-                    type_depends_on_template_parameters(
-                        requirement.type_requirement)) {
-                    return ConstEvalResult::constant(ConstValue::boolean(false));
-                }
-                break;
-            case ConstraintRequirementKind::Nested: {
-                if (!requirement.expr) {
-                    return ConstEvalResult::constant(ConstValue::boolean(false));
-                }
-                ConstEvalResult nested =
-                    eval_expr(requirement.expr.get(), mode, depth + 1);
-                if (nested.status != ConstEvalStatus::Constant ||
-                    !nested.value.has_value()) {
-                    return nested;
-                }
-                bool nested_value = false;
-                if (!const_value_to_constraint_bool(
-                        *nested.value,
-                        nested_value) ||
-                    !nested_value) {
-                    return ConstEvalResult::constant(ConstValue::boolean(false));
-                }
-                break;
-            }
-            case ConstraintRequirementKind::Compound: {
-                if (!requirement.expr ||
-                    isa<ErrorExpr>(requirement.expr.get())) {
-                    return ConstEvalResult::constant(ConstValue::boolean(false));
-                }
-                if (requirement.is_noexcept &&
-                    !cpp_expression_is_known_noexcept(
-                        requirement.expr.get())) {
-                    return ConstEvalResult::constant(ConstValue::boolean(false));
-                }
-                if (requirement.return_type_constraint) {
-                    return make_not_evaluated(
-                        ConstEvalDiagCode::UnsupportedExpression,
-                        "requires-expression type constraint is not fully resolved for constant evaluation",
-                        requirement.return_type_constraint->location);
-                }
-                break;
-            }
-        }
-    }
-
-    return ConstEvalResult::constant(ConstValue::boolean(true));
-}
-
-ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
-                                               QualType target_type,
-                                               ConstEvalMode mode,
-                                               size_t depth);
-
-bool evaluate_constant_index(Expr* expr,
-                             ConstEvalMode mode,
-                             size_t depth,
-                             size_t& index_out) {
-    if (!expr) {
-        return false;
-    }
-    ConstEvalResult index_eval = eval_expr(expr, mode, depth + 1);
-    if (index_eval.status != ConstEvalStatus::Constant ||
-        !index_eval.value.has_value()) {
-        return false;
-    }
-    IntShape shape = infer_integer_shape(expr->get_type());
-    ConstIntValue index_int{};
-    if (!const_value_to_int(*index_eval.value, shape, index_int) ||
-        index_int.to_signed_i64() < 0) {
-        return false;
-    }
-    index_out = static_cast<size_t>(index_int.to_unsigned_u64());
-    return true;
-}
-
-bool append_member_expr_path_to_location(InterpLocation& location,
-                                         const MemberExpr* member_expr) {
-    if (!member_expr) {
-        return false;
-    }
-    if (!member_expr->field_path.empty()) {
-        for (uint32_t field_index : member_expr->field_path) {
-            if (!append_record_field_to_location(location, field_index)) {
-                return false;
-            }
-        }
-        return true;
-    }
-    return append_record_field_to_location(location, member_expr->field_index);
-}
-
-bool traverse_member_expr_value(const ConstValue& base_value,
-                                const MemberExpr* member_expr,
-                                ConstValue& value_out) {
-    if (!member_expr) {
-        return false;
-    }
-    ConstValue current = base_value;
-    const auto advance_to_field = [&](ConstValue& target, uint32_t field_index) -> bool {
-        if (target.kind != ConstValueKind::Object ||
-            !target.object_value ||
-            target.object_value->kind != ConstObjectValueKind::Record ||
-            field_index >= target.object_value->elements.size()) {
-            return false;
-        }
-        target = target.object_value->elements[field_index];
-        return true;
-    };
-
-    if (!member_expr->field_path.empty()) {
-        for (uint32_t field_index : member_expr->field_path) {
-            if (!advance_to_field(current, field_index)) {
-                return false;
-            }
-        }
-        value_out = current;
-        return true;
-    }
-
-    if (!advance_to_field(current, member_expr->field_index)) {
-        return false;
-    }
-    value_out = current;
-    return true;
-}
-
-bool resolve_expr_location(Expr* expr,
-                           ConstEvalMode mode,
-                           size_t depth,
-                           InterpLocation& location_out) {
-    if (!expr || depth > kMaxConstEvalDepth) {
-        return false;
-    }
-
-    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
-        return resolve_expr_location(paren->subexpr.get(), mode, depth + 1, location_out);
-    }
-
-    if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
-        auto reference_type =
-            desugar_type(cast->get_type()).as_shared<ReferenceType>();
-        if (reference_type) {
-            if (resolve_expr_location(cast->expr.get(), mode, depth + 1, location_out)) {
-                return true;
-            }
-            ConstEvalResult temporary_value =
-                eval_expr(cast->expr.get(), mode, depth + 1);
-            if (temporary_value.status != ConstEvalStatus::Constant ||
-                !temporary_value.value.has_value()) {
-                return false;
-            }
-            std::shared_ptr<Symbol> temporary_symbol;
-            if (!materialize_interpreter_temporary(
-                    remove_reference(cast->get_type()),
-                    *temporary_value.value,
-                    temporary_symbol)) {
-                return false;
-            }
-            location_out = {};
-            location_out.root_symbol = temporary_symbol;
-            location_out.root_type = temporary_symbol->type;
-            location_out.value_type = temporary_symbol->type;
-            return true;
-        }
-    }
-
-    Expr* core = strip_noop_implicit_casts_and_parens(expr);
-    if (!core) {
-        return false;
-    }
-
-    if (auto* var_ref = dyn_cast<VarRef>(core)) {
-        if (var_ref->get_type() &&
-            canonical_type_kind(var_ref->get_type()) == TypeKind::Reference) {
-            ConstValue reference_value;
-            if (lookup_interpreter_local(var_ref, reference_value) &&
-                reference_value.kind == ConstValueKind::Address) {
-                return resolve_location_from_address_value_as(
-                    reference_value.address_value,
-                    remove_reference(var_ref->get_type()),
-                    location_out);
-            }
-        }
-        std::shared_ptr<Symbol> bound_symbol = var_ref->symref;
-        if (!bound_symbol && !var_ref->get_name().empty()) {
-            bound_symbol = lookup_interpreter_named_symbol(var_ref->get_name());
-        }
-        if (!bound_symbol || bound_symbol->kind != SymbolKind::VARIABLE) {
-            return false;
-        }
-        location_out = {};
-        location_out.root_symbol = std::move(bound_symbol);
-        location_out.root_type = location_out.root_symbol->type;
-        location_out.value_type = location_out.root_type;
-        return static_cast<bool>(location_out.value_type);
-    }
-
-    if (isa<CppThisExpr>(core)) {
-        ConstValue this_value;
-        if (!lookup_interpreter_named_value("this", this_value) ||
-            this_value.kind != ConstValueKind::Address) {
-            return false;
-        }
-        return resolve_location_from_address_value(
-            this_value.address_value, location_out);
-    }
-
-    if (auto* member_expr = dyn_cast<MemberExpr>(core)) {
-        InterpLocation base_location;
-        if (member_expr->isArrow) {
-            ConstEvalResult base_value =
-                eval_expr(member_expr->base.get(), mode, depth + 1);
-            if (base_value.status != ConstEvalStatus::Constant ||
-                !base_value.value.has_value() ||
-                base_value.value->kind != ConstValueKind::Address ||
-                !resolve_location_from_address_value_as(
-                    base_value.value->address_value,
-                    pointer_pointee_type_from_expr(member_expr->base.get()),
-                    base_location)) {
-                return false;
-            }
-        } else if (!resolve_expr_location(
-                       member_expr->base.get(),
-                       mode,
-                       depth + 1,
-                       base_location)) {
-            return false;
-        }
-        if (!append_member_expr_path_to_location(base_location, member_expr)) {
-            return false;
-        }
-        if (canonical_type_kind(base_location.value_type) ==
-                TypeKind::Reference) {
-            ConstValue reference_value;
-            InterpLocation referred_location;
-            if (!load_interpreter_location_value(
-                    base_location,
-                    mode,
-                    depth + 1,
-                    reference_value) ||
-                reference_value.kind != ConstValueKind::Address ||
-                !resolve_location_from_address_value_as(
-                    reference_value.address_value,
-                    remove_reference(base_location.value_type),
-                    referred_location)) {
-                return false;
-            }
-            location_out = std::move(referred_location);
-            return true;
-        }
-        location_out = std::move(base_location);
-        return true;
-    }
-
-    if (auto* subscript = dyn_cast<ArraySubscriptExpr>(core)) {
-        size_t index = 0;
-        if (!evaluate_constant_index(subscript->index.get(), mode, depth + 1, index)) {
-            return false;
-        }
-
-        InterpLocation base_location;
-        if (resolve_expr_location(subscript->array.get(), mode, depth + 1, base_location) &&
-            append_array_index_to_location(base_location, index)) {
-            location_out = std::move(base_location);
-            return true;
-        }
-
-        ConstEvalResult base_value = eval_expr(subscript->array.get(), mode, depth + 1);
-        if (base_value.status != ConstEvalStatus::Constant ||
-            !base_value.value.has_value() ||
-            base_value.value->kind != ConstValueKind::Address) {
-            return false;
-        }
-
-        QualType element_type = nullptr;
-        auto base_type =
-            desugar_type(remove_reference(subscript->array->get_type()));
-        if (auto pointer_type = base_type.as_shared<PointerType>()) {
-            element_type = pointer_type->pointed_type;
-        } else if (auto array_type = base_type.as_shared<ArrayType>()) {
-            element_type = array_type->element_type;
-        }
-        if (!element_type) {
-            return false;
-        }
-        int64_t element_size = element_type->getWidthBytes();
-        if (element_size <= 0) {
-            return false;
-        }
-
-        ConstAddressValue indexed_address = base_value.value->address_value;
-        indexed_address.byte_offset +=
-            element_size * static_cast<int64_t>(index);
-        return resolve_location_from_address_value_as(
-            indexed_address, element_type, location_out);
-    }
-
-    if (auto* unary = dyn_cast<UnaryOperation>(core)) {
-        if (unary->uop == UnaryOpTypes::DEREFERENCE) {
-            ConstEvalResult pointer_value =
-                eval_expr(unary->exp.get(), mode, depth + 1);
-            if (pointer_value.status != ConstEvalStatus::Constant ||
-                !pointer_value.value.has_value() ||
-                pointer_value.value->kind != ConstValueKind::Address) {
-                return false;
-            }
-            return resolve_location_from_address_value_as(
-                pointer_value.value->address_value,
-                pointer_pointee_type_from_expr(unary->exp.get()),
-                location_out);
-        }
-    }
-
-    return false;
-}
-
-ConstEvalResult eval_init_list_as_typed_const_value(InitListExpr* init_list,
-                                                    QualType target_type,
-                                                    ConstEvalMode mode,
-                                                    size_t depth) {
-    if (!init_list || !target_type) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "aggregate initializer is missing a target type",
-            init_list ? init_list->location : SrcLoc());
-    }
-
-    target_type = desugar_type(target_type);
-    if (target_type->kind == TypeKind::Array) {
-        auto array = target_type.as_shared<ArrayType>();
-        if (!array || array->size_kind != ArraySizeKind::Constant ||
-            !array->size.has_value()) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "non-type template argument array initializer requires a constant bound",
-                init_list->location);
-        }
-
-        std::vector<ConstValue> elements;
-        elements.reserve(*array->size);
-        for (size_t idx = 0; idx < *array->size; ++idx) {
-            auto mapping = init_list->mappings.find(idx);
-            if (mapping == init_list->mappings.end()) {
-                auto default_value =
-                    default_const_value_for_type(array->element_type);
-                if (!default_value.has_value()) {
-                    return make_not_evaluated(
-                        ConstEvalDiagCode::UnsupportedExpression,
-                        "array element type is not supported in class-type non-type template arguments",
-                        init_list->location);
-                }
-                elements.push_back(*default_value);
-                continue;
-            }
-
-            ConstEvalResult element =
-                eval_expr_as_typed_const_value(
-                    mapping->second.get(),
-                    array->element_type,
-                    mode,
-                    depth + 1);
-            if (element.status != ConstEvalStatus::Constant ||
-                !element.value.has_value()) {
-                return element;
-            }
-            elements.push_back(*element.value);
-        }
-        return ConstEvalResult::constant(
-            ConstValue::object(ConstObjectValueKind::Array, std::move(elements)));
-    }
-
-    if (target_type->kind != TypeKind::Object) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "aggregate initializer target is not a supported structural object type",
-            init_list->location);
-    }
-
-    auto object = target_type.as_shared<ObjectType>();
-    if (!object || object->is_union || object->isIncomplete()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "class-type non-type template argument requires a complete non-union structural type",
-            init_list->location);
-    }
-
-    std::vector<ConstValue> fields;
-    const auto& semantic_fields = object->semantic_fields();
-    fields.reserve(semantic_fields.size());
-    for (size_t idx = 0; idx < semantic_fields.size(); ++idx) {
-        const auto& field = semantic_fields[idx];
-        auto mapping = init_list->mappings.find(idx);
-        if (mapping == init_list->mappings.end()) {
-            auto default_value = default_const_value_for_type(field.type);
-            if (!default_value.has_value()) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "class-type non-type template argument field is not supported in zero-initialization",
-                    init_list->location);
-            }
-            fields.push_back(*default_value);
-            continue;
-        }
-
-        ConstEvalResult field_value =
-            eval_expr_as_typed_const_value(
-                mapping->second.get(),
-                field.type,
-                mode,
-                depth + 1);
-        if (field_value.status != ConstEvalStatus::Constant ||
-            !field_value.value.has_value()) {
-            return field_value;
-        }
-        fields.push_back(*field_value.value);
-    }
-    return ConstEvalResult::constant(
-        ConstValue::object(ConstObjectValueKind::Record, std::move(fields)));
-}
-
-ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
-                                               QualType target_type,
-                                               ConstEvalMode mode,
-                                               size_t depth) {
-    if (!expr || !target_type) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "typed constant evaluation requires an expression and target type",
-            expr ? expr->location : SrcLoc());
-    }
-
-    QualType reference_target = remove_reference(target_type);
-    if (reference_target && canonical_type_kind(target_type) == TypeKind::Reference) {
-        InterpLocation location;
-        if (resolve_expr_location(expr, mode, depth + 1, location) &&
-            location.root_symbol) {
-            return ConstEvalResult::constant(
-                ConstValue::address(location.root_symbol, location.byte_offset));
-        }
-
-        ConstEvalResult temporary_value = eval_expr(expr, mode, depth + 1);
-        if (temporary_value.status != ConstEvalStatus::Constant ||
-            !temporary_value.value.has_value()) {
-            return temporary_value;
-        }
-        std::shared_ptr<Symbol> temporary_symbol;
-        if (!materialize_interpreter_temporary(
-                reference_target,
-                *temporary_value.value,
-                temporary_symbol)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "reference constant initializer could not materialize a temporary",
-                expr->location);
-        }
-        return ConstEvalResult::constant(ConstValue::address(temporary_symbol));
-    }
-
-    target_type = desugar_type(target_type);
-    Expr* stripped = strip_noop_implicit_casts_and_parens(expr);
-    if ((target_type->kind == TypeKind::Object ||
-         target_type->kind == TypeKind::Array) &&
-        dyn_cast<InitListExpr>(stripped)) {
-        return eval_init_list_as_typed_const_value(
-            static_cast<InitListExpr*>(stripped),
-            target_type,
-            mode,
-            depth + 1);
-    }
-
-    ConstEvalResult inner = eval_expr(expr, mode, depth + 1);
-    if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
-        return inner;
-    }
-    auto casted = cast_const_value_to_type(*inner.value, target_type);
-    if (!casted.has_value()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "expression is not convertible to the structural constant target type",
-            expr->location);
-    }
-    return ConstEvalResult::constant(*casted);
-}
-
-ConstEvalResult eval_parameter_argument_as_const_value(Expr* argument,
-                                                       const ParamDecl* parameter,
-                                                       ConstEvalMode mode,
-                                                       size_t depth,
-                                                       SrcLoc loc,
-                                                       std::string_view missing_parameter_message,
-                                                       std::string_view reference_bind_message) {
-    if (!parameter || !parameter->type) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            std::string(missing_parameter_message),
-            loc);
-    }
-    if (!argument) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter encountered a missing argument expression",
-            loc);
-    }
-
-    ConstEvalResult result =
-        eval_expr_as_typed_const_value(argument, parameter->type, mode, depth);
-    if (result.status != ConstEvalStatus::Constant ||
-        !result.value.has_value()) {
-        return result;
-    }
-    if (canonical_type_kind(parameter->type) == TypeKind::Reference &&
-        result.value->kind != ConstValueKind::Address) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            std::string(reference_bind_message),
-            loc);
-    }
-    return result;
-}
-
-ConstEvalResult eval_cpp_lambda_expr(CppLambdaExpr* lambda,
-                                     ConstEvalMode mode,
-                                     size_t depth) {
-    if (!lambda || !lambda->get_type()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "lambda expression is missing a closure object type",
-            lambda ? lambda->location : SrcLoc());
-    }
-
-    if (lambda->semantic_info.closure_initializer) {
-        return eval_expr_as_typed_const_value(
-            lambda->semantic_info.closure_initializer.get(),
-            lambda->get_type(),
-            mode,
-            depth + 1);
-    }
-
-    auto value = default_const_value_for_type(lambda->get_type());
-    if (!value.has_value()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "lambda closure object is not supported in constant evaluation",
-            lambda->location);
-    }
-    return ConstEvalResult::constant(*value);
-}
-
-const VariableDecl* find_constant_evaluable_variable_definition(
-    const Symbol* sym) {
-    if (!sym || sym->kind != SymbolKind::VARIABLE) {
-        return nullptr;
-    }
-    if (sym->variable_definition && sym->variable_definition->init) {
-        return sym->variable_definition;
-    }
-
-    if (const auto* specialization_info =
-            get_symbol_variable_template_specialization(sym)) {
-        ASTContext* ast_ctx = get_side_table_ast_context_for(sym);
-        if (!ast_ctx) {
-            ast_ctx = get_active_side_table_ast_context();
-        }
-        if (ast_ctx) {
-            const auto* specialization_entry =
-                ast_ctx->lookup_variable_template_specialization(
-                    specialization_info->primary_template,
-                    specialization_info->arguments);
-            if (specialization_entry &&
-                specialization_entry->specialization_decl &&
-                specialization_entry->specialization_decl->init) {
-                return specialization_entry->specialization_decl.get();
-            }
-        }
-    }
-
-    QualType owner_type = get_symbol_owner_record_type(sym);
-    auto owner_record =
-        desugar_type(owner_type).as_shared<ObjectType>();
-    auto* owner_decl = owner_record
-        ? dyn_cast<ObjectDecl>(owner_record->get_decl())
-        : nullptr;
-    if (!owner_decl) {
-        return nullptr;
-    }
-
-    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
-    if (!state) {
-        return nullptr;
-    }
-
-    for (const auto& static_member : state->static_data_members) {
-        if (!static_member.decl || !static_member.decl->init) {
-            continue;
-        }
-        if ((static_member.symbol && static_member.symbol.get() == sym) ||
-            (static_member.decl->sym &&
-             static_member.decl->sym.get() == sym)) {
-            return static_member.decl;
-        }
-    }
-
-    return nullptr;
-}
-
-bool is_cpp_constant_static_data_member(const Symbol* sym,
-                                        const VariableDecl* definition) {
-    if (!sym || !definition || definition->storage_class != StorageClass::STATIC ||
-        !get_symbol_owner_record_type(sym)) {
-        return false;
-    }
-
-    QualType type = definition->type ? definition->type : sym->type;
-    if (!type || !type.is_const()) {
-        return false;
-    }
-
-    QualType canonical = desugar_type(type);
-    return canonical &&
-           (canonical->isInteger() || canonical->kind == TypeKind::Enum);
-}
-
-bool is_cpp_constant_initialized_integral_or_enum_variable(
-    const Symbol* sym,
-    const VariableDecl* definition) {
-    if (!sym || !definition || !definition->init) {
-        return false;
-    }
-
-    QualType type = definition->type ? definition->type : sym->type;
-    if (!type || !type.is_const() || type.is_volatile()) {
-        return false;
-    }
-
-    QualType canonical = desugar_type(remove_reference(type));
-    if (!canonical ||
-        !(canonical->isInteger() || canonical->kind == TypeKind::Enum)) {
-        return false;
-    }
-
-    ConstEvalResult init_eval = eval_expr_as_typed_const_value(
-        definition->init.get(),
-        type,
-        ConstEvalMode::cpp_core_constant_expression(),
-        /*depth=*/0);
-    return init_eval.status == ConstEvalStatus::Constant &&
-           init_eval.value.has_value();
-}
-
-ConstEvalResult eval_constexpr_variable_initializer(
-    const Symbol* sym,
-    ConstEvalMode mode,
-    size_t depth,
-    bool allow_static_storage_duration) {
-    if (!sym || sym->kind != SymbolKind::VARIABLE) {
-        return ConstEvalResult::not_evaluated();
-    }
-    const VariableDecl* definition =
-        find_constant_evaluable_variable_definition(sym);
-    bool can_evaluate_as_cpp_constant =
-        sym->is_constexpr ||
-        ((is_cpp_core_constant_expression_mode(mode) ||
-          is_cpp_non_type_template_argument_mode(mode)) &&
-         (is_cpp_constant_static_data_member(sym, definition) ||
-          is_cpp_constant_initialized_integral_or_enum_variable(
-              sym,
-              definition)));
-    if (!can_evaluate_as_cpp_constant || !definition || !definition->init) {
-        return ConstEvalResult::not_evaluated();
-    }
-    if (!allow_static_storage_duration && has_static_storage_duration(sym)) {
-        return ConstEvalResult::not_evaluated();
-    }
-
-    QualType target_type = definition->type
-        ? definition->type
-        : sym->type;
-    if (!target_type) {
-        return ConstEvalResult::not_evaluated();
-    }
-
-    return eval_expr_as_typed_const_value(
-        definition->init.get(),
-        target_type,
-        mode,
-        depth + 1);
-}
-
-struct InterpExecResult {
-    enum class Kind {
-        Continue,
-        Return,
-        Break,
-        LoopContinue,
-        Fail
-    };
-
-    Kind kind = Kind::Continue;
-    ConstEvalResult value = ConstEvalResult::not_evaluated();
-};
-
-// ====== Interpreter execution infrastructure ======
-
-QualType extract_function_return_type(const FuncDecl* function_decl) {
-    if (!function_decl || !function_decl->type) {
-        return nullptr;
-    }
-    auto function_type = std::dynamic_pointer_cast<FunctionType>(function_decl->type);
-    if (!function_type) {
-        return nullptr;
-    }
-    return function_type->ret_type;
-}
-
-bool is_void_parameter_sentinel(const ParamDecl* param_decl) {
-    return param_decl && param_decl->type && param_decl->type->isVoid() &&
-           !param_decl->has_name();
-}
-
-InterpExecResult make_interp_continue_result() {
-    return InterpExecResult{};
-}
-
-InterpExecResult make_interp_fail_result(ConstEvalResult result) {
-    InterpExecResult exec_result;
-    exec_result.kind = InterpExecResult::Kind::Fail;
-    exec_result.value = std::move(result);
-    return exec_result;
-}
-
-InterpExecResult make_interp_return_result(ConstEvalResult result) {
-    InterpExecResult exec_result;
-    exec_result.kind = InterpExecResult::Kind::Return;
-    exec_result.value = std::move(result);
-    return exec_result;
-}
-
-InterpExecResult make_interp_break_result() {
-    InterpExecResult exec_result;
-    exec_result.kind = InterpExecResult::Kind::Break;
-    return exec_result;
-}
-
-InterpExecResult make_interp_loop_continue_result() {
-    InterpExecResult exec_result;
-    exec_result.kind = InterpExecResult::Kind::LoopContinue;
-    return exec_result;
-}
-
-InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t depth);
-ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size_t depth);
-
-ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth);
-bool is_c23_integer_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth);
-bool is_c23_address_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth);
-
-bool eval_condition_truthiness(Expr* condition,
-                               ConstEvalMode mode,
-                               size_t depth,
-                               bool& truthy_out,
-                               ConstEvalResult& failure_out) {
-    if (!condition) {
-        failure_out = make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "statement condition is missing",
-            SrcLoc());
-        return false;
-    }
-
-    ConstEvalResult condition_result = eval_expr(condition, mode, depth + 1);
-    if (condition_result.status != ConstEvalStatus::Constant ||
-        !condition_result.value.has_value()) {
-        failure_out = std::move(condition_result);
-        return false;
-    }
-    if (!const_value_to_bool(*condition_result.value, truthy_out)) {
-        failure_out = make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "statement condition must be scalar in constexpr interpreter",
-            condition->location);
-        return false;
-    }
-    return true;
-}
-
-struct SwitchLabelInfo {
-    bool is_default = false;
-    const Expr* const_expr = nullptr;
-    const Expr* range_end = nullptr;
-};
-
-struct SwitchEntry {
-    std::vector<SwitchLabelInfo> labels;
-    Stmt* body = nullptr;
-};
-
-void collect_switch_entries_from_stmt(Stmt* stmt,
-                                      std::vector<SwitchEntry>& entries) {
-    if (!stmt) {
-        return;
-    }
-
-    if (auto* compound = dyn_cast<CompoundStmt>(stmt)) {
-        for (const auto& child : compound->statements) {
-            collect_switch_entries_from_stmt(child.get(), entries);
-        }
-        return;
-    }
-
-    SwitchEntry entry;
-    Stmt* current = stmt;
-    while (current) {
-        if (auto* case_stmt = dyn_cast<CaseStmt>(current)) {
-            entry.labels.push_back(
-                {false, case_stmt->const_expr.get(), case_stmt->range_end.get()});
-            current = case_stmt->stmt.get();
-            continue;
-        }
-        if (auto* default_stmt = dyn_cast<DefaultStmt>(current)) {
-            entry.labels.push_back({true, nullptr, nullptr});
-            current = default_stmt->stmt.get();
-            continue;
-        }
-        break;
-    }
-    entry.body = current;
-    entries.push_back(std::move(entry));
-}
-
-// ====== Constant expression classification (C23) ======
-
-bool is_c23_address_constant_operand(Expr* expr, ConstEvalMode mode, size_t depth) {
-    if (!expr || depth > kMaxConstEvalDepth) {
-        return false;
-    }
-
-    Expr* core = strip_noop_implicit_casts_and_parens(expr);
-    if (!core) {
-        return false;
-    }
-
-    if (isa<StringLiteral>(core)) {
-        return true;
-    }
-
-    if (auto* var_ref = dyn_cast<VarRef>(core)) {
-        if (!var_ref->symref) {
-            return false;
-        }
-        if (var_ref->symref->kind == SymbolKind::FUNCTION) {
-            return true;
-        }
-        return has_static_storage_duration(var_ref->symref.get());
-    }
-
-    if (auto* member_expr = dyn_cast<MemberExpr>(core)) {
-        if (member_expr->isArrow) {
-            return false;
-        }
-        return is_c23_address_constant_operand(member_expr->base.get(), mode, depth + 1);
-    }
-
-    if (auto* subscript_expr = dyn_cast<ArraySubscriptExpr>(core)) {
-        if (!subscript_expr->array || !subscript_expr->index) {
-            return false;
-        }
-        ConstEvalResult index_eval = eval_expr(subscript_expr->index.get(), mode, depth + 1);
-        if (index_eval.status != ConstEvalStatus::Constant || !index_eval.value.has_value()) {
-            return false;
-        }
-
-        ConstEvalResult array_eval = eval_expr(subscript_expr->array.get(), mode, depth + 1);
-        return array_eval.status == ConstEvalStatus::Constant &&
-               array_eval.value.has_value();
-    }
-
-    return false;
-}
-
-bool is_c23_integer_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
-    if (!expr || depth > kMaxConstEvalDepth) {
-        return false;
-    }
-
-    ConstEvalResult eval = eval_expr(expr, mode, depth + 1);
-    if (eval.status != ConstEvalStatus::Constant || !eval.value.has_value()) {
-        return false;
-    }
-
-    IntShape shape = infer_integer_shape(expr->get_type());
-    ConstIntValue value{};
-    return const_value_to_int(eval.value.value(), shape, value);
-}
-
-bool is_c23_address_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
-    if (!expr || depth > kMaxConstEvalDepth) {
-        return false;
-    }
-
-    Expr* core = strip_noop_implicit_casts_and_parens(expr);
-    if (!core) {
-        return false;
-    }
-
-    if (auto* unary = dyn_cast<UnaryOperation>(core)) {
-        if (unary->uop == UnaryOpTypes::ADDRESS_OF) {
-            return is_c23_address_constant_operand(unary->exp.get(), mode, depth + 1);
-        }
-    }
-
-    if (isa<StringLiteral>(core)) {
-        return true;
-    }
-
-    if (auto* var_ref = dyn_cast<VarRef>(core)) {
-        if (!var_ref->symref) {
-            return false;
-        }
-        if (var_ref->symref->kind == SymbolKind::FUNCTION) {
-            return true;
-        }
-        return var_ref->symref->kind == SymbolKind::VARIABLE &&
-               var_ref->get_type() &&
-               var_ref->get_type()->kind == TypeKind::Array &&
-               has_static_storage_duration(var_ref->symref.get());
-    }
-
-    if (auto* binary = dyn_cast<BinaryOperation>(core)) {
-        if ((binary->bop == BinOpTypes::ADD || binary->bop == BinOpTypes::SUB) &&
-            binary->get_type() && binary->get_type()->kind == TypeKind::Pointer) {
-            if (is_c23_address_constant_expr(binary->left.get(), mode, depth + 1) &&
-                is_c23_integer_constant_expr(binary->right.get(), mode, depth + 1)) {
-                return true;
-            }
-            if (binary->bop == BinOpTypes::ADD &&
-                is_c23_address_constant_expr(binary->right.get(), mode, depth + 1) &&
-                is_c23_integer_constant_expr(binary->left.get(), mode, depth + 1)) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-// ====== Unary, binary, and cast operator evaluation ======
-
-ConstEvalResult eval_address_of_operand(Expr* operand,
-                                        ConstEvalMode mode,
-                                        size_t depth,
-                                        SrcLoc loc) {
-    Expr* core = strip_noop_implicit_casts_and_parens(operand);
-    if (auto* var_ref = dyn_cast<VarRef>(core)) {
-        if (var_ref->symref &&
-            var_ref->symref->kind == SymbolKind::FUNCTION) {
-            return ConstEvalResult::constant(
-                ConstValue::address(var_ref->symref));
+    ConstEvalResult evaluate_unary(
+        const aburi::cir::Inst& inst,
+        const aburi::cir::InstPayload& payload,
+        std::unordered_map<uint64_t, ConstValue>& env) {
+        const auto* descriptor = std::get_if<aburi::cir::UnaryOpDescriptor>(&payload);
+        std::vector<ValueRef> operands = value_operands(file(), inst);
+        if (!descriptor || operands.empty()) {
+            return make_unsupported("unary operator payload is malformed", inst.loc);
         }
-    }
-
-    InterpLocation location;
-    if (resolve_expr_location(operand, mode, depth + 1, location) &&
-        location.root_symbol) {
-        return ConstEvalResult::constant(
-            ConstValue::address(location.root_symbol, location.byte_offset));
-    }
-
-    return make_not_evaluated(
-        ConstEvalDiagCode::UnsupportedExpression,
-        "address-of expression is not a supported constant expression",
-        loc);
-}
-
-ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_t depth) {
-    if (!unary || !unary->exp) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "unsupported unary expression", unary ? unary->location : SrcLoc());
-    }
-
-    if (is_c23_constexpr_initializer_mode(mode) &&
-        unary->uop == UnaryOpTypes::ADDRESS_OF) {
-        if (is_c23_address_constant_operand(unary->exp.get(), mode, depth + 1)) {
-            return ConstEvalResult::constant(ConstValue::boolean(true));
+        ConstEvalResult operand = value_for_ref(operands[0], env);
+        if (operand.status != ConstEvalStatus::Constant ||
+            !operand.value.has_value()) {
+            return operand;
         }
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "address-of expression is not allowed in C23 constexpr initializer",
-            unary->location);
-    }
 
-    if (is_cpp_non_type_template_argument_mode(mode) &&
-        unary->uop == UnaryOpTypes::ADDRESS_OF) {
-        Expr* core = strip_noop_implicit_casts_and_parens(unary->exp.get());
-        if (auto* var_ref = dyn_cast<VarRef>(core)) {
-            if (!var_ref->symref) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "address-of expression does not name a bound entity",
-                    unary->location);
-            }
-            if (var_ref->symref->kind == SymbolKind::FUNCTION ||
-                has_static_storage_duration(var_ref->symref.get())) {
+        if (operand.value->kind == ConstValueKind::Complex &&
+            descriptor->op == UnaryOpKind::Minus) {
+            if (operand.value->complex_value.has_integer_components) {
                 return ConstEvalResult::constant(
-                    ConstValue::address(var_ref->symref));
+                    ConstValue::complex_integer(
+                        const_int_neg(
+                            operand.value->complex_value.integer_real),
+                        const_int_neg(
+                            operand.value->complex_value.integer_imag)));
             }
-        }
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "address-of expression is not a supported non-type template argument",
-            unary->location);
-    }
-
-    if (unary->uop == UnaryOpTypes::ADDRESS_OF) {
-        return eval_address_of_operand(
-            unary->exp.get(), mode, depth, unary->location);
-    }
-
-    if (unary->uop == UnaryOpTypes::DEREFERENCE) {
-        ConstEvalResult pointer_result = eval_expr(unary->exp.get(), mode, depth + 1);
-        if (pointer_result.status != ConstEvalStatus::Constant ||
-            !pointer_result.value.has_value() ||
-            pointer_result.value->kind != ConstValueKind::Address) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "dereference operand is not a supported address constant",
-                unary->location);
-        }
-        InterpLocation location;
-        if (!resolve_location_from_address_value_as(
-                pointer_result.value->address_value,
-                pointer_pointee_type_from_expr(unary->exp.get()),
-                location)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "dereference operand does not refer to interpreter-managed storage",
-                unary->location);
-        }
-        ConstValue pointee_value;
-        if (!load_interpreter_location_value(location, mode, depth + 1, pointee_value)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "dereference operand does not denote a constant object",
-                unary->location);
-        }
-        return ConstEvalResult::constant(pointee_value);
-    }
-
-    if (g_interpreter_session &&
-        (unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
-         unary->uop == UnaryOpTypes::DECREMENT_PREFIX ||
-         unary->uop == UnaryOpTypes::INCREMENT_POSTFIX ||
-         unary->uop == UnaryOpTypes::DECREMENT_POSTFIX)) {
-        InterpLocation location;
-        if (!resolve_expr_location(unary->exp.get(), mode, depth + 1, location)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "increment/decrement operand is not assignable in constexpr interpreter",
-                unary->location);
-        }
-
-        ConstValue current_value;
-        if (!load_interpreter_location_value(location, mode, depth + 1, current_value)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "increment/decrement operand is not available in constexpr interpreter storage",
-                unary->location);
-        }
-
-        auto pointer_type =
-            desugar_type(remove_reference(location.value_type))
-                .as_shared<PointerType>();
-        if (pointer_type && current_value.kind == ConstValueKind::Address) {
-            if (!pointer_type->pointed_type) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "pointer increment requires a complete pointed-to type",
-                    unary->location);
-            }
-            int64_t element_size = pointer_type->pointed_type->getWidthBytes();
-            if (element_size <= 0) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "pointer increment requires a complete pointed-to type",
-                    unary->location);
-            }
-            ConstValue updated_value = current_value;
-            int64_t direction =
-                (unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
-                 unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
-                    ? 1
-                    : -1;
-            updated_value.address_value.byte_offset +=
-                direction * element_size;
-            if (!store_interpreter_location_value(location, updated_value)) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "pointer increment failed to update constexpr interpreter storage",
-                    unary->location);
-            }
-            bool is_postfix =
-                unary->uop == UnaryOpTypes::INCREMENT_POSTFIX ||
-                unary->uop == UnaryOpTypes::DECREMENT_POSTFIX;
             return ConstEvalResult::constant(
-                is_postfix ? current_value : updated_value);
+                ConstValue::complex(
+                    aburi::floating::negate(
+                        operand.value->complex_value.real),
+                    aburi::floating::negate(
+                        operand.value->complex_value.imag)));
         }
-
-        IntShape shape = infer_integer_shape(unary->exp->get_type());
-        ConstIntValue current_int{};
-        if (!const_value_to_int(current_value, shape, current_int)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "increment/decrement requires integer-like operand",
-                unary->location);
-        }
-
-        ConstIntValue one = shape.is_unsigned
-            ? ConstIntValue::from_unsigned(1, shape.width)
-            : ConstIntValue::from_signed(1, shape.width);
-        ConstIntValue updated_int =
-            (unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
-             unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
-                ? const_int_add(current_int, one)
-                : const_int_sub(current_int, one);
-        auto casted =
-            cast_const_value_to_type(ConstValue::integer(updated_int), location.value_type);
-        if (!casted.has_value() ||
-            !store_interpreter_location_value(location, *casted)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "increment/decrement failed to update constexpr interpreter storage",
-                unary->location);
-        }
-
-        bool is_postfix =
-            unary->uop == UnaryOpTypes::INCREMENT_POSTFIX ||
-            unary->uop == UnaryOpTypes::DECREMENT_POSTFIX;
-        return ConstEvalResult::constant(
-            is_postfix ? current_value : *casted);
-    }
-
-    ConstEvalResult inner = eval_expr(unary->exp.get(), mode, depth + 1);
-    if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
-        return inner;
-    }
-
-    if (unary->uop == UnaryOpTypes::LOGICAL_NOT) {
-        bool truthy = false;
-        if (!const_value_to_bool(inner.value.value(), truthy)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "logical not requires scalar constant operand", unary->location);
-        }
-        auto result_builtin =
-            desugar_type(unary->get_type()).as_shared<BuiltinType>();
-        if (result_builtin &&
-            result_builtin->builtin_kind == BuiltinTypes::Bool) {
-            return ConstEvalResult::constant(ConstValue::boolean(!truthy));
-        }
-        return make_constant_int(ConstIntValue::from_signed(truthy ? 0 : 1, 32));
-    }
-
-    IntShape result_shape = infer_integer_shape(unary->get_type());
-    ConstIntValue inner_int{};
-    if (!const_value_to_int(inner.value.value(), result_shape, inner_int)) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "unary constant evaluation currently supports integer-like operands",
-            unary->location);
-    }
-
-    switch (unary->uop) {
-        case UnaryOpTypes::NEG:
-            return make_constant_int(const_int_neg(inner_int));
-        case UnaryOpTypes::POSITIVE:
-            return make_constant_int(inner_int);
-        case UnaryOpTypes::BITWISE_NOT:
-            return make_constant_int(ConstIntValue::from_unsigned(
-                ~inner_int.to_unsigned_u64(), result_shape.width).cast(
-                result_shape.width, result_shape.is_unsigned));
-        default:
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "unary operator not supported by consteval engine yet", unary->location);
-    }
-}
-
-BinOpTypes normalize_compound_assignment_binop(BinOpTypes bop) {
-    switch (bop) {
-        case BinOpTypes::ASSIGN_ADD:
-            return BinOpTypes::ADD;
-        case BinOpTypes::ASSIGN_SUB:
-            return BinOpTypes::SUB;
-        case BinOpTypes::ASSIGN_MUL:
-            return BinOpTypes::MULT;
-        case BinOpTypes::ASSIGN_DIV:
-            return BinOpTypes::DIV;
-        case BinOpTypes::ASSIGN_MOD:
-            return BinOpTypes::MOD;
-        case BinOpTypes::ASSIGN_LSHIFT:
-            return BinOpTypes::SHIFT_LEFT;
-        case BinOpTypes::ASSIGN_RSHIFT:
-            return BinOpTypes::SHIFT_RIGHT;
-        case BinOpTypes::ASSIGN_AND:
-            return BinOpTypes::BITWISE_AND;
-        case BinOpTypes::ASSIGN_XOR:
-            return BinOpTypes::BITWISE_XOR;
-        case BinOpTypes::ASSIGN_OR:
-            return BinOpTypes::BITWISE_OR;
-        default:
-            return bop;
-    }
-}
-
-ConstEvalResult eval_assignment_to_location(Expr* lhs_expr,
-                                            Expr* rhs_expr,
-                                            BinOpTypes assign_kind,
-                                            SrcLoc loc,
-                                            ConstEvalMode mode,
-                                            size_t depth) {
-    if (!lhs_expr || !rhs_expr || !g_interpreter_session) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "assignment is not supported in this constant-expression context",
-            loc);
-    }
-
-    InterpLocation lhs_location;
-    if (!resolve_expr_location(lhs_expr, mode, depth + 1, lhs_location)) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "assignment target is not assignable in constexpr interpreter",
-            loc);
-    }
-
-    ConstEvalResult rhs_res = eval_expr(rhs_expr, mode, depth + 1);
-    if (rhs_res.status != ConstEvalStatus::Constant || !rhs_res.value.has_value()) {
-        return rhs_res;
-    }
-
-    ConstValue assigned_value;
-    if (assign_kind == BinOpTypes::ASSIGN) {
-        auto casted =
-            cast_const_value_to_type(rhs_res.value.value(), lhs_location.value_type);
-        if (!casted.has_value()) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "unable to assign expression to target type in constexpr interpreter",
-                loc);
-        }
-        assigned_value = *casted;
-    } else {
-        ConstValue lhs_current_value;
-        if (!load_interpreter_location_value(
-                lhs_location, mode, depth + 1, lhs_current_value)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "assignment target is not available in constexpr interpreter storage",
-                loc);
-        }
-
-        IntShape operand_shape = infer_integer_shape(lhs_location.value_type);
-        ConstIntValue lhs_int{};
-        ConstIntValue rhs_int{};
-        if (!const_value_to_int(lhs_current_value, operand_shape, lhs_int) ||
-            !const_value_to_int(rhs_res.value.value(), operand_shape, rhs_int)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "compound assignment currently supports integer-like operands",
-                loc);
-        }
-
-        ConstIntValue updated_int{};
-        switch (normalize_compound_assignment_binop(assign_kind)) {
-            case BinOpTypes::MULT:
-                updated_int = const_int_mul(lhs_int, rhs_int);
-                break;
-            case BinOpTypes::DIV: {
-                auto div_res = const_int_div(lhs_int, rhs_int);
-                if (!div_res.value.has_value()) {
-                    return make_error(
-                        ConstEvalDiagCode::DivisionByZero,
-                        "division by zero in constant expression",
-                        loc);
+        bool computation_is_floating =
+            aburi::cir::is_floating_type(file(), descriptor->computation_type.type);
+        if (computation_is_floating) {
+            aburi::cir::FloatingSemantics semantics =
+                aburi::floating::semantics_for_type(
+                    file(), descriptor->computation_type.type);
+            auto value = value_to_float(*operand.value, semantics);
+            if (!value.has_value() ||
+                floating_status_disqualifies(value.status)) {
+                return make_unsupported(
+                    "unary constant evaluation requires a scalar operand",
+                    inst.loc);
+            }
+            switch (descriptor->op) {
+                case UnaryOpKind::Plus:
+                    return ConstEvalResult::constant(
+                        ConstValue::floating(*value));
+                case UnaryOpKind::Minus:
+                    return ConstEvalResult::constant(ConstValue::floating(
+                        aburi::floating::negate(*value)));
+                case UnaryOpKind::LogicalNot: {
+                    bool truth = false;
+                    if (!is_truthy(*operand.value, truth)) {
+                        return make_unsupported(
+                            "logical-not constant evaluation requires a scalar operand",
+                            inst.loc);
+                    }
+                    return ConstEvalResult::constant(
+                        bool_result_for_type(file(), inst.result_type, !truth));
                 }
-                updated_int = *div_res.value;
-                break;
+                case UnaryOpKind::BitwiseNot:
+                case UnaryOpKind::Invalid:
+                    return make_unsupported("unsupported unary operator", inst.loc);
             }
-            case BinOpTypes::MOD: {
-                auto mod_res = const_int_mod(lhs_int, rhs_int);
-                if (!mod_res.value.has_value()) {
-                    return make_error(
-                        ConstEvalDiagCode::DivisionByZero,
-                        "modulo by zero in constant expression",
-                        loc);
+        }
+
+        auto shape =
+            aburi::cir::integer_shape_for_type(file(), descriptor->computation_type.type);
+        auto value = value_to_int(*operand.value, shape);
+        if (!value.has_value()) {
+            return make_unsupported(
+                "unary constant evaluation requires an integer operand",
+                inst.loc);
+        }
+
+        switch (descriptor->op) {
+            case UnaryOpKind::Plus:
+                return ConstEvalResult::constant(ConstValue::integer(*value));
+            case UnaryOpKind::Minus:
+                return ConstEvalResult::constant(
+                    ConstValue::integer(const_int_neg(*value)));
+            case UnaryOpKind::LogicalNot: {
+                bool truth = false;
+                if (!is_truthy(*operand.value, truth)) {
+                    return make_unsupported(
+                        "logical-not constant evaluation requires a scalar operand",
+                        inst.loc);
                 }
-                updated_int = *mod_res.value;
-                break;
+                return ConstEvalResult::constant(
+                    bool_result_for_type(file(), inst.result_type, !truth));
             }
-            case BinOpTypes::ADD:
-                updated_int = const_int_add(lhs_int, rhs_int);
-                break;
-            case BinOpTypes::SUB:
-                updated_int = const_int_sub(lhs_int, rhs_int);
-                break;
-            case BinOpTypes::SHIFT_LEFT: {
-                auto shl_res = const_int_shl(lhs_int, rhs_int);
-                if (!shl_res.value.has_value()) {
-                    return make_error(
-                        ConstEvalDiagCode::InvalidShiftAmount,
-                        "invalid left-shift amount in constant expression",
-                        loc);
+            case UnaryOpKind::BitwiseNot:
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_bits128(
+                        ~value->to_unsigned_u128(),
+                        value->bit_width,
+                        value->is_unsigned)));
+            case UnaryOpKind::Invalid:
+                return make_unsupported("invalid unary operator", inst.loc);
+        }
+        return make_unsupported("unsupported unary operator", inst.loc);
+    }
+
+    ConstEvalResult evaluate_binary(
+        const aburi::cir::Inst& inst,
+        const aburi::cir::InstPayload& payload,
+        std::unordered_map<uint64_t, ConstValue>& env) {
+        const auto* descriptor = std::get_if<aburi::cir::BinaryOpDescriptor>(&payload);
+        std::vector<ValueRef> operands = value_operands(file(), inst);
+        if (!descriptor || operands.size() < 2) {
+            return make_unsupported("binary operator payload is malformed", inst.loc);
+        }
+
+        ConstEvalResult lhs_result = value_for_ref(operands[0], env);
+        if (lhs_result.status != ConstEvalStatus::Constant ||
+            !lhs_result.value.has_value()) {
+            return lhs_result;
+        }
+        ConstEvalResult rhs_result = value_for_ref(operands[1], env);
+        if (rhs_result.status != ConstEvalStatus::Constant ||
+            !rhs_result.value.has_value()) {
+            return rhs_result;
+        }
+
+        if (descriptor->op == BinaryOpKind::LogicalAnd ||
+            descriptor->op == BinaryOpKind::LogicalOr) {
+            bool lhs = false;
+            bool rhs = false;
+            if (!is_truthy(*lhs_result.value, lhs) ||
+                !is_truthy(*rhs_result.value, rhs)) {
+                return make_unsupported(
+                    "logical constant evaluation requires scalar operands",
+                    inst.loc);
+            }
+            return ConstEvalResult::constant(bool_result_for_type(
+                file(),
+                inst.result_type,
+                descriptor->op == BinaryOpKind::LogicalAnd ? (lhs && rhs)
+                                                           : (lhs || rhs)));
+        }
+
+        if (lhs_result.value->kind == ConstValueKind::MetaInfo ||
+            rhs_result.value->kind == ConstValueKind::MetaInfo) {
+            if (descriptor->op == BinaryOpKind::Equal ||
+                descriptor->op == BinaryOpKind::NotEqual) {
+                bool equal =
+                    const_value_equals(*lhs_result.value, *rhs_result.value);
+                return ConstEvalResult::constant(bool_result_for_type(
+                    file(),
+                    inst.result_type,
+                    descriptor->op == BinaryOpKind::Equal ? equal : !equal));
+            }
+            return make_unsupported(
+                "only equality comparison is defined for 'std::meta::info'",
+                inst.loc);
+        }
+
+        bool lhs_pointer_like =
+            lhs_result.value->kind == ConstValueKind::Address ||
+            lhs_result.value->is_null(ConstNullKind::Nullptr) ||
+            lhs_result.value->is_null(ConstNullKind::Pointer);
+        bool rhs_pointer_like =
+            rhs_result.value->kind == ConstValueKind::Address ||
+            rhs_result.value->is_null(ConstNullKind::Nullptr) ||
+            rhs_result.value->is_null(ConstNullKind::Pointer);
+        if (lhs_pointer_like || rhs_pointer_like) {
+            auto bool_result = [&](bool value) {
+                return ConstEvalResult::constant(
+                    bool_result_for_type(file(), inst.result_type, value));
+            };
+            std::optional<size_t> lhs_pointee = pointee_size(
+                file(), file().valid(operands[0].inst)
+                            ? file().inst(operands[0].inst).result_type
+                            : TypeId{});
+            std::optional<size_t> rhs_pointee = pointee_size(
+                file(), file().valid(operands[1].inst)
+                            ? file().inst(operands[1].inst).result_type
+                            : TypeId{});
+
+            if (lhs_result.value->kind == ConstValueKind::Address &&
+                !lhs_pointee.has_value()) {
+                lhs_pointee = 1;
+            }
+            if (rhs_result.value->kind == ConstValueKind::Address &&
+                !rhs_pointee.has_value()) {
+                rhs_pointee = 1;
+            }
+            if (lhs_pointer_like && rhs_pointer_like) {
+                std::optional<ConstAddressValue> lhs_address =
+                    as_address(*lhs_result.value);
+                std::optional<ConstAddressValue> rhs_address =
+                    as_address(*rhs_result.value);
+                if (!lhs_address.has_value() || !rhs_address.has_value()) {
+                    return make_unsupported(
+                        "pointer operands are not address constants", inst.loc);
                 }
-                updated_int = *shl_res.value;
-                break;
-            }
-            case BinOpTypes::SHIFT_RIGHT: {
-                auto shr_res = const_int_shr(lhs_int, rhs_int);
-                if (!shr_res.value.has_value()) {
-                    return make_error(
-                        ConstEvalDiagCode::InvalidShiftAmount,
-                        "invalid right-shift amount in constant expression",
-                        loc);
+                bool same_base = lhs_address->same_base(*rhs_address);
+                switch (descriptor->op) {
+                    case BinaryOpKind::Sub: {
+                        std::optional<size_t> element =
+                            lhs_pointee.has_value() ? lhs_pointee : rhs_pointee;
+                        if (!same_base || !element.has_value() || *element == 0) {
+                            return make_unsupported(
+                                "pointer difference is not a constant expression",
+                                inst.loc);
+                        }
+                        int64_t diff =
+                            (lhs_address->byte_offset - rhs_address->byte_offset) /
+                            static_cast<int64_t>(*element);
+                        auto result_shape = aburi::cir::integer_shape_for_type(
+                            file(), inst.result_type);
+                        return ConstEvalResult::constant(ConstValue::integer(
+                            ConstIntValue::from_signed(diff, result_shape.bit_width)
+                                .cast(result_shape.bit_width,
+                                      result_shape.is_unsigned)));
+                    }
+                    case BinaryOpKind::Equal:
+                        return bool_result(same_base
+                            ? lhs_address->byte_offset == rhs_address->byte_offset
+                            : false);
+                    case BinaryOpKind::NotEqual:
+                        return bool_result(same_base
+                            ? lhs_address->byte_offset != rhs_address->byte_offset
+                            : true);
+                    case BinaryOpKind::Less:
+                    case BinaryOpKind::LessEqual:
+                    case BinaryOpKind::Greater:
+                    case BinaryOpKind::GreaterEqual: {
+                        if (!same_base) {
+                            return make_unsupported(
+                                "relational pointer comparison requires a common base",
+                                inst.loc);
+                        }
+                        int64_t lhs_off = lhs_address->byte_offset;
+                        int64_t rhs_off = rhs_address->byte_offset;
+                        bool value = descriptor->op == BinaryOpKind::Less
+                            ? lhs_off < rhs_off
+                            : descriptor->op == BinaryOpKind::LessEqual
+                                ? lhs_off <= rhs_off
+                                : descriptor->op == BinaryOpKind::Greater
+                                    ? lhs_off > rhs_off
+                                    : lhs_off >= rhs_off;
+                        return bool_result(value);
+                    }
+                    default:
+                        return make_unsupported(
+                            "pointer binary operator is not a constant expression",
+                            inst.loc);
                 }
-                updated_int = *shr_res.value;
+            }
+
+            const ConstValue& pointer_value =
+                lhs_pointer_like ? *lhs_result.value : *rhs_result.value;
+            const ConstValue& index_value =
+                lhs_pointer_like ? *rhs_result.value : *lhs_result.value;
+            std::optional<ConstAddressValue> address = as_address(pointer_value);
+            std::optional<int64_t> index = index_value.try_as_int64();
+            std::optional<size_t> element =
+                lhs_pointer_like ? lhs_pointee : rhs_pointee;
+            if (address.has_value() && !index.has_value() &&
+                address_is_null_base(*address) &&
+                index_value.kind == ConstValueKind::Integer &&
+                (descriptor->op == BinaryOpKind::Add ||
+                 (descriptor->op == BinaryOpKind::Sub && lhs_pointer_like))) {
+                unsigned pointer_bits = file().target_info_ptr()
+                    ? file().target_info_ptr()->pointer_width
+                    : 64;
+                if (pointer_bits > 0 && pointer_bits <= 64) {
+                    uint64_t mask = pointer_bits == 64
+                        ? std::numeric_limits<uint64_t>::max()
+                        : (uint64_t{1} << pointer_bits) - 1;
+                    uint64_t base =
+                        static_cast<uint64_t>(address->byte_offset) & mask;
+                    uint64_t index_bits = index_value.int_value
+                        .cast(pointer_bits, true)
+                        .to_unsigned_u64();
+                    uint64_t scaled_bits =
+                        index_bits * static_cast<uint64_t>(element.value_or(1));
+                    uint64_t result_bits = descriptor->op == BinaryOpKind::Add
+                        ? base + scaled_bits
+                        : base - scaled_bits;
+                    result_bits &= mask;
+                    if (pointer_bits == 64 &&
+                        result_bits >
+                            static_cast<uint64_t>(
+                                std::numeric_limits<int64_t>::max())) {
+                        address->byte_offset =
+                            std::numeric_limits<int64_t>::min() +
+                            static_cast<int64_t>(
+                                result_bits - (uint64_t{1} << 63));
+                    } else {
+                        address->byte_offset =
+                            static_cast<int64_t>(result_bits);
+                    }
+                    return ConstEvalResult::constant(
+                        ConstValue::address_value_of(*address));
+                }
+            }
+            if (!address.has_value() || !index.has_value()) {
+                return make_unsupported(
+                    "pointer arithmetic is not a constant expression", inst.loc);
+            }
+
+            int64_t scaled = *index * static_cast<int64_t>(element.value_or(1));
+            auto adjust_array_provenance = [&](bool subtract) {
+                if (!element.has_value() || address->subobjects.empty() ||
+                    !address->subobjects.back().is_array_element) {
+                    return;
+                }
+                ConstSubobjectPathEntry& last = address->subobjects.back();
+                __int128 delta = static_cast<__int128>(*index);
+                if (subtract) {
+                    delta = -delta;
+                }
+                __int128 adjusted =
+                    static_cast<__int128>(last.array_index) + delta;
+                if (adjusted < 0 ||
+                    adjusted >
+                        static_cast<__int128>(
+                            std::numeric_limits<uint64_t>::max())) {
+
+                    address->subobjects.clear();
+                    return;
+                }
+                last.array_index = static_cast<uint64_t>(adjusted);
+            };
+            switch (descriptor->op) {
+                case BinaryOpKind::Add:
+                    address->byte_offset += scaled;
+                    adjust_array_provenance(/*subtract=*/false);
+                    return ConstEvalResult::constant(
+                        ConstValue::address_value_of(*address));
+                case BinaryOpKind::Sub:
+                    if (!lhs_pointer_like) {
+                        return make_unsupported(
+                            "integer minus pointer is not a constant expression",
+                            inst.loc);
+                    }
+                    address->byte_offset -= scaled;
+                    adjust_array_provenance(/*subtract=*/true);
+                    return ConstEvalResult::constant(
+                        ConstValue::address_value_of(*address));
+                default:
+                    return make_unsupported(
+                        "pointer binary operator is not a constant expression",
+                        inst.loc);
+            }
+        }
+
+        aburi::cir::TypeId computation_resolved =
+            file().resolved_type(descriptor->computation_type.type);
+        bool computation_is_complex =
+            file().valid(computation_resolved) &&
+            file().type(computation_resolved).kind == aburi::cir::TypeKind::Complex;
+        if (computation_is_complex) {
+            const auto* complex =
+                std::get_if<aburi::cir::ComplexTypePayload>(
+                    &file().type_payload(computation_resolved));
+            bool integer_components = complex &&
+                aburi::cir::is_integer_like_type(
+                    file(), complex->element_type.type);
+            if (integer_components) {
+                aburi::cir::IntegerTypeShape shape =
+                    aburi::cir::integer_shape_for_type(
+                        file(), complex->element_type.type);
+                auto zero_component = [&]() {
+                    return ConstIntValue::from_unsigned(0, shape.bit_width)
+                        .cast(shape.bit_width, shape.is_unsigned);
+                };
+                auto as_integer_complex = [&](const ConstValue& value)
+                    -> std::optional<ConstComplexValue> {
+                    ConstComplexValue result;
+                    result.has_integer_components = true;
+                    if (value.kind == ConstValueKind::Complex) {
+                        if (!value.complex_value.valid() ||
+                            !value.complex_value.has_integer_components) {
+                            return std::nullopt;
+                        }
+                        result.integer_real =
+                            value.complex_value.integer_real.cast(
+                                shape.bit_width, shape.is_unsigned);
+                        result.integer_imag =
+                            value.complex_value.integer_imag.cast(
+                                shape.bit_width, shape.is_unsigned);
+                        return result;
+                    }
+                    auto real = value_to_int(value, shape);
+                    if (!real) {
+                        return std::nullopt;
+                    }
+                    result.integer_real = *real;
+                    result.integer_imag = zero_component();
+                    return result;
+                };
+                auto lhs = as_integer_complex(*lhs_result.value);
+                auto rhs = as_integer_complex(*rhs_result.value);
+                if (!lhs || !rhs) {
+                    return make_unsupported(
+                        "integer complex evaluation requires integer operands",
+                        inst.loc);
+                }
+                ConstIntValue a = lhs->integer_real;
+                ConstIntValue b = lhs->integer_imag;
+                ConstIntValue c = rhs->integer_real;
+                ConstIntValue d = rhs->integer_imag;
+                auto complex_integer = [&](ConstIntValue re,
+                                           ConstIntValue im) {
+                    return ConstEvalResult::constant(
+                        ConstValue::complex_integer(re, im));
+                };
+                switch (descriptor->op) {
+                    case BinaryOpKind::Add:
+                        return complex_integer(const_int_add(a, c),
+                                               const_int_add(b, d));
+                    case BinaryOpKind::Sub:
+                        return complex_integer(const_int_sub(a, c),
+                                               const_int_sub(b, d));
+                    case BinaryOpKind::Mul:
+                        return complex_integer(
+                            const_int_sub(const_int_mul(a, c),
+                                          const_int_mul(b, d)),
+                            const_int_add(const_int_mul(a, d),
+                                          const_int_mul(b, c)));
+                    case BinaryOpKind::Div: {
+                        ConstIntValue denominator = const_int_add(
+                            const_int_mul(c, c), const_int_mul(d, d));
+                        ConstIntOpResult real = const_int_div(
+                            const_int_add(const_int_mul(a, c),
+                                          const_int_mul(b, d)),
+                            denominator);
+                        ConstIntOpResult imag = const_int_div(
+                            const_int_sub(const_int_mul(b, c),
+                                          const_int_mul(a, d)),
+                            denominator);
+                        if (!real.value.has_value() ||
+                            !imag.value.has_value()) {
+                            return make_unsupported(
+                                "integer complex division is not a constant expression",
+                                inst.loc);
+                        }
+                        return complex_integer(*real.value, *imag.value);
+                    }
+                    case BinaryOpKind::Equal:
+                    case BinaryOpKind::NotEqual: {
+                        bool equal = a.to_unsigned_u128() ==
+                                         c.to_unsigned_u128() &&
+                                     b.to_unsigned_u128() ==
+                                         d.to_unsigned_u128();
+                        return ConstEvalResult::constant(bool_result_for_type(
+                            file(), inst.result_type,
+                            descriptor->op == BinaryOpKind::Equal
+                                ? equal : !equal));
+                    }
+                    default:
+                        break;
+                }
+                return make_unsupported(
+                    "integer complex operator is not a constant expression",
+                    inst.loc);
+            }
+            aburi::cir::FloatingSemantics semantics = complex
+                ? aburi::floating::semantics_for_type(
+                      file(), complex->element_type.type)
+                : aburi::cir::FloatingSemantics::Invalid;
+            auto as_complex = [&](const ConstValue& value)
+                -> std::optional<ConstComplexValue> {
+                if (value.kind == ConstValueKind::Complex &&
+                    value.complex_value.valid()) {
+                    auto real = aburi::floating::convert(
+                        value.complex_value.real, semantics);
+                    auto imag = aburi::floating::convert(
+                        value.complex_value.imag, semantics);
+                    if (real && imag &&
+                        !floating_status_disqualifies(real.status) &&
+                        !floating_status_disqualifies(imag.status)) {
+                        ConstComplexValue result;
+                        result.real = *real;
+                        result.imag = *imag;
+                        return result;
+                    }
+                    return std::nullopt;
+                }
+                auto real = value_to_float(value, semantics);
+                if (real && !floating_status_disqualifies(real.status)) {
+                    ConstComplexValue result;
+                    result.real = *real;
+                    result.imag = aburi::floating::zero(semantics);
+                    return result;
+                }
+                return std::nullopt;
+            };
+            auto lhs = as_complex(*lhs_result.value);
+            auto rhs = as_complex(*rhs_result.value);
+            if (!lhs.has_value() || !rhs.has_value()) {
+                return make_unsupported(
+                    "complex constant evaluation requires scalar operands",
+                    inst.loc);
+            }
+            bool operation_failed = false;
+            auto calculate = [&](aburi::floating::BinaryOperation operation,
+                                 aburi::cir::FloatingValue left,
+                                 aburi::cir::FloatingValue right) {
+                aburi::floating::FloatResult result =
+                    aburi::floating::binary(operation, left, right);
+                if (!result || floating_status_disqualifies(result.status)) {
+                    operation_failed = true;
+                    return aburi::cir::FloatingValue{};
+                }
+                return result.value;
+            };
+            auto complex_value = [&](aburi::cir::FloatingValue re,
+                                     aburi::cir::FloatingValue im) {
+                if (operation_failed || !re.valid() || !im.valid()) {
+                    return make_unsupported(
+                        "complex arithmetic is not a constant expression",
+                        inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::complex(re, im));
+            };
+            aburi::cir::FloatingValue a = lhs->real;
+            aburi::cir::FloatingValue b = lhs->imag;
+            aburi::cir::FloatingValue c = rhs->real;
+            aburi::cir::FloatingValue d = rhs->imag;
+            switch (descriptor->op) {
+                case BinaryOpKind::Add:
+                    return complex_value(
+                        calculate(aburi::floating::BinaryOperation::Add, a, c),
+                        calculate(aburi::floating::BinaryOperation::Add, b, d));
+                case BinaryOpKind::Sub:
+                    return complex_value(
+                        calculate(aburi::floating::BinaryOperation::Subtract, a, c),
+                        calculate(aburi::floating::BinaryOperation::Subtract, b, d));
+                case BinaryOpKind::Mul: {
+                    aburi::floating::ComplexFloatResult product =
+                        aburi::floating::complex_multiply({a, b}, {c, d});
+                    if (!product ||
+                        floating_status_disqualifies(product.status)) {
+                        operation_failed = true;
+                    }
+                    return complex_value(product.value.real,
+                                         product.value.imag);
+                }
+                case BinaryOpKind::Div: {
+                    aburi::floating::ComplexFloatResult quotient =
+                        aburi::floating::complex_divide({a, b}, {c, d});
+                    if (!quotient ||
+                        floating_status_disqualifies(quotient.status)) {
+                        operation_failed = true;
+                    }
+                    return complex_value(quotient.value.real,
+                                         quotient.value.imag);
+                }
+                case BinaryOpKind::Equal:
+                case BinaryOpKind::NotEqual: {
+                    auto real_comparison = aburi::floating::compare(a, c);
+                    auto imag_comparison = aburi::floating::compare(b, d);
+                    if (!real_comparison || !imag_comparison ||
+                        floating_status_disqualifies(real_comparison.status) ||
+                        floating_status_disqualifies(imag_comparison.status)) {
+                        return make_unsupported(
+                            "complex comparison is not a constant expression",
+                            inst.loc);
+                    }
+                    bool equal = *real_comparison ==
+                                     aburi::floating::CompareResult::Equal &&
+                                 *imag_comparison ==
+                                     aburi::floating::CompareResult::Equal;
+                    return ConstEvalResult::constant(bool_result_for_type(
+                        file(), inst.result_type,
+                        descriptor->op == BinaryOpKind::Equal ? equal : !equal));
+                }
+                default:
+                    break;
+            }
+            return make_unsupported("unsupported complex binary operator", inst.loc);
+        }
+
+        bool computation_is_floating =
+            aburi::cir::is_floating_type(file(), descriptor->computation_type.type);
+        if (computation_is_floating) {
+            aburi::cir::FloatingSemantics semantics =
+                aburi::floating::semantics_for_type(
+                    file(), descriptor->computation_type.type);
+            auto lhs = value_to_float(*lhs_result.value, semantics);
+            auto rhs = value_to_float(*rhs_result.value, semantics);
+            if (!lhs.has_value() || !rhs.has_value() ||
+                floating_status_disqualifies(lhs.status) ||
+                floating_status_disqualifies(rhs.status)) {
+                return make_unsupported(
+                    "floating constant evaluation requires scalar operands",
+                    inst.loc);
+            }
+            auto float_value = [&](aburi::floating::BinaryOperation operation) {
+                aburi::floating::FloatResult result =
+                    aburi::floating::binary(operation, *lhs, *rhs);
+                if (!result) {
+                    return make_unsupported(
+                        "floating operation has incompatible target semantics",
+                        inst.loc);
+                }
+                if (floating_status_disqualifies(result.status)) {
+                    return make_unsupported(
+                        result.status.has(
+                            aburi::floating::FloatStatusFlag::DivideByZero)
+                            ? "floating division by zero is not a constant expression"
+                            : "invalid floating arithmetic is not a constant expression",
+                        inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::floating(*result));
+            };
+            auto bool_value = [&](bool value) {
+                return ConstEvalResult::constant(
+                    bool_result_for_type(file(), inst.result_type, value));
+            };
+            switch (descriptor->op) {
+                case BinaryOpKind::Add:
+                    return float_value(aburi::floating::BinaryOperation::Add);
+                case BinaryOpKind::Sub:
+                    return float_value(aburi::floating::BinaryOperation::Subtract);
+                case BinaryOpKind::Mul:
+                    return float_value(aburi::floating::BinaryOperation::Multiply);
+                case BinaryOpKind::Div:
+                    return float_value(aburi::floating::BinaryOperation::Divide);
+                case BinaryOpKind::Mod:
+                    return float_value(aburi::floating::BinaryOperation::Modulo);
+                case BinaryOpKind::Less:
+                case BinaryOpKind::LessEqual:
+                case BinaryOpKind::Greater:
+                case BinaryOpKind::GreaterEqual:
+                case BinaryOpKind::Equal:
+                case BinaryOpKind::NotEqual: {
+                    auto comparison = aburi::floating::compare(*lhs, *rhs);
+                    if (!comparison) {
+                        return make_unsupported(
+                            "floating comparison has incompatible target semantics",
+                            inst.loc);
+                    }
+                    if (floating_status_disqualifies(comparison.status)) {
+                        return make_unsupported(
+                            "signaling NaN comparison is not a constant expression",
+                            inst.loc);
+                    }
+                    using aburi::floating::CompareResult;
+                    bool result = false;
+                    switch (descriptor->op) {
+                        case BinaryOpKind::Less:
+                            result = *comparison == CompareResult::Less;
+                            break;
+                        case BinaryOpKind::LessEqual:
+                            result = *comparison == CompareResult::Less ||
+                                     *comparison == CompareResult::Equal;
+                            break;
+                        case BinaryOpKind::Greater:
+                            result = *comparison == CompareResult::Greater;
+                            break;
+                        case BinaryOpKind::GreaterEqual:
+                            result = *comparison == CompareResult::Greater ||
+                                     *comparison == CompareResult::Equal;
+                            break;
+                        case BinaryOpKind::Equal:
+                            result = *comparison == CompareResult::Equal;
+                            break;
+                        case BinaryOpKind::NotEqual:
+                            result = *comparison != CompareResult::Equal;
+                            break;
+                        default:
+                            break;
+                    }
+                    return bool_value(result);
+                }
+                case BinaryOpKind::BitAnd:
+                case BinaryOpKind::BitOr:
+                case BinaryOpKind::BitXor:
+                case BinaryOpKind::Shl:
+                case BinaryOpKind::Shr:
+                case BinaryOpKind::LogicalAnd:
+                case BinaryOpKind::LogicalOr:
+                case BinaryOpKind::Comma:
+                case BinaryOpKind::Invalid:
+                    break;
+            }
+            return make_unsupported("unsupported floating binary operator", inst.loc);
+        }
+
+        auto shape =
+            aburi::cir::integer_shape_for_type(file(), descriptor->computation_type.type);
+        auto lhs = value_to_int(*lhs_result.value, shape);
+        auto rhs = value_to_int(*rhs_result.value, shape);
+        if (!lhs.has_value() || !rhs.has_value()) {
+            return make_unsupported(
+                "binary constant evaluation requires integer operands",
+                inst.loc);
+        }
+
+        auto bool_value = [&](bool value) {
+            return ConstEvalResult::constant(
+                bool_result_for_type(file(), inst.result_type, value));
+        };
+
+        switch (descriptor->op) {
+            case BinaryOpKind::Add:
+                return ConstEvalResult::constant(
+                    ConstValue::integer(const_int_add(*lhs, *rhs)));
+            case BinaryOpKind::Sub:
+                return ConstEvalResult::constant(
+                    ConstValue::integer(const_int_sub(*lhs, *rhs)));
+            case BinaryOpKind::Mul:
+                return ConstEvalResult::constant(
+                    ConstValue::integer(const_int_mul(*lhs, *rhs)));
+            case BinaryOpKind::Div: {
+                auto result = const_int_div(*lhs, *rhs);
+                if (!result.value.has_value()) {
+                    return make_error(ConstEvalDiagCode::DivisionByZero,
+                                      "division by zero in constant expression",
+                                      inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::integer(*result.value));
+            }
+            case BinaryOpKind::Mod: {
+                auto result = const_int_mod(*lhs, *rhs);
+                if (!result.value.has_value()) {
+                    return make_error(ConstEvalDiagCode::DivisionByZero,
+                                      "modulo by zero in constant expression",
+                                      inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::integer(*result.value));
+            }
+            case BinaryOpKind::Less:
+                return bool_value(compare_less(*lhs, *rhs));
+            case BinaryOpKind::LessEqual:
+                return bool_value(compare_less_equal(*lhs, *rhs));
+            case BinaryOpKind::Greater:
+                return bool_value(compare_less(*rhs, *lhs));
+            case BinaryOpKind::GreaterEqual:
+                return bool_value(compare_less_equal(*rhs, *lhs));
+            case BinaryOpKind::Equal:
+                return bool_value(lhs->to_unsigned_u128() == rhs->to_unsigned_u128());
+            case BinaryOpKind::NotEqual:
+                return bool_value(lhs->to_unsigned_u128() != rhs->to_unsigned_u128());
+            case BinaryOpKind::BitAnd:
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_bits128(lhs->to_unsigned_u128() &
+                                                    rhs->to_unsigned_u128(),
+                                                shape.bit_width,
+                                                shape.is_unsigned)));
+            case BinaryOpKind::BitOr:
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_bits128(lhs->to_unsigned_u128() |
+                                                    rhs->to_unsigned_u128(),
+                                                shape.bit_width,
+                                                shape.is_unsigned)));
+            case BinaryOpKind::BitXor:
+                return ConstEvalResult::constant(ConstValue::integer(
+                    ConstIntValue::from_bits128(lhs->to_unsigned_u128() ^
+                                                    rhs->to_unsigned_u128(),
+                                                shape.bit_width,
+                                                shape.is_unsigned)));
+            case BinaryOpKind::Shl: {
+                auto result = const_int_shl(*lhs, *rhs);
+                if (!result.value.has_value()) {
+                    return make_error(ConstEvalDiagCode::InvalidShiftAmount,
+                                      "invalid shift amount in constant expression",
+                                      inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::integer(*result.value));
+            }
+            case BinaryOpKind::Shr: {
+                auto result = const_int_shr(*lhs, *rhs);
+                if (!result.value.has_value()) {
+                    return make_error(ConstEvalDiagCode::InvalidShiftAmount,
+                                      "invalid shift amount in constant expression",
+                                      inst.loc);
+                }
+                return ConstEvalResult::constant(ConstValue::integer(*result.value));
+            }
+            case BinaryOpKind::Comma:
+                return ConstEvalResult::constant(*rhs_result.value);
+            case BinaryOpKind::LogicalAnd:
+            case BinaryOpKind::LogicalOr:
+            case BinaryOpKind::Invalid:
                 break;
-            }
-            case BinOpTypes::BITWISE_AND:
-                updated_int = ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() & rhs_int.to_unsigned_u64(),
-                    operand_shape.width).cast(
-                    operand_shape.width, operand_shape.is_unsigned);
-                break;
-            case BinOpTypes::BITWISE_XOR:
-                updated_int = ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() ^ rhs_int.to_unsigned_u64(),
-                    operand_shape.width).cast(
-                    operand_shape.width, operand_shape.is_unsigned);
-                break;
-            case BinOpTypes::BITWISE_OR:
-                updated_int = ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() | rhs_int.to_unsigned_u64(),
-                    operand_shape.width).cast(
-                    operand_shape.width, operand_shape.is_unsigned);
-                break;
-            default:
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "compound assignment operator is not supported by constexpr interpreter yet",
-                    loc);
         }
-
-        auto casted =
-            cast_const_value_to_type(ConstValue::integer(updated_int), lhs_location.value_type);
-        if (!casted.has_value()) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "compound assignment result is not convertible to target type",
-                loc);
-        }
-        assigned_value = *casted;
+        return make_unsupported("unsupported binary operator", inst.loc);
     }
 
-    if (!store_interpreter_location_value(lhs_location, assigned_value)) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "assignment target is not available in current constexpr interpreter scope",
-            loc);
+    bool compare_less(ConstIntValue lhs, ConstIntValue rhs) const {
+        return lhs.is_unsigned ? lhs.to_unsigned_u128() < rhs.to_unsigned_u128()
+                               : lhs.to_signed_i128() < rhs.to_signed_i128();
     }
 
-    return ConstEvalResult::constant(assigned_value);
-}
-
-ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_t depth) {
-    if (!bin || !bin->left || !bin->right) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "unsupported binary expression", bin ? bin->location : SrcLoc());
+    bool compare_less_equal(ConstIntValue lhs, ConstIntValue rhs) const {
+        return lhs.is_unsigned ? lhs.to_unsigned_u128() <= rhs.to_unsigned_u128()
+                               : lhs.to_signed_i128() <= rhs.to_signed_i128();
     }
 
-    if (bin->bop == BinOpTypes::COMMA) {
-        ConstEvalResult lhs_res = eval_expr(bin->left.get(), mode, depth + 1);
-        if (lhs_res.status != ConstEvalStatus::Constant || !lhs_res.value.has_value()) {
-            return lhs_res;
+    ConstEvalResult evaluate_cast(
+        const aburi::cir::Inst& inst,
+        std::unordered_map<uint64_t, ConstValue>& env) {
+        auto type_ref = first_type_operand(file(), inst);
+        std::vector<ValueRef> operands = value_operands(file(), inst);
+        if (!type_ref.has_value() || operands.empty()) {
+            return make_unsupported("cast payload is malformed", inst.loc);
         }
-        return eval_expr(bin->right.get(), mode, depth + 1);
-    }
-
-    if (is_assignment_binop(bin->bop) && g_interpreter_session) {
-        return eval_assignment_to_location(
-            bin->left.get(),
-            bin->right.get(),
-            bin->bop,
-            bin->location,
-            mode,
-            depth);
-    }
-
-    if (is_c23_constexpr_initializer_mode(mode) &&
-        bin->get_type() &&
-        bin->get_type()->kind == TypeKind::Pointer &&
-        (bin->bop == BinOpTypes::ADD || bin->bop == BinOpTypes::SUB)) {
-        if (is_c23_address_constant_expr(bin->left.get(), mode, depth + 1) &&
-            is_c23_integer_constant_expr(bin->right.get(), mode, depth + 1)) {
-            return ConstEvalResult::constant(ConstValue::boolean(true));
-        }
-        if (bin->bop == BinOpTypes::ADD &&
-            is_c23_address_constant_expr(bin->right.get(), mode, depth + 1) &&
-            is_c23_integer_constant_expr(bin->left.get(), mode, depth + 1)) {
-            return ConstEvalResult::constant(ConstValue::boolean(true));
-        }
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "pointer arithmetic expression is not allowed in C23 constexpr initializer",
-            bin->location);
-    }
-
-    IntShape operand_shape = infer_binary_integer_operand_shape(bin);
-
-    if (bin->bop == BinOpTypes::LOGICAL_AND || bin->bop == BinOpTypes::LOGICAL_OR) {
-        ConstEvalResult lhs_res = eval_expr(bin->left.get(), mode, depth + 1);
-        if (lhs_res.status != ConstEvalStatus::Constant || !lhs_res.value.has_value()) {
-            return lhs_res;
-        }
-        bool lhs_truthy = false;
-        if (!const_value_to_bool(lhs_res.value.value(), lhs_truthy)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "logical operation requires scalar constant operands", bin->location);
-        }
-
-        if (bin->bop == BinOpTypes::LOGICAL_AND && !lhs_truthy) {
-            return make_constant_int(ConstIntValue::from_signed(0, 32));
-        }
-        if (bin->bop == BinOpTypes::LOGICAL_OR && lhs_truthy) {
-            return make_constant_int(ConstIntValue::from_signed(1, 32));
-        }
-
-        ConstEvalResult rhs_res = eval_expr(bin->right.get(), mode, depth + 1);
-        if (rhs_res.status != ConstEvalStatus::Constant || !rhs_res.value.has_value()) {
-            return rhs_res;
-        }
-        bool rhs_truthy = false;
-        if (!const_value_to_bool(rhs_res.value.value(), rhs_truthy)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "logical operation requires scalar constant operands", bin->location);
-        }
-        bool result = (bin->bop == BinOpTypes::LOGICAL_AND) ? (lhs_truthy && rhs_truthy)
-                                                             : (lhs_truthy || rhs_truthy);
-        return make_constant_int(ConstIntValue::from_signed(result ? 1 : 0, 32));
-    }
-
-    ConstEvalResult lhs_res = eval_expr(bin->left.get(), mode, depth + 1);
-    if (lhs_res.status != ConstEvalStatus::Constant || !lhs_res.value.has_value()) {
-        return lhs_res;
-    }
-    ConstEvalResult rhs_res = eval_expr(bin->right.get(), mode, depth + 1);
-    if (rhs_res.status != ConstEvalStatus::Constant || !rhs_res.value.has_value()) {
-        return rhs_res;
-    }
-
-    if (bin->bop == BinOpTypes::EQUAL || bin->bop == BinOpTypes::NOT_EQUAL) {
-        bool pointer_like_equal = false;
-        if (try_compare_pointer_like_const_values(
-                lhs_res.value.value(),
-                rhs_res.value.value(),
-                pointer_like_equal)) {
-            bool result =
-                (bin->bop == BinOpTypes::EQUAL) ? pointer_like_equal
-                                                : !pointer_like_equal;
-            return make_constant_int(ConstIntValue::from_signed(result ? 1 : 0, 32));
-        }
-    }
-
-    auto pointer_arithmetic = [&](const ConstValue& pointer_value,
-                                  Expr* pointer_expr,
-                                  const ConstValue& index_value,
-                                  Expr* index_expr,
-                                  int direction)
-        -> std::optional<ConstEvalResult> {
-        if (pointer_value.kind != ConstValueKind::Address ||
-            !pointer_expr ||
-            !index_expr) {
-            return std::nullopt;
-        }
-        auto pointer_type =
-            desugar_type(remove_reference(pointer_expr->get_type()))
-                .as_shared<PointerType>();
-        if (!pointer_type || !pointer_type->pointed_type) {
-            return std::nullopt;
-        }
-        IntShape index_shape = infer_integer_shape(index_expr->get_type());
-        ConstIntValue index_int{};
-        if (!const_value_to_int(index_value, index_shape, index_int)) {
-            return std::nullopt;
-        }
-        int64_t index = index_shape.is_unsigned
-            ? static_cast<int64_t>(index_int.to_unsigned_u64())
-            : index_int.to_signed_i64();
-        int64_t element_size = pointer_type->pointed_type->getWidthBytes();
-        if (element_size <= 0) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "pointer arithmetic requires a complete pointed-to type",
-                bin->location);
-        }
-        ConstAddressValue adjusted = pointer_value.address_value;
-        adjusted.byte_offset +=
-            static_cast<int64_t>(direction) * index * element_size;
-        return ConstEvalResult::constant(
-            ConstValue::address(adjusted.symbol, adjusted.byte_offset));
-    };
-
-    if (bin->bop == BinOpTypes::ADD) {
-        if (auto result = pointer_arithmetic(
-                lhs_res.value.value(),
-                bin->left.get(),
-                rhs_res.value.value(),
-                bin->right.get(),
-                1)) {
-            return std::move(*result);
-        }
-        if (auto result = pointer_arithmetic(
-                rhs_res.value.value(),
-                bin->right.get(),
-                lhs_res.value.value(),
-                bin->left.get(),
-                1)) {
-            return std::move(*result);
-        }
-    } else if (bin->bop == BinOpTypes::SUB) {
-        if (auto result = pointer_arithmetic(
-                lhs_res.value.value(),
-                bin->left.get(),
-                rhs_res.value.value(),
-                bin->right.get(),
-                -1)) {
-            return std::move(*result);
-        }
-    }
-
-    ConstIntValue lhs_int{};
-    ConstIntValue rhs_int{};
-    if (!const_value_to_int(lhs_res.value.value(), operand_shape, lhs_int) ||
-        !const_value_to_int(rhs_res.value.value(), operand_shape, rhs_int)) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "binary constant evaluation currently supports integer-like operands",
-            bin->location);
-    }
-
-    auto make_cmp_result = [&](bool v) {
-        return make_constant_int(ConstIntValue::from_signed(v ? 1 : 0, 32));
-    };
-
-    switch (bin->bop) {
-        case BinOpTypes::ADD:
-            return make_constant_int(const_int_add(lhs_int, rhs_int));
-        case BinOpTypes::SUB:
-            return make_constant_int(const_int_sub(lhs_int, rhs_int));
-        case BinOpTypes::MULT:
-            return make_constant_int(const_int_mul(lhs_int, rhs_int));
-        case BinOpTypes::DIV: {
-            auto div_res = const_int_div(lhs_int, rhs_int);
-            if (!div_res.value.has_value()) {
-                return make_error(ConstEvalDiagCode::DivisionByZero,
-                    "division by zero in constant expression", bin->location);
-            }
-            return make_constant_int(div_res.value.value());
-        }
-        case BinOpTypes::MOD: {
-            auto mod_res = const_int_mod(lhs_int, rhs_int);
-            if (!mod_res.value.has_value()) {
-                return make_error(ConstEvalDiagCode::DivisionByZero,
-                    "modulo by zero in constant expression", bin->location);
-            }
-            return make_constant_int(mod_res.value.value());
-        }
-        case BinOpTypes::BITWISE_AND:
-            return make_constant_int(ConstIntValue::from_unsigned(
-                lhs_int.to_unsigned_u64() & rhs_int.to_unsigned_u64(), operand_shape.width)
-                .cast(operand_shape.width, operand_shape.is_unsigned));
-        case BinOpTypes::BITWISE_OR:
-            return make_constant_int(ConstIntValue::from_unsigned(
-                lhs_int.to_unsigned_u64() | rhs_int.to_unsigned_u64(), operand_shape.width)
-                .cast(operand_shape.width, operand_shape.is_unsigned));
-        case BinOpTypes::BITWISE_XOR:
-            return make_constant_int(ConstIntValue::from_unsigned(
-                lhs_int.to_unsigned_u64() ^ rhs_int.to_unsigned_u64(), operand_shape.width)
-                .cast(operand_shape.width, operand_shape.is_unsigned));
-        case BinOpTypes::SHIFT_LEFT: {
-            auto shl_res = const_int_shl(lhs_int, rhs_int);
-            if (!shl_res.value.has_value()) {
-                return make_error(ConstEvalDiagCode::InvalidShiftAmount,
-                    "invalid left-shift amount in constant expression", bin->location);
-            }
-            return make_constant_int(shl_res.value.value());
-        }
-        case BinOpTypes::SHIFT_RIGHT: {
-            auto shr_res = const_int_shr(lhs_int, rhs_int);
-            if (!shr_res.value.has_value()) {
-                return make_error(ConstEvalDiagCode::InvalidShiftAmount,
-                    "invalid right-shift amount in constant expression", bin->location);
-            }
-            return make_constant_int(shr_res.value.value());
-        }
-        case BinOpTypes::LESS_EQUAL_THAN:
-            if (operand_shape.is_unsigned) {
-                return make_cmp_result(lhs_int.to_unsigned_u64() <= rhs_int.to_unsigned_u64());
-            }
-            return make_cmp_result(lhs_int.to_signed_i64() <= rhs_int.to_signed_i64());
-        case BinOpTypes::LESS_THAN:
-            if (operand_shape.is_unsigned) {
-                return make_cmp_result(lhs_int.to_unsigned_u64() < rhs_int.to_unsigned_u64());
-            }
-            return make_cmp_result(lhs_int.to_signed_i64() < rhs_int.to_signed_i64());
-        case BinOpTypes::GREATER_EQUAL_THAN:
-            if (operand_shape.is_unsigned) {
-                return make_cmp_result(lhs_int.to_unsigned_u64() >= rhs_int.to_unsigned_u64());
-            }
-            return make_cmp_result(lhs_int.to_signed_i64() >= rhs_int.to_signed_i64());
-        case BinOpTypes::GREATER_THAN:
-            if (operand_shape.is_unsigned) {
-                return make_cmp_result(lhs_int.to_unsigned_u64() > rhs_int.to_unsigned_u64());
-            }
-            return make_cmp_result(lhs_int.to_signed_i64() > rhs_int.to_signed_i64());
-        case BinOpTypes::EQUAL:
-            return make_cmp_result(lhs_int.to_unsigned_u64() == rhs_int.to_unsigned_u64());
-        case BinOpTypes::NOT_EQUAL:
-            return make_cmp_result(lhs_int.to_unsigned_u64() != rhs_int.to_unsigned_u64());
-        default:
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "binary operator not supported by consteval engine yet", bin->location);
-    }
-}
-
-ConstEvalResult eval_cast_expr(Expr* operand, QualType target_type,
-    SrcLoc loc, ConstEvalMode mode, size_t depth, bool allow_float_to_int) {
-    if (!operand) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "cast expression missing operand", loc);
-    }
-    if (is_c23_constexpr_initializer_mode(mode) &&
-        target_type &&
-        target_type->kind == TypeKind::Pointer) {
-        if (is_c23_address_constant_expr(operand, mode, depth + 1)) {
-            return ConstEvalResult::constant(ConstValue::boolean(true));
-        }
-        ConstEvalResult inner = eval_expr(operand, mode, depth + 1);
+        ConstEvalResult inner = value_for_ref(operands[0], env);
         if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
             return inner;
         }
-        if (!is_zero_like_constant(inner.value.value())) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "pointer cast operand is not a null pointer constant", loc);
+
+        TypeId target = file().resolved_type(type_ref->type);
+        if (!file().valid(target)) {
+            return make_unsupported("cast target type is invalid", inst.loc);
         }
-        return ConstEvalResult::constant(ConstValue::boolean(true));
-    }
-    if (is_cpp_non_type_template_argument_mode(mode) && target_type) {
-        ConstEvalResult inner = eval_expr(operand, mode, depth + 1);
-        if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
-            return inner;
+        TypeKind target_kind = file().type(target).kind;
+        if (target_kind == TypeKind::LValueReference ||
+            target_kind == TypeKind::RValueReference) {
+            if (inner.value->kind == ConstValueKind::Address) {
+                return ConstEvalResult::constant(*inner.value);
+            }
+            return make_unsupported(
+                "reference cast operand is not an address constant",
+                inst.loc);
         }
-        if (target_type->kind == TypeKind::Pointer ||
-            target_type->kind == TypeKind::MemberPointer ||
-            (target_type->kind == TypeKind::Builtin &&
-             static_cast<const BuiltinType*>(target_type.get_shared().get())
-                     ->builtin_kind == BuiltinTypes::NullPtr)) {
-            if (inner.value->kind == ConstValueKind::Address &&
-                target_type->kind == TypeKind::Pointer) {
-                return inner;
+        if (target_kind == TypeKind::Pointer) {
+            if (inner.value->kind == ConstValueKind::Address) {
+                return ConstEvalResult::constant(*inner.value);
             }
-            if (inner.value->kind == ConstValueKind::MemberPointer &&
-                target_type->kind == TypeKind::MemberPointer) {
-                return inner;
-            }
-            if (is_zero_like_constant(inner.value.value()) ||
-                inner.value->kind == ConstValueKind::NullPointer) {
+            if (inner.value->is_null(ConstNullKind::Nullptr)) {
                 return ConstEvalResult::constant(ConstValue::null_pointer());
             }
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "pointer cast operand is not a supported non-type template argument constant",
-                loc);
-        }
-    }
-    if (target_type &&
-        (target_type->kind == TypeKind::Pointer ||
-         target_type->kind == TypeKind::MemberPointer ||
-         is_nullptr_type(target_type))) {
-        ConstEvalResult inner = eval_expr(operand, mode, depth + 1);
-        if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
-            return inner;
-        }
-        if (inner.value->kind == ConstValueKind::Address &&
-            target_type->kind == TypeKind::Pointer) {
-            return inner;
-        }
-        if (inner.value->kind == ConstValueKind::MemberPointer &&
-            target_type->kind == TypeKind::MemberPointer) {
-            return inner;
-        }
-        if (inner.value->kind == ConstValueKind::NullPointer ||
-            is_zero_like_constant(inner.value.value())) {
-            return ConstEvalResult::constant(ConstValue::null_pointer());
-        }
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "pointer cast operand is not a null pointer constant",
-            loc);
-    }
-    if (!target_type || !target_type->isInteger()) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "cast target type is not supported by consteval engine yet", loc);
-    }
-
-    ConstEvalResult inner = eval_expr(operand, mode, depth + 1);
-    if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
-        return inner;
-    }
-
-    IntShape shape = infer_integer_shape(target_type);
-    ConstIntValue casted{};
-    if (allow_float_to_int && inner.value->kind == ConstValueKind::Floating) {
-        long double fv = inner.value->float_value.value;
-        if (!std::isfinite(fv)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "cast operand is not an integer-like constant", loc);
-        }
-        long double truncated = std::trunc(fv);
-        if (truncated < static_cast<long double>(std::numeric_limits<int64_t>::min()) ||
-            truncated > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "cast operand is not an integer-like constant", loc);
-        }
-        int64_t as_i64 = static_cast<int64_t>(truncated);
-        casted = shape.is_unsigned
-            ? ConstIntValue::from_unsigned(static_cast<uint64_t>(as_i64), shape.width)
-            : ConstIntValue::from_signed(as_i64, shape.width);
-        return make_constant_int(casted);
-    }
-
-    if (!const_value_to_int(inner.value.value(), shape, casted)) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "cast operand is not an integer-like constant", loc);
-    }
-    return make_constant_int(casted);
-}
-
-// ====== Interpreter statement execution ======
-
-InterpExecResult eval_interpreter_variable_decl(VariableDecl* variable_decl,
-                                                ConstEvalMode mode,
-                                                size_t depth) {
-    if (!variable_decl) {
-        return make_interp_continue_result();
-    }
-
-    if (variable_decl->type &&
-        canonical_type_kind(variable_decl->type) == TypeKind::Reference) {
-        if (!variable_decl->init) {
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter reference declaration requires initializer",
-                variable_decl->location));
-        }
-        InterpLocation bound_location;
-        if (!resolve_expr_location(
-                variable_decl->init.get(),
-                mode,
-                depth + 1,
-                bound_location) ||
-            !bound_location.root_symbol) {
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter could not bind local reference",
-                variable_decl->location));
-        }
-        ConstValue address_value = ConstValue::address(
-            bound_location.root_symbol,
-            bound_location.byte_offset);
-        if (!bind_interpreter_local(
-                variable_decl->sym,
-                variable_decl->name,
-                address_value)) {
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to bind local reference",
-                variable_decl->location));
-        }
-        return make_interp_continue_result();
-    }
-
-    std::optional<ConstValue> initial_value;
-    if (variable_decl->init) {
-        ConstEvalResult init_result =
-            eval_expr(variable_decl->init.get(), mode, depth + 1);
-        if (init_result.status != ConstEvalStatus::Constant ||
-            !init_result.value.has_value()) {
-            return make_interp_fail_result(std::move(init_result));
-        }
-        initial_value = init_result.value.value();
-    } else {
-        initial_value = default_const_value_for_type(variable_decl->type);
-    }
-    if (!initial_value.has_value()) {
-        return make_interp_fail_result(make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter could not initialize local variable",
-            variable_decl->location));
-    }
-
-    auto casted = cast_const_value_to_type(initial_value.value(), variable_decl->type);
-    if (!casted.has_value()) {
-        return make_interp_fail_result(make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter local initialization cast failed",
-            variable_decl->location));
-    }
-
-    if (!bind_interpreter_local(variable_decl->sym, variable_decl->name, casted.value())) {
-        return make_interp_fail_result(make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter failed to bind local variable",
-            variable_decl->location));
-    }
-    return make_interp_continue_result();
-}
-
-InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t depth) {
-    if (!stmt) {
-        return make_interp_continue_result();
-    }
-    if (depth > kMaxConstEvalDepth) {
-        return make_interp_fail_result(make_error(ConstEvalDiagCode::RecursionLimitExceeded,
-            "constexpr recursion depth exceeded", stmt->location));
-    }
-    if (!g_interpreter_session || !g_interpreter_session->state) {
-        return make_interp_fail_result(make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter session is unavailable", stmt->location));
-    }
-    if (!g_interpreter_session->state->consume_step()) {
-        return make_interp_fail_result(make_error(ConstEvalDiagCode::StepLimitExceeded,
-            "constexpr function interpreter step limit exceeded", stmt->location));
-    }
-
-    if (auto* compound_stmt = dyn_cast<CompoundStmt>(stmt)) {
-        push_interpreter_scope();
-        for (const auto& child : compound_stmt->statements) {
-            InterpExecResult child_result = eval_interpreter_stmt(child.get(), mode, depth + 1);
-            if (child_result.kind != InterpExecResult::Kind::Continue) {
-                pop_interpreter_scope();
-                return child_result;
+            if (inner.value->is_null(ConstNullKind::Pointer)) {
+                return ConstEvalResult::constant(ConstValue::null_pointer());
             }
-        }
-        pop_interpreter_scope();
-        return make_interp_continue_result();
-    }
-
-    if (auto* decl_stmt = dyn_cast<Decl2Stmt>(stmt)) {
-        for (const auto& decl : decl_stmt->decls) {
-            if (!decl) {
-                continue;
-            }
-            if (isa<NopDecl>(decl.get()) || isa<TypedefDecl>(decl.get())) {
-                continue;
-            }
-            auto* variable_decl = dyn_cast<VariableDecl>(decl.get());
-            if (!variable_decl) {
-                return make_interp_fail_result(make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter declaration support is currently limited to local variables",
-                    decl->location));
-            }
-            InterpExecResult decl_result =
-                eval_interpreter_variable_decl(variable_decl, mode, depth + 1);
-            if (decl_result.kind != InterpExecResult::Kind::Continue) {
-                return decl_result;
-            }
-        }
-        return make_interp_continue_result();
-    }
-
-    if (auto* if_stmt = dyn_cast<IfStmt>(stmt)) {
-        bool has_statement_scope =
-            if_stmt->scope || if_stmt->init_stmt ||
-            if_stmt->condition.declaration;
-        if (has_statement_scope) {
-            push_interpreter_scope();
-        }
-        if (if_stmt->init_stmt) {
-            InterpExecResult init_result =
-                eval_interpreter_stmt(if_stmt->init_stmt.get(), mode, depth + 1);
-            if (init_result.kind != InterpExecResult::Kind::Continue) {
-                if (has_statement_scope) {
-                    pop_interpreter_scope();
-                }
-                return init_result;
-            }
-        }
-        if (if_stmt->condition.declaration) {
-            InterpExecResult condition_decl_result =
-                eval_interpreter_stmt(
-                    if_stmt->condition.declaration.get(), mode, depth + 1);
-            if (condition_decl_result.kind != InterpExecResult::Kind::Continue) {
-                if (has_statement_scope) {
-                    pop_interpreter_scope();
-                }
-                return condition_decl_result;
-            }
-        }
-        bool condition_truthy = false;
-        if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
-            if_stmt->constexpr_condition_value.has_value()) {
-            condition_truthy = *if_stmt->constexpr_condition_value;
-        } else {
-            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
-            if (!eval_condition_truthiness(
-                    if_stmt->condition.expression.get(),
-                    mode,
-                    depth + 1,
-                    condition_truthy,
-                    condition_failure)) {
-                if (has_statement_scope) {
-                    pop_interpreter_scope();
-                }
-                return make_interp_fail_result(std::move(condition_failure));
-            }
-        }
-
-        InterpExecResult branch_result = make_interp_continue_result();
-        if (condition_truthy) {
-            branch_result =
-                eval_interpreter_stmt(if_stmt->then_stmt.get(), mode, depth + 1);
-        } else if (if_stmt->else_stmt) {
-            branch_result =
-                eval_interpreter_stmt(if_stmt->else_stmt.get(), mode, depth + 1);
-        }
-        if (has_statement_scope) {
-            pop_interpreter_scope();
-        }
-        return branch_result;
-    }
-
-    if (auto* while_stmt = dyn_cast<WhileStmt>(stmt)) {
-        while (true) {
-            bool has_condition_scope =
-                while_stmt->scope || while_stmt->condition.declaration;
-            if (has_condition_scope) {
-                push_interpreter_scope();
-            }
-            if (while_stmt->condition.declaration) {
-                InterpExecResult condition_decl_result =
-                    eval_interpreter_stmt(
-                        while_stmt->condition.declaration.get(), mode, depth + 1);
-                if (condition_decl_result.kind != InterpExecResult::Kind::Continue) {
-                    if (has_condition_scope) {
-                        pop_interpreter_scope();
+            if (inner.value->kind == ConstValueKind::Integer) {
+                unsigned pointer_bits = file().target_info_ptr()
+                    ? file().target_info_ptr()->pointer_width
+                    : 64;
+                if (pointer_bits > 0 && pointer_bits <= 64) {
+                    uint64_t bits = inner.value->int_value
+                        .cast(pointer_bits, true)
+                        .to_unsigned_u64();
+                    if (bits == 0) {
+                        return ConstEvalResult::constant(
+                            ConstValue::null_pointer());
                     }
-                    return condition_decl_result;
-                }
-            }
-            bool condition_truthy = false;
-            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
-            if (!eval_condition_truthiness(
-                    while_stmt->condition.expression.get(),
-                    mode,
-                    depth + 1,
-                    condition_truthy,
-                    condition_failure)) {
-                if (has_condition_scope) {
-                    pop_interpreter_scope();
-                }
-                return make_interp_fail_result(std::move(condition_failure));
-            }
-            if (!condition_truthy) {
-                if (has_condition_scope) {
-                    pop_interpreter_scope();
-                }
-                return make_interp_continue_result();
-            }
-
-            InterpExecResult body_result =
-                eval_interpreter_stmt(while_stmt->body_stmt.get(), mode, depth + 1);
-            if (body_result.kind == InterpExecResult::Kind::Continue ||
-                body_result.kind == InterpExecResult::Kind::LoopContinue) {
-                if (has_condition_scope) {
-                    pop_interpreter_scope();
-                }
-                continue;
-            }
-            if (body_result.kind == InterpExecResult::Kind::Break) {
-                if (has_condition_scope) {
-                    pop_interpreter_scope();
-                }
-                return make_interp_continue_result();
-            }
-            if (has_condition_scope) {
-                pop_interpreter_scope();
-            }
-            return body_result;
-        }
-    }
-
-    if (auto* do_while_stmt = dyn_cast<DoWhileStmt>(stmt)) {
-        while (true) {
-            InterpExecResult body_result =
-                eval_interpreter_stmt(do_while_stmt->body_stmt.get(), mode, depth + 1);
-            if (body_result.kind == InterpExecResult::Kind::Break) {
-                return make_interp_continue_result();
-            }
-            if (body_result.kind != InterpExecResult::Kind::Continue &&
-                body_result.kind != InterpExecResult::Kind::LoopContinue) {
-                return body_result;
-            }
-
-            bool condition_truthy = false;
-            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
-            if (!eval_condition_truthiness(
-                    do_while_stmt->condition.get(),
-                    mode,
-                    depth + 1,
-                    condition_truthy,
-                    condition_failure)) {
-                return make_interp_fail_result(std::move(condition_failure));
-            }
-            if (!condition_truthy) {
-                return make_interp_continue_result();
-            }
-        }
-    }
-
-    if (auto* for_stmt = dyn_cast<ForStmt>(stmt)) {
-        push_interpreter_scope();
-        if (for_stmt->init) {
-            InterpExecResult init_result =
-                eval_interpreter_stmt(for_stmt->init.get(), mode, depth + 1);
-            if (init_result.kind != InterpExecResult::Kind::Continue) {
-                pop_interpreter_scope();
-                return init_result;
-            }
-        }
-
-        while (true) {
-            bool has_condition_scope = for_stmt->cond.declaration != nullptr;
-            if (has_condition_scope) {
-                push_interpreter_scope();
-            }
-            if (for_stmt->cond) {
-                if (for_stmt->cond.declaration) {
-                    InterpExecResult condition_decl_result =
-                        eval_interpreter_stmt(
-                            for_stmt->cond.declaration.get(), mode, depth + 1);
-                    if (condition_decl_result.kind !=
-                        InterpExecResult::Kind::Continue) {
-                        pop_interpreter_scope();
-                        pop_interpreter_scope();
-                        return condition_decl_result;
-                    }
-                }
-                bool condition_truthy = false;
-                ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
-                if (!eval_condition_truthiness(
-                        for_stmt->cond.expression.get(),
-                        mode,
-                        depth + 1,
-                        condition_truthy,
-                        condition_failure)) {
-                    if (has_condition_scope) {
-                        pop_interpreter_scope();
-                    }
-                    pop_interpreter_scope();
-                    return make_interp_fail_result(std::move(condition_failure));
-                }
-                if (!condition_truthy) {
-                    if (has_condition_scope) {
-                        pop_interpreter_scope();
-                    }
-                    pop_interpreter_scope();
-                    return make_interp_continue_result();
-                }
-            }
-
-            InterpExecResult body_result =
-                eval_interpreter_stmt(for_stmt->body_stmt.get(), mode, depth + 1);
-            if (body_result.kind == InterpExecResult::Kind::Return ||
-                body_result.kind == InterpExecResult::Kind::Fail) {
-                if (has_condition_scope) {
-                    pop_interpreter_scope();
-                }
-                pop_interpreter_scope();
-                return body_result;
-            }
-            if (body_result.kind == InterpExecResult::Kind::Break) {
-                if (has_condition_scope) {
-                    pop_interpreter_scope();
-                }
-                pop_interpreter_scope();
-                return make_interp_continue_result();
-            }
-
-            if (for_stmt->action) {
-                ConstEvalResult action_result =
-                    eval_expr(for_stmt->action.get(), mode, depth + 1);
-                if (action_result.status != ConstEvalStatus::Constant ||
-                    !action_result.value.has_value()) {
-                    if (has_condition_scope) {
-                        pop_interpreter_scope();
-                    }
-                    pop_interpreter_scope();
-                    return make_interp_fail_result(std::move(action_result));
-                }
-            }
-            if (has_condition_scope) {
-                pop_interpreter_scope();
-            }
-        }
-    }
-
-    if (auto* range_for = dyn_cast<CppRangeForStmt>(stmt)) {
-        push_interpreter_scope();
-        if (range_for->init_statement) {
-            InterpExecResult init_result =
-                eval_interpreter_stmt(range_for->init_statement.get(), mode, depth + 1);
-            if (init_result.kind != InterpExecResult::Kind::Continue) {
-                pop_interpreter_scope();
-                return init_result;
-            }
-        }
-        for (const auto& decl : range_for->range_declaration_side_decls) {
-            if (auto* variable_decl = dyn_cast<VariableDecl>(decl.get())) {
-                InterpExecResult side_result =
-                    eval_interpreter_variable_decl(variable_decl, mode, depth + 1);
-                if (side_result.kind != InterpExecResult::Kind::Continue) {
-                    pop_interpreter_scope();
-                    return side_result;
-                }
-            }
-        }
-        for (Decl* decl : {range_for->range_variable.get(),
-                           range_for->begin_variable.get(),
-                           range_for->end_variable.get()}) {
-            auto* variable_decl = dyn_cast<VariableDecl>(decl);
-            if (!variable_decl) {
-                continue;
-            }
-            InterpExecResult hidden_result =
-                eval_interpreter_variable_decl(variable_decl, mode, depth + 1);
-            if (hidden_result.kind != InterpExecResult::Kind::Continue) {
-                pop_interpreter_scope();
-                return hidden_result;
-            }
-        }
-
-        while (true) {
-            bool condition_truthy = false;
-            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
-            if (!eval_condition_truthiness(
-                    range_for->condition.get(),
-                    mode,
-                    depth + 1,
-                    condition_truthy,
-                    condition_failure)) {
-                pop_interpreter_scope();
-                return make_interp_fail_result(std::move(condition_failure));
-            }
-            if (!condition_truthy) {
-                pop_interpreter_scope();
-                return make_interp_continue_result();
-            }
-
-            push_interpreter_scope();
-            if (auto* loop_variable =
-                    dyn_cast<VariableDecl>(range_for->loop_variable.get())) {
-                InterpExecResult loop_var_result =
-                    eval_interpreter_variable_decl(loop_variable, mode, depth + 1);
-                if (loop_var_result.kind != InterpExecResult::Kind::Continue) {
-                    pop_interpreter_scope();
-                    pop_interpreter_scope();
-                    return loop_var_result;
-                }
-            }
-            InterpExecResult body_result =
-                eval_interpreter_stmt(range_for->body_stmt.get(), mode, depth + 1);
-            pop_interpreter_scope();
-            if (body_result.kind == InterpExecResult::Kind::Return ||
-                body_result.kind == InterpExecResult::Kind::Fail) {
-                pop_interpreter_scope();
-                return body_result;
-            }
-            if (body_result.kind == InterpExecResult::Kind::Break) {
-                pop_interpreter_scope();
-                return make_interp_continue_result();
-            }
-
-            if (range_for->increment) {
-                ConstEvalResult increment_result =
-                    eval_expr(range_for->increment.get(), mode, depth + 1);
-                if (increment_result.status != ConstEvalStatus::Constant ||
-                    !increment_result.value.has_value()) {
-                    pop_interpreter_scope();
-                    return make_interp_fail_result(std::move(increment_result));
-                }
-            }
-        }
-    }
-
-    if (auto* switch_stmt = dyn_cast<SwitchStmt>(stmt)) {
-        bool has_statement_scope =
-            switch_stmt->scope || switch_stmt->condition.declaration;
-        if (has_statement_scope) {
-            push_interpreter_scope();
-        }
-        if (switch_stmt->condition.declaration) {
-            InterpExecResult condition_decl_result =
-                eval_interpreter_stmt(
-                    switch_stmt->condition.declaration.get(), mode, depth + 1);
-            if (condition_decl_result.kind != InterpExecResult::Kind::Continue) {
-                if (has_statement_scope) {
-                    pop_interpreter_scope();
-                }
-                return condition_decl_result;
-            }
-        }
-        ConstEvalResult cond_result =
-            eval_expr(switch_stmt->condition.expression.get(), mode, depth + 1);
-        if (cond_result.status != ConstEvalStatus::Constant ||
-            !cond_result.value.has_value()) {
-            if (has_statement_scope) {
-                pop_interpreter_scope();
-            }
-            return make_interp_fail_result(std::move(cond_result));
-        }
-
-        IntShape switch_shape =
-            infer_integer_shape(switch_stmt->condition.expression->get_type());
-        ConstIntValue switch_value{};
-        if (!const_value_to_int(*cond_result.value, switch_shape, switch_value)) {
-            if (has_statement_scope) {
-                pop_interpreter_scope();
-            }
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "switch condition must be integer-like in constexpr interpreter",
-                switch_stmt->condition.expression->location));
-        }
-
-        std::vector<SwitchEntry> entries;
-        collect_switch_entries_from_stmt(switch_stmt->stmt.get(), entries);
-
-        size_t start_index = entries.size();
-        size_t default_index = entries.size();
-        for (size_t entry_index = 0; entry_index < entries.size(); ++entry_index) {
-            for (const auto& label : entries[entry_index].labels) {
-                if (label.is_default) {
-                    if (default_index == entries.size()) {
-                        default_index = entry_index;
-                    }
-                    continue;
-                }
-                if (!label.const_expr) {
-                    continue;
-                }
-                ConstEvalResult case_start =
-                    eval_expr(const_cast<Expr*>(label.const_expr), mode, depth + 1);
-                if (case_start.status != ConstEvalStatus::Constant ||
-                    !case_start.value.has_value()) {
-                    if (has_statement_scope) {
-                        pop_interpreter_scope();
-                    }
-                    return make_interp_fail_result(std::move(case_start));
-                }
-                ConstIntValue case_start_int{};
-                if (!const_value_to_int(*case_start.value, switch_shape, case_start_int)) {
-                    if (has_statement_scope) {
-                        pop_interpreter_scope();
-                    }
-                    return make_interp_fail_result(make_not_evaluated(
-                        ConstEvalDiagCode::UnsupportedExpression,
-                        "switch case label must be integer-like in constexpr interpreter",
-                        label.const_expr->location));
-                }
-
-                bool matches = false;
-                if (label.range_end) {
-                    ConstEvalResult case_end =
-                        eval_expr(const_cast<Expr*>(label.range_end), mode, depth + 1);
-                    if (case_end.status != ConstEvalStatus::Constant ||
-                        !case_end.value.has_value()) {
-                        if (has_statement_scope) {
-                            pop_interpreter_scope();
-                        }
-                        return make_interp_fail_result(std::move(case_end));
-                    }
-                    ConstIntValue case_end_int{};
-                    if (!const_value_to_int(*case_end.value, switch_shape, case_end_int)) {
-                        if (has_statement_scope) {
-                            pop_interpreter_scope();
-                        }
-                        return make_interp_fail_result(make_not_evaluated(
-                            ConstEvalDiagCode::UnsupportedExpression,
-                            "switch case range must be integer-like in constexpr interpreter",
-                            label.range_end->location));
-                    }
-                    if (switch_shape.is_unsigned) {
-                        uint64_t current = switch_value.to_unsigned_u64();
-                        matches =
-                            current >= case_start_int.to_unsigned_u64() &&
-                            current <= case_end_int.to_unsigned_u64();
+                    ConstAddressValue absolute;
+                    if (pointer_bits == 64 &&
+                        bits >
+                            static_cast<uint64_t>(
+                                std::numeric_limits<int64_t>::max())) {
+                        absolute.byte_offset =
+                            std::numeric_limits<int64_t>::min() +
+                            static_cast<int64_t>(
+                                bits - (uint64_t{1} << 63));
                     } else {
-                        int64_t current = switch_value.to_signed_i64();
-                        matches =
-                            current >= case_start_int.to_signed_i64() &&
-                            current <= case_end_int.to_signed_i64();
+                        absolute.byte_offset = static_cast<int64_t>(bits);
                     }
-                } else if (switch_shape.is_unsigned) {
-                    matches =
-                        switch_value.to_unsigned_u64() ==
-                        case_start_int.to_unsigned_u64();
+                    return ConstEvalResult::constant(
+                        ConstValue::address_value_of(absolute));
+                }
+            }
+            if (std::optional<int64_t> as_int = inner.value->try_as_int64()) {
+
+                if (*as_int == 0) {
+                    return ConstEvalResult::constant(ConstValue::null_pointer());
+                }
+                ConstAddressValue absolute;
+                absolute.byte_offset = *as_int;
+                return ConstEvalResult::constant(
+                    ConstValue::address_value_of(absolute));
+            }
+            return make_unsupported(
+                "pointer cast is not a constant expression", inst.loc);
+        }
+        if (target_kind == TypeKind::MemberPointer) {
+            if (inner.value->is_null(ConstNullKind::MemberPointer) ||
+                inner.value->kind == ConstValueKind::MemberPointer) {
+                return ConstEvalResult::constant(*inner.value);
+            }
+            if (inner.value->is_null(ConstNullKind::Nullptr)) {
+                return ConstEvalResult::constant(
+                    ConstValue::null_member_pointer());
+            }
+            if (std::optional<int64_t> as_int = inner.value->try_as_int64();
+                as_int && *as_int == 0) {
+                return ConstEvalResult::constant(
+                    ConstValue::null_member_pointer());
+            }
+            return make_unsupported(
+                "member pointer cast is not a constant expression", inst.loc);
+        }
+        if (is_bool_type(file(), target)) {
+
+            bool truthy = false;
+            if (is_truthy(*inner.value, truthy)) {
+                return ConstEvalResult::constant(ConstValue::boolean(truthy));
+            }
+            return make_unsupported(
+                "boolean conversion operand is not a scalar constant", inst.loc);
+        }
+        {
+            aburi::cir::TypeId cast_resolved = file().resolved_type(target);
+            bool target_is_complex = file().valid(cast_resolved) &&
+                file().type(cast_resolved).kind == aburi::cir::TypeKind::Complex;
+            if (target_is_complex) {
+                const auto* complex =
+                    std::get_if<aburi::cir::ComplexTypePayload>(
+                        &file().type_payload(cast_resolved));
+                bool target_integer = complex &&
+                    aburi::cir::is_integer_like_type(
+                        file(), complex->element_type.type);
+                if (target_integer) {
+                    aburi::cir::IntegerTypeShape shape =
+                        aburi::cir::integer_shape_for_type(
+                            file(), complex->element_type.type);
+                    if (inner.value->kind == ConstValueKind::Complex) {
+                        if (!inner.value->complex_value.has_integer_components) {
+
+                            auto real = aburi::floating::to_integer(
+                                inner.value->complex_value.real,
+                                shape.bit_width, !shape.is_unsigned);
+                            auto imag = aburi::floating::to_integer(
+                                inner.value->complex_value.imag,
+                                shape.bit_width, !shape.is_unsigned);
+                            if (!real || !imag) {
+                                return make_unsupported(
+                                    "floating complex to integer complex "
+                                    "conversion is not constant",
+                                    inst.loc);
+                            }
+                            return ConstEvalResult::constant(
+                                ConstValue::complex_integer(
+                                    ConstIntValue::from_bits128(
+                                        *real, shape.bit_width,
+                                        shape.is_unsigned),
+                                    ConstIntValue::from_bits128(
+                                        *imag, shape.bit_width,
+                                        shape.is_unsigned)));
+                        }
+                        return ConstEvalResult::constant(
+                            ConstValue::complex_integer(
+                                inner.value->complex_value.integer_real.cast(
+                                    shape.bit_width, shape.is_unsigned),
+                                inner.value->complex_value.integer_imag.cast(
+                                    shape.bit_width, shape.is_unsigned)));
+                    }
+                    auto real = value_to_int(*inner.value, shape);
+                    if (real) {
+                        ConstIntValue zero =
+                            ConstIntValue::from_unsigned(0, shape.bit_width)
+                                .cast(shape.bit_width, shape.is_unsigned);
+                        return ConstEvalResult::constant(
+                            ConstValue::complex_integer(*real, zero));
+                    }
+                    return make_unsupported(
+                        "integer complex conversion operand is not constant",
+                        inst.loc);
+                }
+                aburi::cir::FloatingSemantics semantics = complex
+                    ? aburi::floating::semantics_for_type(
+                          file(), complex->element_type.type)
+                    : aburi::cir::FloatingSemantics::Invalid;
+                if (inner.value->kind == ConstValueKind::Complex) {
+                    aburi::floating::FloatResult real;
+                    aburi::floating::FloatResult imag;
+                    if (inner.value->complex_value.has_integer_components) {
+                        const ConstIntValue& source_real =
+                            inner.value->complex_value.integer_real;
+                        const ConstIntValue& source_imag =
+                            inner.value->complex_value.integer_imag;
+                        real = aburi::floating::from_integer(
+                            source_real.to_unsigned_u128(),
+                            source_real.bit_width, !source_real.is_unsigned,
+                            semantics);
+                        imag = aburi::floating::from_integer(
+                            source_imag.to_unsigned_u128(),
+                            source_imag.bit_width, !source_imag.is_unsigned,
+                            semantics);
+                    } else {
+                        real = aburi::floating::convert(
+                            inner.value->complex_value.real, semantics);
+                        imag = aburi::floating::convert(
+                            inner.value->complex_value.imag, semantics);
+                    }
+                    if (real && imag &&
+                        !floating_status_disqualifies(real.status) &&
+                        !floating_status_disqualifies(imag.status)) {
+                        return ConstEvalResult::constant(
+                            ConstValue::complex(*real, *imag));
+                    }
+                    return make_unsupported(
+                        "complex conversion components cannot be represented",
+                        inst.loc);
+                }
+                auto real = value_to_float(*inner.value, semantics);
+                if (real && !floating_status_disqualifies(real.status)) {
+                    return ConstEvalResult::constant(ConstValue::complex(
+                        *real, aburi::floating::zero(semantics)));
+                }
+                return make_unsupported(
+                    "complex conversion operand is not a scalar constant", inst.loc);
+            }
+            if (inner.value->kind == ConstValueKind::Complex) {
+
+                if (inner.value->complex_value.has_integer_components) {
+                    inner.value = ConstValue::integer(
+                        inner.value->complex_value.integer_real);
                 } else {
-                    matches =
-                        switch_value.to_signed_i64() ==
-                        case_start_int.to_signed_i64();
-                }
-
-                if (matches) {
-                    start_index = entry_index;
-                    break;
-                }
-            }
-            if (start_index != entries.size()) {
-                break;
-            }
-        }
-
-        if (start_index == entries.size()) {
-            if (default_index == entries.size()) {
-                if (has_statement_scope) {
-                    pop_interpreter_scope();
-                }
-                return make_interp_continue_result();
-            }
-            start_index = default_index;
-        }
-
-        for (size_t entry_index = start_index; entry_index < entries.size(); ++entry_index) {
-            InterpExecResult entry_result =
-                eval_interpreter_stmt(entries[entry_index].body, mode, depth + 1);
-            if (entry_result.kind == InterpExecResult::Kind::Continue) {
-                continue;
-            }
-            if (entry_result.kind == InterpExecResult::Kind::Break) {
-                if (has_statement_scope) {
-                    pop_interpreter_scope();
-                }
-                return make_interp_continue_result();
-            }
-            if (has_statement_scope) {
-                pop_interpreter_scope();
-            }
-            return entry_result;
-        }
-        if (has_statement_scope) {
-            pop_interpreter_scope();
-        }
-        return make_interp_continue_result();
-    }
-
-    if (auto* return_stmt = dyn_cast<ReturnStmt>(stmt)) {
-        if (!return_stmt->expression) {
-            QualType return_type = nullptr;
-            if (g_interpreter_session && !g_interpreter_session->frames.empty()) {
-                return_type = extract_function_return_type(
-                    g_interpreter_session->frames.back().function_decl);
-            }
-            if (return_type && return_type->isVoid()) {
-                return make_interp_return_result(
-                    ConstEvalResult::constant(ConstValue::invalid()));
-            }
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "non-void constexpr function requires a return value",
-                return_stmt->location));
-        }
-
-        ConstEvalResult expr_result = eval_expr(return_stmt->expression.get(), mode, depth + 1);
-        if (expr_result.status != ConstEvalStatus::Constant || !expr_result.value.has_value()) {
-            return make_interp_fail_result(std::move(expr_result));
-        }
-
-        QualType return_type = nullptr;
-        if (g_interpreter_session && !g_interpreter_session->frames.empty()) {
-            return_type = extract_function_return_type(
-                g_interpreter_session->frames.back().function_decl);
-        }
-        auto casted = cast_const_value_to_type(expr_result.value.value(), return_type);
-        if (!casted.has_value()) {
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to convert return expression",
-                return_stmt->location));
-        }
-        return make_interp_return_result(ConstEvalResult::constant(casted.value()));
-    }
-
-    if (isa<BreakStmt>(stmt)) {
-        return make_interp_break_result();
-    }
-
-    if (isa<ContinueStmt>(stmt)) {
-        return make_interp_loop_continue_result();
-    }
-
-    if (isa<EmptyStmt>(stmt)) {
-        return make_interp_continue_result();
-    }
-
-    if (auto* expr_stmt = dyn_cast<Expr>(stmt)) {
-        ConstEvalResult expr_result = eval_expr(expr_stmt, mode, depth + 1);
-        if (expr_result.status != ConstEvalStatus::Constant || !expr_result.value.has_value()) {
-            return make_interp_fail_result(std::move(expr_result));
-        }
-        return make_interp_continue_result();
-    }
-
-    return make_interp_fail_result(make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-        "statement kind is not yet supported by constexpr interpreter", stmt->location));
-}
-
-// ====== Function call execution ======
-
-ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size_t depth) {
-    if (!call || !call->func) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "unsupported function call expression", call ? call->location : SrcLoc());
-    }
-    if (!g_interpreter_session || !g_interpreter_session->state ||
-        !mode_allows_constexpr_interpreter(mode)) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr function interpreter is unavailable for this evaluation mode",
-            call->location);
-    }
-    if (depth > kMaxConstEvalDepth) {
-        return make_error(ConstEvalDiagCode::RecursionLimitExceeded,
-            "constexpr recursion depth exceeded", call->location);
-    }
-
-    EvalState& state = *g_interpreter_session->state;
-    if (!state.consume_step()) {
-        return make_error(ConstEvalDiagCode::StepLimitExceeded,
-            "constexpr function interpreter step limit exceeded",
-            call->location);
-    }
-
-    std::string target_name = describe_function_call_target(call);
-    InterpreterFrameGuard frame_guard(*g_interpreter_session, target_name, nullptr);
-    if (!frame_guard.entered()) {
-        return make_error(ConstEvalDiagCode::RecursionLimitExceeded,
-            "constexpr function interpreter recursion limit exceeded",
-            call->location);
-    }
-
-    Expr* callee_core = strip_noop_implicit_casts_and_parens(call->func.get());
-    auto* callee_ref = dyn_cast<VarRef>(callee_core);
-    if (!callee_ref || !callee_ref->symref || callee_ref->symref->kind != SymbolKind::FUNCTION) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter currently supports direct named function calls only",
-            call->location);
-    }
-
-    const FuncDecl* function_decl = callee_ref->symref->function_definition;
-    if (!function_decl || !function_decl->body) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter cannot evaluate call without visible function definition",
-            call->location);
-    }
-    bool function_is_constexpr =
-        function_decl->is_constexpr ||
-        callee_ref->symref->is_constexpr ||
-        callee_ref->symref->is_consteval;
-    if (mode_requires_constexpr_call(mode) && !function_is_constexpr) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "call to non-constexpr function is not a constant expression",
-            call->location);
-    }
-    if (!g_interpreter_session->frames.empty()) {
-        g_interpreter_session->frames.back().function_decl = function_decl;
-    }
-
-    std::vector<const ParamDecl*> params;
-    params.reserve(function_decl->parameters.size());
-    for (const auto& param : function_decl->parameters) {
-        auto* param_decl = dyn_cast<ParamDecl>(param.get());
-        if (!param_decl) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter encountered unsupported parameter declaration",
-                param ? param->location : function_decl->location);
-        }
-        params.push_back(param_decl);
-    }
-
-    bool has_void_sentinel = params.size() == 1 && is_void_parameter_sentinel(params.front());
-    size_t required_param_count = has_void_sentinel ? 0 : params.size();
-    if (call->args.size() != required_param_count) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter argument count mismatch for function call",
-            call->location);
-    }
-
-    std::vector<ConstValue> parameter_values;
-    parameter_values.reserve(required_param_count);
-    for (size_t i = 0; i < required_param_count; ++i) {
-        const ParamDecl* param = params[i];
-        ConstEvalResult argument_value =
-            eval_parameter_argument_as_const_value(
-                call->args[i].get(),
-                param,
-                mode,
-                depth,
-                call->location,
-                "constexpr interpreter encountered unsupported parameter declaration",
-                "constexpr interpreter failed to bind reference parameter");
-        if (argument_value.status != ConstEvalStatus::Constant ||
-            !argument_value.value.has_value()) {
-            return argument_value;
-        }
-        parameter_values.push_back(*argument_value.value);
-    }
-
-    for (size_t i = 0; i < required_param_count; ++i) {
-        const ParamDecl* param = params[i];
-        if (!bind_interpreter_local(param->sym, param->get_name(), parameter_values[i])) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to bind function parameter",
-                call->location);
-        }
-    }
-
-    InterpExecResult exec_result = eval_interpreter_stmt(function_decl->body.get(), mode, depth + 1);
-    if (exec_result.kind == InterpExecResult::Kind::Fail) {
-        return exec_result.value;
-    }
-    QualType call_type = call->get_type();
-    if (exec_result.kind == InterpExecResult::Kind::Continue &&
-        call_type && call_type->isVoid()) {
-        return ConstEvalResult::constant(ConstValue::invalid());
-    }
-    if (exec_result.kind != InterpExecResult::Kind::Return ||
-        exec_result.value.status != ConstEvalStatus::Constant ||
-        !exec_result.value.value.has_value()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter reached end of function without a return value",
-            function_decl->location);
-    }
-
-    if (call_type && call_type->isVoid()) {
-        return ConstEvalResult::constant(ConstValue::invalid());
-    }
-
-    auto casted_call_value =
-        cast_const_value_to_type(exec_result.value.value.value(), call_type);
-    if (!casted_call_value.has_value()) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter failed to convert call result to expression type",
-            call->location);
-    }
-    return ConstEvalResult::constant(casted_call_value.value());
-}
-
-const CppConstructorDecl* find_consteval_constructor_definition(
-    const CppConstructExpr* construct) {
-    if (!construct || !construct->ctor_sym) {
-        return nullptr;
-    }
-
-    const CppConstructorDecl* direct_decl =
-        dyn_cast<CppConstructorDecl>(construct->ctor_sym->function_definition);
-    if (direct_decl && direct_decl->body) {
-        return direct_decl;
-    }
-
-    QualType owner_type = get_symbol_owner_record_type(construct->ctor_sym.get());
-    if (!owner_type) {
-        owner_type = construct->ctype;
-    }
-    auto owner_object = desugar_type(owner_type).as_shared<ObjectType>();
-    auto* owner_decl = owner_object
-        ? dyn_cast<ObjectDecl>(owner_object->get_decl())
-        : nullptr;
-    const RecordSemanticState* state =
-        owner_decl ? record_semantics_cache_lookup(owner_decl) : nullptr;
-    if (state) {
-        for (const auto& ctor : state->constructors) {
-            if (ctor.symbol && ctor.symbol.get() == construct->ctor_sym.get()) {
-                return ctor.decl ? ctor.decl : direct_decl;
-            }
-        }
-    }
-
-    return direct_decl;
-}
-
-ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
-                                        ConstEvalMode mode,
-                                        size_t depth) {
-    if (!construct || !construct->ctype) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constructor expression is missing a target object type",
-            construct ? construct->location : SrcLoc());
-    }
-    if (!g_interpreter_session || !g_interpreter_session->state ||
-        !mode_allows_constexpr_interpreter(mode)) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constructor expression is not a constant expression in this mode",
-            construct ? construct->location : SrcLoc());
-    }
-    if (!construct->ctor_sym || construct->ctor_sym->kind != SymbolKind::FUNCTION) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constructor expression has no resolved constructor symbol",
-            construct->location);
-    }
-
-    auto* ctor_decl = find_consteval_constructor_definition(construct);
-    bool constructor_is_constexpr =
-        (ctor_decl && ctor_decl->is_constexpr) ||
-        construct->ctor_sym->is_constexpr ||
-        construct->ctor_sym->is_consteval;
-    if (mode_requires_constexpr_call(mode) && !constructor_is_constexpr) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "call to non-constexpr constructor is not a constant expression",
-            construct->location);
-    }
-    if (!ctor_decl || !ctor_decl->body) {
-        if (((ctor_decl && ctor_decl->is_defaulted) ||
-             construct->ctor_sym->is_defaulted) &&
-            construct->args.empty() &&
-            constructor_is_constexpr) {
-            auto default_object = default_const_value_for_type(construct->ctype);
-            if (default_object.has_value()) {
-                return ConstEvalResult::constant(*default_object);
-            }
-        }
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter cannot evaluate constructor without a visible definition",
-            construct->location);
-    }
-
-    auto initial_object = default_const_value_for_type(construct->ctype);
-    if (!initial_object.has_value()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter could not create the constructed object state",
-            construct->location);
-    }
-
-    std::string ctor_name =
-        construct->ctor_sym->name.empty() ? "<constructor>" : construct->ctor_sym->name;
-    InterpreterFrameGuard frame_guard(*g_interpreter_session, ctor_name, ctor_decl);
-    if (!frame_guard.entered()) {
-        return make_error(
-            ConstEvalDiagCode::RecursionLimitExceeded,
-            "constexpr function interpreter recursion limit exceeded",
-            construct->location);
-    }
-    if (!g_interpreter_session->frames.empty()) {
-        g_interpreter_session->frames.back().function_decl = ctor_decl;
-    }
-
-    std::shared_ptr<Symbol> object_symbol;
-    if (!materialize_interpreter_temporary(
-            construct->ctype, *initial_object, object_symbol)) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter failed to materialize constructed object storage",
-            construct->location);
-    }
-
-    std::vector<const ParamDecl*> params;
-    params.reserve(ctor_decl->parameters.size());
-    for (const auto& param : ctor_decl->parameters) {
-        auto* param_decl = dyn_cast<ParamDecl>(param.get());
-        if (!param_decl) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter encountered unsupported constructor parameter declaration",
-                param ? param->location : ctor_decl->location);
-        }
-        params.push_back(param_decl);
-    }
-
-    size_t user_param_start = 0;
-    if (!params.empty() && params.front() && params.front()->get_name() == "this") {
-        auto this_value = ConstValue::address(object_symbol);
-        auto casted_this =
-            cast_const_value_to_type(this_value, params.front()->type);
-        if (!casted_this.has_value() ||
-            !bind_interpreter_local(
-                params.front()->sym, params.front()->get_name(), *casted_this)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to bind constructor object parameter",
-                construct->location);
-        }
-        user_param_start = 1;
-    }
-
-    if (construct->args.size() + user_param_start != params.size()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter argument count mismatch for constructor call",
-            construct->location);
-    }
-
-    std::vector<ConstValue> constructor_arg_values;
-    constructor_arg_values.reserve(construct->args.size());
-    for (size_t arg_index = 0; arg_index < construct->args.size(); ++arg_index) {
-        const ParamDecl* param = params[user_param_start + arg_index];
-        ConstEvalResult arg_result =
-            eval_parameter_argument_as_const_value(
-                construct->args[arg_index].get(),
-                param,
-                mode,
-                depth,
-                construct->location,
-                "constexpr interpreter encountered unsupported constructor parameter declaration",
-                "constexpr interpreter failed to bind constructor reference argument");
-        if (arg_result.status != ConstEvalStatus::Constant ||
-            !arg_result.value.has_value()) {
-            return arg_result;
-        }
-        constructor_arg_values.push_back(*arg_result.value);
-    }
-
-    for (size_t arg_index = 0; arg_index < constructor_arg_values.size(); ++arg_index) {
-        const ParamDecl* param = params[user_param_start + arg_index];
-        if (!bind_interpreter_local(
-                param->sym,
-                param->get_name(),
-                constructor_arg_values[arg_index])) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to bind constructor argument",
-                construct->location);
-        }
-    }
-
-    for (const auto& initializer : ctor_decl->ctor_initializers) {
-        if (!initializer.init_expr) {
-            continue;
-        }
-
-        if (initializer.is_base_initializer) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter does not support constructor base initializers yet",
-                initializer.location);
-        }
-
-        ConstEvalResult init_value =
-            eval_expr(initializer.init_expr.get(), mode, depth + 1);
-        if (init_value.status != ConstEvalStatus::Constant ||
-            !init_value.value.has_value()) {
-            return init_value;
-        }
-
-        if (initializer.is_delegating_initializer) {
-            auto casted_object =
-                cast_const_value_to_type(*init_value.value, construct->ctype);
-            if (!casted_object.has_value() ||
-                !assign_interpreter_symbol_value(object_symbol.get(), *casted_object)) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter failed to apply delegating constructor initializer",
-                    initializer.location);
-            }
-            continue;
-        }
-
-        if (!initializer.member_expr) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constructor member initializer is missing its target member expression",
-                initializer.location);
-        }
-
-        InterpLocation member_location;
-        if (!resolve_expr_location(
-                initializer.member_expr.get(), mode, depth + 1, member_location)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter could not resolve constructor member initializer target",
-                initializer.location);
-        }
-        auto casted_member =
-            cast_const_value_to_type(*init_value.value, member_location.value_type);
-        if (!casted_member.has_value() ||
-            !store_interpreter_location_value(member_location, *casted_member)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to apply constructor member initializer",
-                initializer.location);
-        }
-    }
-
-    InterpExecResult body_result =
-        eval_interpreter_stmt(ctor_decl->body.get(), mode, depth + 1);
-    if (body_result.kind == InterpExecResult::Kind::Fail) {
-        return body_result.value;
-    }
-    if (body_result.kind == InterpExecResult::Kind::Break ||
-        body_result.kind == InterpExecResult::Kind::LoopContinue) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr constructor encountered unsupported control flow",
-            construct->location);
-    }
-
-    ConstValue final_object;
-    if (!lookup_interpreter_symbol_value(object_symbol.get(), final_object)) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter lost constructed object state",
-            construct->location);
-    }
-    auto casted_object = cast_const_value_to_type(final_object, construct->ctype);
-    if (!casted_object.has_value()) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter failed to convert constructed object to the target type",
-            construct->location);
-    }
-    return ConstEvalResult::constant(*casted_object);
-}
-
-// ====== Main expression recursive evaluator ======
-
-ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
-    if (!expr) {
-        return make_error(ConstEvalDiagCode::NullExpression,
-            "cannot evaluate a null expression", SrcLoc());
-    }
-    if (depth > kMaxConstEvalDepth) {
-        return make_error(ConstEvalDiagCode::RecursionLimitExceeded,
-            "constexpr recursion depth exceeded", expr->location);
-    }
-
-    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
-        return eval_expr(paren->subexpr.get(), mode, depth + 1);
-    }
-
-    if (auto* immediate = dyn_cast<CppImmediateInvocationExpr>(expr)) {
-        return ConstEvalResult::constant(immediate->value);
-    }
-
-    if (auto* value_init = dyn_cast<CppValueInitExpr>(expr)) {
-        if (!value_init->ctype || value_init->ctype->isVoid()) {
-            return ConstEvalResult::constant(ConstValue::invalid());
-        }
-        auto value = default_const_value_for_type(value_init->ctype);
-        if (!value.has_value()) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "value-initialized expression is not a supported constant expression",
-                expr->location);
-        }
-        return ConstEvalResult::constant(*value);
-    }
-
-    if (dyn_cast<CppFunctionStyleCastExpr>(expr)) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "unresolved function-style cast is not a constant expression",
-            expr->location);
-    }
-
-    if (auto* init_list = dyn_cast<InitListExpr>(expr)) {
-        if ((is_cpp_core_constant_expression_mode(mode) ||
-             is_cpp_non_type_template_argument_mode(mode)) &&
-            init_list->type &&
-            (init_list->type->kind == TypeKind::Object ||
-             init_list->type->kind == TypeKind::Array)) {
-            return eval_init_list_as_typed_const_value(
-                init_list,
-                init_list->type,
-                mode,
-                depth + 1);
-        }
-        if (!is_c23_constexpr_initializer_mode(mode)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "initializer list is not a constant expression in this mode",
-                expr->location);
-        }
-
-        for (const auto& [_, value] : init_list->mappings) {
-            if (!value) {
-                continue;
-            }
-            ConstEvalResult value_res = eval_expr(value.get(), mode, depth + 1);
-            if (value_res.status != ConstEvalStatus::Constant || !value_res.value.has_value()) {
-                return value_res;
-            }
-        }
-
-        // Non-scalar aggregate form accepted in this mode; payload value is a sentinel.
-        return ConstEvalResult::constant(ConstValue::boolean(true));
-    }
-
-    if (isa<StringLiteral>(expr)) {
-        if (!is_c23_constexpr_initializer_mode(mode)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "string literal is not a constant expression in this mode",
-                expr->location);
-        }
-        // String literals are accepted as constant initializer leaves in C23 mode.
-        return ConstEvalResult::constant(ConstValue::boolean(true));
-    }
-
-    if (auto* int_lit = dyn_cast<IntegerLiteral>(expr)) {
-        auto parsed = parse_integer_literal_u64(int_lit->get_value());
-        if (!parsed.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "unable to parse integer literal", expr->location);
-        }
-        IntShape shape = infer_integer_shape(int_lit->get_type());
-        if (shape.is_unsigned) {
-            return make_constant_int(ConstIntValue::from_unsigned(parsed.value(), shape.width));
-        }
-        return make_constant_int(ConstIntValue::from_signed(
-            static_cast<int64_t>(parsed.value()), shape.width));
-    }
-
-    if (auto* float_lit = dyn_cast<FloatingLiteral>(expr)) {
-        auto parsed = parse_floating_literal_ld(float_lit->value);
-        if (!parsed.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "unable to parse floating literal", expr->location);
-        }
-
-        uint16_t width = 64;
-        if (float_lit->get_type()) {
-            int64_t type_width = float_lit->get_type()->getWidth();
-            if (type_width > 0 && type_width <= std::numeric_limits<uint16_t>::max()) {
-                width = static_cast<uint16_t>(type_width);
-            }
-        }
-        return ConstEvalResult::constant(ConstValue::floating(*parsed, width));
-    }
-
-    if (auto* char_lit = dyn_cast<CharacterLiteral>(expr)) {
-        IntShape shape = infer_integer_shape(char_lit->get_type());
-        if (shape.is_unsigned) {
-            return make_constant_int(ConstIntValue::from_unsigned(
-                static_cast<uint64_t>(char_lit->int_value), shape.width));
-        }
-        return make_constant_int(ConstIntValue::from_signed(char_lit->int_value, shape.width));
-    }
-
-    if (auto* concept_expr = dyn_cast<ConceptSpecializationExpr>(expr)) {
-        if (!concept_expr->satisfaction.has_value()) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "concept-id is not fully resolved for constant evaluation",
-                expr->location);
-        }
-        return ConstEvalResult::constant(
-            ConstValue::boolean(*concept_expr->satisfaction));
-    }
-
-    if (auto* requires_expr = dyn_cast<RequiresExpr>(expr)) {
-        return eval_requires_expr(requires_expr, mode, depth + 1);
-    }
-
-    if (auto* lambda_expr = dyn_cast<CppLambdaExpr>(expr)) {
-        return eval_cpp_lambda_expr(lambda_expr, mode, depth + 1);
-    }
-
-    if (isa<CppThisExpr>(expr)) {
-        ConstValue this_value;
-        if (lookup_interpreter_named_value("this", this_value)) {
-            return ConstEvalResult::constant(this_value);
-        }
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "'this' is not available in the current constexpr evaluation context",
-            expr->location);
-    }
-
-    if (auto* var_ref = dyn_cast<VarRef>(expr)) {
-        ConstValue local_value;
-        if (lookup_interpreter_local(var_ref, local_value)) {
-            if (var_ref->get_type() &&
-                canonical_type_kind(var_ref->get_type()) == TypeKind::Reference &&
-                local_value.kind == ConstValueKind::Address) {
-                InterpLocation location;
-                ConstValue referred_value;
-                if (resolve_location_from_address_value_as(
-                        local_value.address_value,
-                        remove_reference(var_ref->get_type()),
-                        location) &&
-                    load_interpreter_location_value(
-                        location,
-                        mode,
-                        depth + 1,
-                        referred_value)) {
-                    return ConstEvalResult::constant(referred_value);
-                }
-            }
-            return ConstEvalResult::constant(local_value);
-        }
-        if (var_ref->symref && var_ref->symref->kind == SymbolKind::ENUM_CONSTANT) {
-            IntShape shape = infer_integer_shape(var_ref->get_type());
-            if (shape.is_unsigned) {
-                return make_constant_int(ConstIntValue::from_unsigned(
-                    static_cast<uint64_t>(var_ref->symref->enum_val), shape.width));
-            }
-            return make_constant_int(ConstIntValue::from_signed(var_ref->symref->enum_val, shape.width));
-        }
-        if (is_c23_constexpr_initializer_mode(mode) && var_ref->symref) {
-            if (var_ref->symref->kind == SymbolKind::FUNCTION) {
-                return ConstEvalResult::constant(ConstValue::boolean(true));
-            }
-            if (var_ref->symref->kind == SymbolKind::VARIABLE &&
-                var_ref->get_type() &&
-                var_ref->get_type()->kind == TypeKind::Array &&
-                has_static_storage_duration(var_ref->symref.get())) {
-                return ConstEvalResult::constant(ConstValue::boolean(true));
-            }
-        }
-        if (is_cpp_core_constant_expression_mode(mode) && var_ref->symref) {
-            ConstEvalResult constexpr_value =
-                eval_constexpr_variable_initializer(
-                    var_ref->symref.get(),
-                    mode,
-                    depth + 1,
-                    true);
-            if (constexpr_value.status == ConstEvalStatus::Constant &&
-                constexpr_value.value.has_value()) {
-                return constexpr_value;
-            }
-        }
-        if (is_cpp_non_type_template_argument_mode(mode) && var_ref->symref) {
-            ConstEvalResult constexpr_value =
-                eval_constexpr_variable_initializer(
-                    var_ref->symref.get(),
-                    mode,
-                    depth + 1,
-                    true);
-            if (constexpr_value.status == ConstEvalStatus::Constant &&
-                constexpr_value.value.has_value()) {
-                return constexpr_value;
-            }
-            if (variable_template_specialization_still_depends_on_template_parameters(
-                    var_ref->symref.get())) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "dependent variable template reference is not a concrete non-type template argument",
-                    expr->location);
-            }
-            if (var_ref->symref->kind == SymbolKind::FUNCTION ||
-                has_static_storage_duration(var_ref->symref.get())) {
-                return ConstEvalResult::constant(
-                    ConstValue::address(var_ref->symref));
-            }
-        }
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-            "variable reference is not a constant expression", expr->location);
-    }
-
-    if (auto* member_expr = dyn_cast<MemberExpr>(expr)) {
-        InterpLocation member_location;
-        if (resolve_expr_location(member_expr, mode, depth + 1, member_location)) {
-            ConstValue member_value;
-            if (load_interpreter_location_value(
-                    member_location, mode, depth + 1, member_value)) {
-                QualType referred_type = remove_reference(member_location.value_type);
-                if (canonical_type_kind(member_location.value_type) ==
-                        TypeKind::Reference &&
-                    member_value.kind == ConstValueKind::Address) {
-                    InterpLocation referred_location;
-                    ConstValue referred_value;
-                    if (resolve_location_from_address_value_as(
-                            member_value.address_value,
-                            referred_type,
-                            referred_location) &&
-                        load_interpreter_location_value(
-                            referred_location,
-                            mode,
-                            depth + 1,
-                            referred_value)) {
-                        return ConstEvalResult::constant(referred_value);
+                    aburi::cir::FloatingSemantics semantics =
+                        aburi::floating::semantics_for_type(file(), target);
+                    auto real = aburi::floating::convert(
+                        inner.value->complex_value.real, semantics);
+                    if (!real || floating_status_disqualifies(real.status)) {
+                        return make_unsupported(
+                            "complex conversion cannot represent its real component",
+                            inst.loc);
                     }
+                    inner.value = ConstValue::floating(*real);
                 }
-                return ConstEvalResult::constant(member_value);
             }
         }
+        if (aburi::cir::is_integer_like_type(file(), target)) {
+            auto shape = aburi::cir::integer_shape_for_type(file(), target);
 
-        if (!member_expr->isArrow) {
-            ConstEvalResult base_result =
-                eval_expr(member_expr->base.get(), mode, depth + 1);
-            if (base_result.status != ConstEvalStatus::Constant ||
-                !base_result.value.has_value()) {
-                return base_result;
-            }
-            ConstValue member_value;
-            if (traverse_member_expr_value(
-                    *base_result.value, member_expr, member_value)) {
-                if (canonical_type_kind(member_expr->get_type()) ==
-                        TypeKind::Reference &&
-                    member_value.kind == ConstValueKind::Address) {
-                    InterpLocation referred_location;
-                    ConstValue referred_value;
-                    if (resolve_location_from_address_value_as(
-                            member_value.address_value,
-                            remove_reference(member_expr->get_type()),
-                            referred_location) &&
-                        load_interpreter_location_value(
-                            referred_location,
-                            mode,
-                            depth + 1,
-                            referred_value)) {
-                        return ConstEvalResult::constant(referred_value);
-                    }
+            if (inner.value->kind == ConstValueKind::Address) {
+
+                if (address_is_null_base(inner.value->address_value)) {
+                    return ConstEvalResult::constant(ConstValue::integer(
+                        ConstIntValue::from_signed(
+                            inner.value->address_value.byte_offset,
+                            shape.bit_width)
+                            .cast(shape.bit_width, shape.is_unsigned)));
                 }
-                return ConstEvalResult::constant(member_value);
-            }
-        }
 
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "member access is not a supported constant expression",
-            expr->location);
-    }
-
-    if (auto* subscript = dyn_cast<ArraySubscriptExpr>(expr)) {
-        InterpLocation element_location;
-        if (resolve_expr_location(subscript, mode, depth + 1, element_location)) {
-            ConstValue element_value;
-            if (load_interpreter_location_value(
-                    element_location, mode, depth + 1, element_value)) {
-                return ConstEvalResult::constant(element_value);
-            }
-        }
-
-        ConstEvalResult base_result =
-            eval_expr(subscript->array.get(), mode, depth + 1);
-        if (base_result.status != ConstEvalStatus::Constant ||
-            !base_result.value.has_value()) {
-            return base_result;
-        }
-        size_t index = 0;
-        if (!evaluate_constant_index(subscript->index.get(), mode, depth + 1, index)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "array subscript index is not a constant expression",
-                subscript->index ? subscript->index->location : subscript->location);
-        }
-        if (base_result.value->kind == ConstValueKind::Object &&
-            base_result.value->object_value &&
-            base_result.value->object_value->kind == ConstObjectValueKind::Array &&
-            index < base_result.value->object_value->elements.size()) {
-            return ConstEvalResult::constant(
-                base_result.value->object_value->elements[index]);
-        }
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "array subscript is not a supported constant expression",
-            expr->location);
-    }
-
-    if (auto* call = dyn_cast<FuncCall>(expr)) {
-        if (is_c23_constexpr_initializer_mode(mode)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "function call is not allowed in C23 constexpr initializer",
-                expr->location);
-        }
-        if (!g_interpreter_session || !mode_allows_constexpr_interpreter(mode)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "function call is not a constant expression in this mode",
-                expr->location);
-        }
-        return eval_function_call_expr(call, mode, depth + 1);
-    }
-
-    if (auto* call = dyn_cast<CppMemberCallExpr>(expr)) {
-        if (!call->lowered_call) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "member call is not a constant expression in this mode",
-                expr->location);
-        }
-        if (is_c23_constexpr_initializer_mode(mode)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "function call is not allowed in C23 constexpr initializer",
-                expr->location);
-        }
-        if (!g_interpreter_session || !mode_allows_constexpr_interpreter(mode)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "member call is not a constant expression in this mode",
-                expr->location);
-        }
-        return eval_function_call_expr(call->lowered_call.get(), mode, depth + 1);
-    }
-
-    if (auto* construct = dyn_cast<CppConstructExpr>(expr)) {
-        if (is_c23_constexpr_initializer_mode(mode)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "constructor expression is not allowed in C23 constexpr initializer",
-                expr->location);
-        }
-        return eval_cpp_construct_expr(construct, mode, depth + 1);
-    }
-
-    if (auto* unary = dyn_cast<UnaryOperation>(expr)) {
-        return eval_unary_expr(unary, mode, depth);
-    }
-
-    if (auto* binary = dyn_cast<BinaryOperation>(expr)) {
-        return eval_binary_expr(binary, mode, depth);
-    }
-
-    if (auto* compound_assign = dyn_cast<CompoundAssignOperation>(expr)) {
-        return eval_assignment_to_location(
-            compound_assign->left.get(),
-            compound_assign->right.get(),
-            compound_assign->bop,
-            compound_assign->location,
-            mode,
-            depth);
-    }
-
-    if (auto* cond = dyn_cast<CondExpr>(expr)) {
-        ConstEvalResult cond_res = eval_expr(cond->condition.get(), mode, depth + 1);
-        if (cond_res.status != ConstEvalStatus::Constant || !cond_res.value.has_value()) {
-            return cond_res;
-        }
-        bool truthy = false;
-        if (!const_value_to_bool(cond_res.value.value(), truthy)) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "conditional expression requires scalar condition", cond->location);
-        }
-        if (truthy) {
-            if (!cond->true_expr) {
-                // GNU extension: omitted middle operand (`a ?: b`) yields `a` when truthy.
-                return cond_res;
-            }
-            return eval_expr(cond->true_expr.get(), mode, depth + 1);
-        }
-        if (!cond->false_expr) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "missing false branch in conditional expression", cond->location);
-        }
-        return eval_expr(cond->false_expr.get(), mode, depth + 1);
-    }
-
-    if (auto* implicit_cast = dyn_cast<ImplicitCast>(expr)) {
-        if (is_c23_constexpr_initializer_mode(mode) && implicit_cast->get_type() &&
-            implicit_cast->get_type()->kind == TypeKind::Pointer) {
-            if (implicit_cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER ||
-                implicit_cast->kind == ImplicitCastTypes::FUNCTION_TO_POINTER) {
-                ConstEvalResult decayed = eval_expr(implicit_cast->expr.get(), mode, depth + 1);
-                if (decayed.status == ConstEvalStatus::Constant && decayed.value.has_value()) {
-                    return ConstEvalResult::constant(ConstValue::boolean(true));
+                int pointer_bits = file().target_info_ptr()
+                    ? file().target_info_ptr()->pointer_width
+                    : 64;
+                if (shape.bit_width >= pointer_bits) {
+                    return ConstEvalResult::constant(*inner.value);
                 }
-                return decayed;
             }
-            if (implicit_cast->kind == ImplicitCastTypes::RAW_CAST ||
-                implicit_cast->kind == ImplicitCastTypes::ARITH_CAST) {
-                if (is_c23_address_constant_expr(implicit_cast->expr.get(), mode, depth + 1)) {
-                    return ConstEvalResult::constant(ConstValue::boolean(true));
+            auto as_int = value_to_int(*inner.value, shape);
+            if (!as_int.has_value() && inner.value->kind == ConstValueKind::Floating) {
+                aburi::floating::FloatIntegerResult bits =
+                    aburi::floating::to_integer(
+                        inner.value->float_value.value,
+                        shape.bit_width,
+                        !shape.is_unsigned);
+                if (bits) {
+                    as_int = ConstIntValue::from_bits128(
+                        *bits, shape.bit_width, shape.is_unsigned);
                 }
-                ConstEvalResult inner = eval_expr(implicit_cast->expr.get(), mode, depth + 1);
-                if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
-                    return inner;
+            }
+            if (!as_int.has_value()) {
+                return make_unsupported(
+                    "integer cast constant evaluation requires scalar integer input",
+                    inst.loc);
+            }
+            return ConstEvalResult::constant(ConstValue::integer(*as_int));
+        }
+        if (target_kind == TypeKind::Pointer) {
+            auto as_int =
+                value_to_int(*inner.value, aburi::cir::IntegerTypeShape{64, true});
+            if (as_int.has_value()) {
+                if (as_int->to_unsigned_u64() == 0) {
+                    return ConstEvalResult::constant(ConstValue::null_pointer());
                 }
-                if (!is_zero_like_constant(inner.value.value())) {
-                    return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                        "pointer cast operand is not a null pointer constant",
-                        implicit_cast->location);
-                }
-                return ConstEvalResult::constant(ConstValue::boolean(true));
+                return ConstEvalResult::constant(ConstValue::integer(*as_int));
             }
         }
-        if (is_cpp_non_type_template_argument_mode(mode) &&
-            implicit_cast->get_type()) {
-            if (implicit_cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER ||
-                implicit_cast->kind == ImplicitCastTypes::FUNCTION_TO_POINTER) {
-                return eval_expr(implicit_cast->expr.get(), mode, depth + 1);
+        if (aburi::cir::is_floating_type(file(), target) &&
+            (inner.value->kind == ConstValueKind::Floating ||
+             inner.value->kind == ConstValueKind::Integer ||
+             inner.value->kind == ConstValueKind::Boolean)) {
+            aburi::cir::FloatingSemantics semantics =
+                aburi::floating::semantics_for_type(file(), target);
+            auto as_float = value_to_float(*inner.value, semantics);
+            if (!as_float.has_value() ||
+                floating_status_disqualifies(as_float.status)) {
+                return make_unsupported(
+                    "floating cast constant evaluation requires scalar input",
+                    inst.loc);
             }
-            if (implicit_cast->kind == ImplicitCastTypes::RAW_CAST ||
-                implicit_cast->kind == ImplicitCastTypes::ARITH_CAST) {
-                return eval_cast_expr(
-                    implicit_cast->expr.get(),
-                    implicit_cast->get_type(),
-                    implicit_cast->location,
-                    mode,
-                    depth,
-                    false);
-            }
+            return ConstEvalResult::constant(ConstValue::floating(*as_float));
         }
-        if (implicit_cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER) {
-            InterpLocation location;
-            if (resolve_expr_location(
-                    implicit_cast->expr.get(),
-                    mode,
-                    depth + 1,
-                    location) &&
-                location.root_symbol) {
-                return ConstEvalResult::constant(
-                    ConstValue::address(location.root_symbol, location.byte_offset));
-            }
-        }
-        return eval_cast_expr(implicit_cast->expr.get(), implicit_cast->get_type(),
-            implicit_cast->location, mode, depth, false);
+        return make_unsupported("cast is not supported in constant evaluation yet",
+                                inst.loc);
     }
 
-    if (auto* explicit_cast = dyn_cast<ExplicitCast>(expr)) {
-        return eval_cast_expr(explicit_cast->expr.get(), explicit_cast->get_type(),
-            explicit_cast->location, mode, depth, true);
-    }
-
-    if (auto* member_ptr = dyn_cast<MemberPointerLiteralExpr>(expr)) {
-        if (!is_cpp_non_type_template_argument_mode(mode)) {
-            return make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "member pointer is not a constant expression in this mode",
-                expr->location);
-        }
-        return ConstEvalResult::constant(ConstValue::member_pointer(
-            member_ptr->byte_offset,
-            member_ptr->is_function_member,
-            member_ptr->method_symbol,
-            member_ptr->virtual_slot_index,
-            member_ptr->member_name));
-    }
-
-    if (auto* compound_lit = dyn_cast<CompoundLiteralExpr>(expr)) {
-        if (!compound_lit->init) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "compound literal has no initializer", expr->location);
-        }
-        if (is_cpp_non_type_template_argument_mode(mode) &&
-            compound_lit->type &&
-            (compound_lit->type->kind == TypeKind::Object ||
-             compound_lit->type->kind == TypeKind::Array)) {
-            return eval_expr_as_typed_const_value(
-                compound_lit->init.get(),
-                compound_lit->type,
-                mode,
-                depth + 1);
-        }
-        return eval_expr(compound_lit->init.get(), mode, depth + 1);
-    }
-
-    if (auto* sizeof_expr = dyn_cast<SizeOfExpr>(expr)) {
-        auto val = evaluate_sizeof_expr(sizeof_expr);
-        if (!val.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "sizeof expression is not a compile-time constant", expr->location);
-        }
-        return make_constant_int(ConstIntValue::from_signed(*val, 64));
-    }
-
-    if (auto* alignof_expr = dyn_cast<AlignOfExpr>(expr)) {
-        auto val = evaluate_alignof_expr(alignof_expr);
-        if (!val.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "alignof expression is not a compile-time constant", expr->location);
-        }
-        return make_constant_int(ConstIntValue::from_signed(*val, 64));
-    }
-
-    if (auto* noexcept_expr = dyn_cast<CppNoexceptExpr>(expr)) {
-        bool is_noexcept =
-            cpp_expression_is_known_noexcept(noexcept_expr->operand.get());
-        return make_constant_int(
-            ConstIntValue::from_signed(is_noexcept ? 1 : 0, 64));
-    }
-
-    if (auto* offsetof_expr = dyn_cast<OffsetOfExpr>(expr)) {
-        auto val = evaluate_offsetof_expr(offsetof_expr);
-        if (!val.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "offsetof expression is not a compile-time constant", expr->location);
-        }
-        return make_constant_int(ConstIntValue::from_signed(*val, 64));
-    }
-
-    if (auto* builtin_call = dyn_cast<BuiltinCallExpr>(expr)) {
-        if (builtin_call->kind == BuiltinKind::IS_CONSTANT_EVALUATED) {
-            return make_constant_int(ConstIntValue::from_signed(1, 64));
-        }
-        if (builtin_call->kind == BuiltinKind::ADDRESSOF) {
-            if (builtin_call->args.size() != 1 || !builtin_call->args[0]) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "__builtin_addressof requires exactly 1 argument",
-                    expr->location);
-            }
-            return eval_address_of_operand(
-                builtin_call->args[0].get(), mode, depth, expr->location);
-        }
-        if (!builtin_call->const_value.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "builtin call is not a compile-time constant", expr->location);
-        }
-        return make_constant_int(ConstIntValue::from_signed(*builtin_call->const_value, 64));
-    }
-
-    return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-        "expression kind is not supported by consteval engine yet", expr->location);
-}
+    const ConstEvalContext& context_;
+    ConstEvalRequest request_;
+    EvalState state_;
+    size_t construct_at_call_depth_ = 0;
+    std::unordered_map<uint64_t, uint64_t> local_allocations_;
+    std::unordered_map<uint64_t, uint64_t> string_literal_allocations_;
+};
 
 } // namespace
 
-// ====== Public API entry point ======
-
-ConstEvalResult ConstEvalEngine::evaluate(const Expr* expr, ConstEvalMode mode) const {
+ConstEvalResult ConstEvalEngine::evaluate_inst(aburi::cir::InstId inst,
+                                               ConstEvalRequest request) const {
+    if (!context_.file) {
+        return make_error(ConstEvalDiagCode::NullExpression,
+                          "constant evaluator has no CIR file",
+                          request.loc);
+    }
     if (!is_enabled()) {
-        ConstEvalResult result = ConstEvalResult::not_evaluated("constexpr engine is disabled");
-        result.diagnostics.push_back(ConstEvalDiagnostic::make(
-            ConstEvalDiagCode::EngineDisabled, result.message));
-        return result;
+        return make_not_evaluated("constexpr engine is disabled",
+                                  ConstEvalDiagCode::EngineDisabled,
+                                  request.loc);
     }
-    if (expr == nullptr) {
-        return ConstEvalResult::error("cannot evaluate a null expression",
-            ConstEvalDiagCode::NullExpression);
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ConstexprEvalCalls);
     }
+    Evaluator evaluator(context_, request);
+    return evaluator.apply_transient_allocation_rules(
+        evaluator.evaluate_inst(inst));
+}
 
-    if (lang_options_.enable_consteval_function_interpreter &&
-        mode_allows_constexpr_interpreter(mode)) {
-        EvalState state(
-            lang_options_.consteval_step_limit,
-            lang_options_.consteval_recursion_limit);
-        InterpreterSession session;
-        session.state = &state;
-        session.mode = mode;
-        InterpreterSessionGuard session_guard(&session);
-        return eval_expr(const_cast<Expr*>(expr), mode, 0);
+ConstEvalResult ConstEvalEngine::evaluate_fragment(
+    const aburi::cir::Fragment& fragment,
+    aburi::cir::ValueRef result,
+    ConstEvalRequest request) const {
+    if (!context_.file) {
+        return make_error(ConstEvalDiagCode::NullExpression,
+                          "constant evaluator has no CIR file",
+                          request.loc);
     }
+    if (!is_enabled()) {
+        return make_not_evaluated("constexpr engine is disabled",
+                                  ConstEvalDiagCode::EngineDisabled,
+                                  request.loc);
+    }
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ConstexprEvalCalls);
+    }
+    Evaluator evaluator(context_, request);
+    return evaluator.apply_transient_allocation_rules(
+        evaluator.evaluate_fragment(fragment, result));
+}
 
-    return eval_expr(const_cast<Expr*>(expr), mode, 0);
+ConstEvalResult ConstEvalEngine::evaluate_fragment_with_object_seeds(
+    const aburi::cir::Fragment& fragment,
+    aburi::cir::ValueRef result,
+    ConstEvalRequest request,
+    const std::vector<ConstEvalObjectSeed>& object_seeds) const {
+    if (!context_.file) {
+        return make_error(ConstEvalDiagCode::NullExpression,
+                          "constant evaluator has no CIR file",
+                          request.loc);
+    }
+    if (!is_enabled()) {
+        return make_not_evaluated("constexpr engine is disabled",
+                                  ConstEvalDiagCode::EngineDisabled,
+                                  request.loc);
+    }
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ConstexprEvalCalls);
+    }
+    Evaluator evaluator(context_, request);
+    return evaluator.apply_transient_allocation_rules(
+        evaluator.evaluate_fragment_with_object_seeds(fragment,
+                                                      result,
+                                                      object_seeds));
 }

@@ -1,0 +1,59 @@
+#ifndef ADINKRA_SOURCE_LOCATION
+#define ADINKRA_SOURCE_LOCATION
+
+#include <__adinkra/config>
+#include <cstdint>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class source_location {
+    struct __impl {
+        const char* _M_file_name;
+        const char* _M_function_name;
+        unsigned _M_line;
+        unsigned _M_column;
+    };
+
+    const __impl* implementation_ = nullptr;
+    using builtin_result = decltype(__builtin_source_location());
+
+public:
+    static consteval source_location current(
+        builtin_result implementation =
+            __builtin_source_location()) noexcept {
+        source_location result;
+        result.implementation_ =
+            static_cast<const __impl*>(implementation);
+        return result;
+    }
+
+    constexpr source_location() noexcept = default;
+
+    constexpr uint_least32_t line() const noexcept {
+        return implementation_ == nullptr
+            ? 0
+            : implementation_->_M_line;
+    }
+
+    constexpr uint_least32_t column() const noexcept {
+        return implementation_ == nullptr
+            ? 0
+            : implementation_->_M_column;
+    }
+
+    constexpr const char* file_name() const noexcept {
+        return implementation_ == nullptr
+            ? ""
+            : implementation_->_M_file_name;
+    }
+
+    constexpr const char* function_name() const noexcept {
+        return implementation_ == nullptr
+            ? ""
+            : implementation_->_M_function_name;
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

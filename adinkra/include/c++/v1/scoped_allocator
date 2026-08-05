@@ -1,0 +1,112 @@
+#ifndef ADINKRA_SCOPED_ALLOCATOR
+#define ADINKRA_SCOPED_ALLOCATOR
+
+#include <__adinkra/config>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class OuterAllocator, class... InnerAllocators>
+class scoped_allocator_adaptor;
+
+template<class OuterAllocator>
+class scoped_allocator_adaptor<OuterAllocator>
+    : public OuterAllocator {
+    using outer_traits = allocator_traits<OuterAllocator>;
+
+public:
+    using outer_allocator_type = OuterAllocator;
+    using inner_allocator_type = scoped_allocator_adaptor;
+    using value_type = typename outer_traits::value_type;
+    using size_type = typename outer_traits::size_type;
+    using difference_type = typename outer_traits::difference_type;
+    using pointer = typename outer_traits::pointer;
+    using const_pointer = typename outer_traits::const_pointer;
+    using void_pointer = typename outer_traits::void_pointer;
+    using const_void_pointer = typename outer_traits::const_void_pointer;
+
+    using propagate_on_container_copy_assignment =
+        typename outer_traits::propagate_on_container_copy_assignment;
+    using propagate_on_container_move_assignment =
+        typename outer_traits::propagate_on_container_move_assignment;
+    using propagate_on_container_swap =
+        typename outer_traits::propagate_on_container_swap;
+    using is_always_equal = typename outer_traits::is_always_equal;
+
+    template<class Type>
+    struct rebind {
+        using other = scoped_allocator_adaptor<
+            typename outer_traits::template rebind_alloc<Type>>;
+    };
+
+    scoped_allocator_adaptor() = default;
+
+    explicit scoped_allocator_adaptor(
+        const OuterAllocator& outer) noexcept
+        : OuterAllocator(outer) {}
+
+    template<class OtherOuter>
+    scoped_allocator_adaptor(
+        const scoped_allocator_adaptor<OtherOuter>& other) noexcept
+        : OuterAllocator(other.outer_allocator()) {}
+
+    outer_allocator_type& outer_allocator() noexcept {
+        return *this;
+    }
+
+    const outer_allocator_type& outer_allocator() const noexcept {
+        return *this;
+    }
+
+    inner_allocator_type& inner_allocator() noexcept {
+        return *this;
+    }
+
+    const inner_allocator_type& inner_allocator() const noexcept {
+        return *this;
+    }
+
+    template<class Type, class... Arguments>
+    void construct(Type* location, Arguments&&... arguments) {
+        if constexpr (
+            uses_allocator_v<Type, inner_allocator_type>) {
+            if constexpr (is_constructible_v<
+                              Type, allocator_arg_t,
+                              inner_allocator_type&,
+                              Arguments...>) {
+                outer_traits::construct(
+                    outer_allocator(), location, allocator_arg,
+                    inner_allocator(),
+                    std::forward<Arguments>(arguments)...);
+            } else {
+                static_assert(is_constructible_v<
+                    Type, Arguments..., inner_allocator_type&>);
+                outer_traits::construct(
+                    outer_allocator(), location,
+                    std::forward<Arguments>(arguments)...,
+                    inner_allocator());
+            }
+        } else {
+            outer_traits::construct(
+                outer_allocator(), location,
+                std::forward<Arguments>(arguments)...);
+        }
+    }
+
+    template<class Type>
+    void destroy(Type* location) {
+        outer_traits::destroy(outer_allocator(), location);
+    }
+
+    friend bool operator==(
+        const scoped_allocator_adaptor& left,
+        const scoped_allocator_adaptor& right) {
+        return left.outer_allocator() == right.outer_allocator();
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

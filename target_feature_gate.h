@@ -81,6 +81,8 @@ inline TargetFeatureFamily tf_family_from_arch(TargetArch arch) {
         case TargetArch::RISCV32:
         case TargetArch::RISCV64:
             return TargetFeatureFamily::Riscv;
+        case TargetArch::OR1K:
+            return TargetFeatureFamily::Unknown;
     }
     return TargetFeatureFamily::Unknown;
 }

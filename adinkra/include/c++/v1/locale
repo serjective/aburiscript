@@ -1,0 +1,848 @@
+#ifndef ADINKRA_LOCALE
+#define ADINKRA_LOCALE
+
+#include <__adinkra/config>
+#include <__adinkra/once_flag>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <iosfwd>
+#include <type_traits>
+#include <typeinfo>
+#include <cwchar>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __locale_runtime {
+
+_ADINKRA_EXPORT void* create(const char* name);
+_ADINKRA_EXPORT void destroy(void* handle) noexcept;
+_ADINKRA_EXPORT uint64_t classify(
+    const void* handle, uint32_t value) noexcept;
+_ADINKRA_EXPORT uint32_t lower(
+    const void* handle, uint32_t value) noexcept;
+_ADINKRA_EXPORT uint32_t upper(
+    const void* handle, uint32_t value) noexcept;
+_ADINKRA_EXPORT int compare(
+    const void* handle,
+    const uint32_t* left, size_t left_size,
+    const uint32_t* right, size_t right_size);
+_ADINKRA_EXPORT size_t transform(
+    const void* handle,
+    const void* input, size_t input_size,
+    void* output, size_t output_size,
+    bool narrow);
+
+} // namespace __locale_runtime
+
+class locale {
+public:
+    class _ADINKRA_EXPORT facet {
+    protected:
+        explicit facet(size_t references = 0) noexcept
+            : references_(0),
+              delete_when_unused_(references == 0) {}
+        virtual ~facet();
+
+    private:
+        friend class locale;
+
+        void retain() const noexcept;
+        void release() const noexcept;
+
+        mutable size_t references_;
+        bool delete_when_unused_;
+    };
+
+    class _ADINKRA_EXPORT id {
+    public:
+        constexpr id() noexcept : value_(0) {}
+
+        size_t __index() const noexcept;
+
+        id(const id&) = delete;
+        id& operator=(const id&) = delete;
+
+    private:
+        mutable size_t value_;
+    };
+
+    using category = int;
+    static constexpr category none = 0;
+    static constexpr category collate = 1 << 0;
+    static constexpr category ctype = 1 << 1;
+    static constexpr category monetary = 1 << 2;
+    static constexpr category numeric = 1 << 3;
+    static constexpr category time = 1 << 4;
+    static constexpr category messages = 1 << 5;
+    static constexpr category all =
+        collate | ctype | monetary | numeric | time | messages;
+
+    locale() noexcept;
+    locale(const locale& other) noexcept;
+    locale& operator=(const locale& other) noexcept;
+    ~locale();
+
+    explicit locale(const char*);
+    explicit locale(const string& name);
+
+    locale(const locale&, const char*, category);
+
+    locale(
+        const locale& other,
+        const string& name,
+        category selected);
+
+    template<class Facet>
+    locale(const locale& other, Facet* value)
+        : storage_(
+              copy_with_facet(
+                  other.storage_, Facet::id.__index(), value)) {
+        static_assert(is_base_of_v<facet, Facet>);
+    }
+
+    string name() const;
+
+    static const locale& classic() noexcept;
+    static locale global(const locale& value);
+
+    friend bool operator==(
+        const locale& left, const locale& right) noexcept {
+        return left.storage_ == right.storage_;
+    }
+
+    template<class Character, class Traits, class Allocator>
+    bool operator()(
+        const basic_string<Character, Traits, Allocator>& left,
+        const basic_string<Character, Traits, Allocator>& right) const;
+
+private:
+    template<class Facet>
+    friend bool has_facet(const locale&) noexcept;
+
+    template<class Facet>
+    friend const Facet& use_facet(const locale&);
+
+    struct storage;
+    struct retain_storage_t {};
+    storage* storage_;
+
+    explicit locale(storage* value, retain_storage_t) noexcept;
+
+    static storage* allocate_storage(
+        size_t size, const char* name = "C");
+    static storage* classic_storage() noexcept;
+    static storage*& global_storage() noexcept;
+    static void retain_storage(storage* value) noexcept;
+    static void release_storage(storage* value) noexcept;
+    static storage* copy_with_facet(
+        storage* source, size_t index, facet* value);
+    static const facet* find_facet(
+        const storage* source, size_t index) noexcept;
+};
+
+class ctype_base {
+public:
+    using mask = uint64_t;
+
+    static constexpr mask space = 1ULL << 0;
+    static constexpr mask print = 1ULL << 1;
+    static constexpr mask cntrl = 1ULL << 2;
+    static constexpr mask upper = 1ULL << 3;
+    static constexpr mask lower = 1ULL << 4;
+    static constexpr mask alpha = 1ULL << 5;
+    static constexpr mask digit = 1ULL << 6;
+    static constexpr mask punct = 1ULL << 7;
+    static constexpr mask xdigit = 1ULL << 8;
+    static constexpr mask blank = 1ULL << 9;
+    static constexpr mask alnum = alpha | digit;
+    static constexpr mask graph = alnum | punct;
+};
+
+template<class Character>
+class ctype : public locale::facet, public ctype_base {
+public:
+    using char_type = Character;
+
+    inline static locale::id id;
+    static constexpr size_t table_size = 256;
+
+    explicit ctype(size_t references = 0)
+        : ctype("C", references) {}
+
+    ctype(
+        const mask* table,
+        bool delete_table = false,
+        size_t references = 0)
+        : locale::facet(references),
+          handle_(__locale_runtime::create("C")),
+          table_(table),
+          delete_table_(delete_table) {}
+
+    bool is(mask classification, char_type value) const {
+        return do_is(classification, value);
+    }
+
+    const char_type* is(
+        const char_type* first,
+        const char_type* last,
+        mask* output) const {
+        return do_is(first, last, output);
+    }
+
+    const char_type* scan_is(
+        mask classification,
+        const char_type* first,
+        const char_type* last) const {
+        return do_scan_is(classification, first, last);
+    }
+
+    const char_type* scan_not(
+        mask classification,
+        const char_type* first,
+        const char_type* last) const {
+        return do_scan_not(classification, first, last);
+    }
+
+    char_type toupper(char_type value) const {
+        return do_toupper(value);
+    }
+
+    const char_type* toupper(
+        char_type* first, const char_type* last) const {
+        return do_toupper(first, last);
+    }
+
+    char_type tolower(char_type value) const {
+        return do_tolower(value);
+    }
+
+    const char_type* tolower(
+        char_type* first, const char_type* last) const {
+        return do_tolower(first, last);
+    }
+
+    char_type widen(char value) const {
+        return do_widen(value);
+    }
+
+    const char* widen(
+        const char* first,
+        const char* last,
+        char_type* output) const {
+        return do_widen(first, last, output);
+    }
+
+    char narrow(char_type value, char fallback) const {
+        return do_narrow(value, fallback);
+    }
+
+    const char_type* narrow(
+        const char_type* first,
+        const char_type* last,
+        char fallback,
+        char* output) const {
+        return do_narrow(first, last, fallback, output);
+    }
+
+    const mask* table() const noexcept {
+        return table_;
+    }
+
+    static const mask* classic_table() noexcept {
+        static const mask values[table_size] = {};
+        return values;
+    }
+
+protected:
+    explicit ctype(const char* name, size_t references)
+        : locale::facet(references),
+          handle_(__locale_runtime::create(name)),
+          table_(nullptr),
+          delete_table_(false) {}
+
+    ~ctype() override {
+        __locale_runtime::destroy(handle_);
+        if (delete_table_) {
+            delete[] table_;
+        }
+    }
+
+    virtual bool do_is(
+        mask classification, char_type value) const {
+        const uint32_t code = static_cast<uint32_t>(
+            static_cast<make_unsigned_t<char_type>>(value));
+        if (table_ != nullptr && code < table_size) {
+            return (table_[code] & classification) != 0;
+        }
+        return (__locale_runtime::classify(handle_, code) &
+                classification) != 0;
+    }
+
+    virtual const char_type* do_is(
+        const char_type* first,
+        const char_type* last,
+        mask* output) const {
+        while (first != last) {
+            const uint32_t code = static_cast<uint32_t>(
+                static_cast<make_unsigned_t<char_type>>(*first++));
+            *output++ = table_ != nullptr && code < table_size
+                ? table_[code]
+                : __locale_runtime::classify(handle_, code);
+        }
+        return last;
+    }
+
+    virtual const char_type* do_scan_is(
+        mask classification,
+        const char_type* first,
+        const char_type* last) const {
+        while (first != last &&
+               !do_is(classification, *first)) {
+            ++first;
+        }
+        return first;
+    }
+
+    virtual const char_type* do_scan_not(
+        mask classification,
+        const char_type* first,
+        const char_type* last) const {
+        while (first != last &&
+               do_is(classification, *first)) {
+            ++first;
+        }
+        return first;
+    }
+
+    virtual char_type do_toupper(char_type value) const {
+        return static_cast<char_type>(
+            __locale_runtime::upper(
+                handle_, static_cast<uint32_t>(
+                    static_cast<make_unsigned_t<char_type>>(value))));
+    }
+
+    virtual const char_type* do_toupper(
+        char_type* first, const char_type* last) const {
+        char_type* current = first;
+        while (current != last) {
+            *current = do_toupper(*current);
+            ++current;
+        }
+        return last;
+    }
+
+    virtual char_type do_tolower(char_type value) const {
+        return static_cast<char_type>(
+            __locale_runtime::lower(
+                handle_, static_cast<uint32_t>(
+                    static_cast<make_unsigned_t<char_type>>(value))));
+    }
+
+    virtual const char_type* do_tolower(
+        char_type* first, const char_type* last) const {
+        char_type* current = first;
+        while (current != last) {
+            *current = do_tolower(*current);
+            ++current;
+        }
+        return last;
+    }
+
+    virtual char_type do_widen(char value) const {
+        return static_cast<char_type>(
+            static_cast<unsigned char>(value));
+    }
+
+    virtual const char* do_widen(
+        const char* first,
+        const char* last,
+        char_type* output) const {
+        while (first != last) {
+            *output++ = do_widen(*first++);
+        }
+        return last;
+    }
+
+    virtual char do_narrow(
+        char_type value, char fallback) const {
+        const uint32_t code = static_cast<uint32_t>(
+            static_cast<make_unsigned_t<char_type>>(value));
+        return code <= 0x7f
+            ? static_cast<char>(code)
+            : fallback;
+    }
+
+    virtual const char_type* do_narrow(
+        const char_type* first,
+        const char_type* last,
+        char fallback,
+        char* output) const {
+        while (first != last) {
+            *output++ = do_narrow(*first++, fallback);
+        }
+        return last;
+    }
+
+private:
+    void* handle_;
+    const mask* table_;
+    bool delete_table_;
+};
+
+template<class Character>
+class ctype_byname : public ctype<Character> {
+public:
+    explicit ctype_byname(
+        const char* name, size_t references = 0)
+        : ctype<Character>(name, references) {}
+
+protected:
+    ~ctype_byname() override = default;
+};
+
+template<class Character>
+class collate : public locale::facet {
+public:
+    using char_type = Character;
+    using string_type =
+        basic_string<Character, char_traits<Character>,
+                     allocator<Character>>;
+
+    inline static locale::id id;
+
+    explicit collate(size_t references = 0)
+        : collate("C", references) {}
+
+    int compare(
+        const char_type* first1,
+        const char_type* last1,
+        const char_type* first2,
+        const char_type* last2) const {
+        return do_compare(first1, last1, first2, last2);
+    }
+
+    string_type transform(
+        const char_type* first,
+        const char_type* last) const {
+        return do_transform(first, last);
+    }
+
+    long hash(
+        const char_type* first,
+        const char_type* last) const {
+        return do_hash(first, last);
+    }
+
+protected:
+    explicit collate(const char* name, size_t references)
+        : locale::facet(references),
+          handle_(__locale_runtime::create(name)) {}
+
+    ~collate() override {
+        __locale_runtime::destroy(handle_);
+    }
+
+    virtual int do_compare(
+        const char_type* first1,
+        const char_type* last1,
+        const char_type* first2,
+        const char_type* last2) const {
+        while (first1 != last1 && first2 != last2) {
+            const uint32_t left = static_cast<uint32_t>(
+                static_cast<make_unsigned_t<char_type>>(*first1++));
+            const uint32_t right = static_cast<uint32_t>(
+                static_cast<make_unsigned_t<char_type>>(*first2++));
+            const int ordering = __locale_runtime::compare(
+                handle_, &left, 1, &right, 1);
+            if (ordering != 0) {
+                return ordering;
+            }
+        }
+        return first1 == last1
+            ? first2 == last2 ? 0 : -1
+            : 1;
+    }
+
+    virtual string_type do_transform(
+        const char_type* first,
+        const char_type* last) const {
+        const size_t input_size =
+            static_cast<size_t>(last - first);
+        const size_t size = __locale_runtime::transform(
+            handle_, first, input_size,
+            nullptr, 0, sizeof(char_type) == 1);
+        string_type result(size, char_type());
+        if (size != 0) {
+            __locale_runtime::transform(
+                handle_, first, input_size,
+                result.data(), result.size(),
+                sizeof(char_type) == 1);
+        }
+        return result;
+    }
+
+    virtual long do_hash(
+        const char_type* first,
+        const char_type* last) const {
+        unsigned long result = 1469598103934665603ULL;
+        while (first != last) {
+            result ^= static_cast<unsigned long>(
+                static_cast<make_unsigned_t<char_type>>(*first++));
+            result *= 1099511628211ULL;
+        }
+        return static_cast<long>(result);
+    }
+
+private:
+    void* handle_;
+};
+
+template<class Character>
+class collate_byname : public collate<Character> {
+public:
+    explicit collate_byname(
+        const char* name, size_t references = 0)
+        : collate<Character>(name, references) {}
+
+protected:
+    ~collate_byname() override = default;
+};
+
+template<class Character>
+class numpunct : public locale::facet {
+public:
+    using char_type = Character;
+    using string_type =
+        basic_string<Character, char_traits<Character>,
+                     allocator<Character>>;
+
+    inline static locale::id id;
+
+    explicit numpunct(size_t references = 0)
+        : locale::facet(references) {}
+
+    string grouping() const;
+
+    Character decimal_point() const;
+
+    Character thousands_sep() const;
+
+    string_type truename() const;
+
+    string_type falsename() const;
+
+protected:
+    ~numpunct() override = default;
+
+    virtual string do_grouping() const;
+
+    virtual Character do_decimal_point() const;
+
+    virtual Character do_thousands_sep() const;
+
+    virtual string_type do_truename() const;
+
+    virtual string_type do_falsename() const;
+};
+
+class codecvt_base {
+public:
+    enum result {
+        ok,
+        partial,
+        error,
+        noconv
+    };
+};
+
+template<class Intern, class Extern, class State>
+class codecvt : public locale::facet, public codecvt_base {
+public:
+    using intern_type = Intern;
+    using extern_type = Extern;
+    using state_type = State;
+
+    inline static locale::id id;
+
+    explicit codecvt(size_t references = 0)
+        : locale::facet(references) {}
+
+    result out(
+        state_type& state,
+        const intern_type* from, const intern_type* from_end,
+        const intern_type*& from_next,
+        extern_type* to, extern_type* to_end,
+        extern_type*& to_next) const {
+        return do_out(
+            state, from, from_end, from_next,
+            to, to_end, to_next);
+    }
+
+    result unshift(
+        state_type& state,
+        extern_type* to, extern_type* to_end,
+        extern_type*& to_next) const {
+        return do_unshift(state, to, to_end, to_next);
+    }
+
+    result in(
+        state_type& state,
+        const extern_type* from, const extern_type* from_end,
+        const extern_type*& from_next,
+        intern_type* to, intern_type* to_end,
+        intern_type*& to_next) const {
+        return do_in(
+            state, from, from_end, from_next,
+            to, to_end, to_next);
+    }
+
+    int encoding() const noexcept {
+        return do_encoding();
+    }
+
+    bool always_noconv() const noexcept {
+        return do_always_noconv();
+    }
+
+    int length(
+        state_type& state,
+        const extern_type* from, const extern_type* from_end,
+        size_t maximum) const {
+        return do_length(state, from, from_end, maximum);
+    }
+
+    int max_length() const noexcept {
+        return do_max_length();
+    }
+
+protected:
+    ~codecvt() override = default;
+
+    virtual result do_out(
+        state_type&,
+        const intern_type* from, const intern_type* from_end,
+        const intern_type*& from_next,
+        extern_type* to, extern_type* to_end,
+        extern_type*& to_next) const {
+        if constexpr (is_same_v<intern_type, extern_type>) {
+            from_next = from;
+            to_next = to;
+            return noconv;
+        }
+        from_next = from;
+        to_next = to;
+        while (from_next != from_end && to_next != to_end) {
+            *to_next++ = static_cast<extern_type>(*from_next++);
+        }
+        return from_next == from_end ? ok : partial;
+    }
+
+    virtual result do_in(
+        state_type&,
+        const extern_type* from, const extern_type* from_end,
+        const extern_type*& from_next,
+        intern_type* to, intern_type* to_end,
+        intern_type*& to_next) const {
+        if constexpr (is_same_v<intern_type, extern_type>) {
+            from_next = from;
+            to_next = to;
+            return noconv;
+        }
+        from_next = from;
+        to_next = to;
+        while (from_next != from_end && to_next != to_end) {
+            *to_next++ = static_cast<intern_type>(
+                static_cast<unsigned char>(*from_next++));
+        }
+        return from_next == from_end ? ok : partial;
+    }
+
+    virtual result do_unshift(
+        state_type&, extern_type* to, extern_type*,
+        extern_type*& to_next) const {
+        to_next = to;
+        return noconv;
+    }
+
+    virtual int do_encoding() const noexcept {
+        return 1;
+    }
+
+    virtual bool do_always_noconv() const noexcept {
+        return is_same_v<intern_type, extern_type>;
+    }
+
+    virtual int do_length(
+        state_type&, const extern_type* from,
+        const extern_type* from_end, size_t maximum) const {
+        const size_t available =
+            static_cast<size_t>(from_end - from);
+        return static_cast<int>(
+            available < maximum ? available : maximum);
+    }
+
+    virtual int do_max_length() const noexcept {
+        return 1;
+    }
+};
+
+template<class Character,
+         class OutputIterator = ostreambuf_iterator<Character>>
+class time_put : public locale::facet {
+public:
+    using char_type = Character;
+    using iter_type = OutputIterator;
+
+    inline static locale::id id;
+
+    explicit time_put(size_t references = 0)
+        : locale::facet(references) {}
+
+    iter_type put(
+        iter_type output, ios_base& stream,
+        char_type fill, const tm* value,
+        char format, char modifier = 0) const {
+        return do_put(
+            output, stream, fill, value, format, modifier);
+    }
+
+protected:
+    ~time_put() override = default;
+
+    virtual iter_type do_put(
+        iter_type output, ios_base&,
+        char_type, const tm* value,
+        char format, char modifier) const {
+        char specification[4] = {'%', '\0', '\0', '\0'};
+        size_t position = 1;
+        if (modifier != 0) {
+            specification[position++] = modifier;
+        }
+        specification[position++] = format;
+        specification[position] = '\0';
+
+        char result[256];
+        const size_t count =
+            ::strftime(result, sizeof(result), specification, value);
+        for (size_t index = 0; index < count; ++index) {
+            *output++ = static_cast<char_type>(result[index]);
+        }
+        return output;
+    }
+};
+
+template<class Facet>
+bool has_facet(const locale& value) noexcept {
+    static_assert(is_base_of_v<locale::facet, Facet>);
+    return locale::find_facet(
+               value.storage_, Facet::id.__index()) != nullptr;
+}
+
+template<class Facet>
+const Facet& use_facet(const locale& value) {
+    static_assert(is_base_of_v<locale::facet, Facet>);
+    const locale::facet* result = locale::find_facet(
+        value.storage_, Facet::id.__index());
+    if (result == nullptr) {
+        static const Facet* fallback = new Facet();
+        return *fallback;
+    }
+    return static_cast<const Facet&>(*result);
+}
+
+template<class Character>
+bool isalpha(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::alpha, value);
+}
+
+template<class Character>
+bool isalnum(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::alnum, value);
+}
+
+template<class Character>
+bool isblank(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::blank, value);
+}
+
+template<class Character>
+bool iscntrl(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::cntrl, value);
+}
+
+template<class Character>
+bool isdigit(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::digit, value);
+}
+
+template<class Character>
+bool isgraph(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::graph, value);
+}
+
+template<class Character>
+bool islower(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::lower, value);
+}
+
+template<class Character>
+bool isprint(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::print, value);
+}
+
+template<class Character>
+bool ispunct(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::punct, value);
+}
+
+template<class Character>
+bool isspace(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::space, value);
+}
+
+template<class Character>
+bool isupper(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::upper, value);
+}
+
+template<class Character>
+bool isxdigit(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).is(
+        ctype_base::xdigit, value);
+}
+
+template<class Character>
+Character tolower(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).tolower(value);
+}
+
+template<class Character>
+Character toupper(Character value, const locale& location) {
+    return use_facet<ctype<Character>>(location).toupper(value);
+}
+
+template<class Character, class Traits, class Allocator>
+bool locale::operator()(
+    const basic_string<Character, Traits, Allocator>& left,
+    const basic_string<Character, Traits, Allocator>& right) const {
+    return use_facet<std::collate<Character>>(*this).compare(
+               left.data(), left.data() + left.size(),
+               right.data(), right.data() + right.size()) < 0;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

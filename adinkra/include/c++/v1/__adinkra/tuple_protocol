@@ -1,0 +1,23 @@
+#ifndef ADINKRA___ADINKRA_TUPLE_PROTOCOL
+#define ADINKRA___ADINKRA_TUPLE_PROTOCOL
+
+#include <__adinkra/config>
+#include <cstddef>
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+
+template<class Type>
+struct tuple_size;
+
+template<class Type>
+inline constexpr size_t tuple_size_v = tuple_size<Type>::value;
+
+template<size_t Index, class Type>
+struct tuple_element;
+
+template<size_t Index, class Type>
+using tuple_element_t = typename tuple_element<Index, Type>::type;
+
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+#endif

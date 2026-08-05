@@ -1,0 +1,337 @@
+#ifndef ADINKRA_IOMANIP
+#define ADINKRA_IOMANIP
+
+#include <ctime>
+#include <cwchar>
+#include <istream>
+#include <ostream>
+#include <string>
+#include <string_view>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct __setiosflags {
+    ios_base::fmtflags value;
+};
+
+struct __resetiosflags {
+    ios_base::fmtflags value;
+};
+
+struct __setbase {
+    int value;
+};
+
+struct __setprecision {
+    int value;
+};
+
+struct __setw {
+    int value;
+};
+
+template<class Character>
+struct __put_time {
+    const tm* value;
+    const Character* format;
+};
+
+template<class Character, class Traits>
+struct __quoted_output {
+    basic_string_view<Character, Traits> value;
+    Character delimiter;
+    Character escape;
+};
+
+template<class Character, class Traits, class Allocator>
+struct __quoted_input {
+    basic_string<Character, Traits, Allocator>* value;
+    Character delimiter;
+    Character escape;
+};
+
+template<class Stream>
+struct __quoted_flags_guard {
+    Stream& stream;
+    ios_base::fmtflags flags;
+
+    ~__quoted_flags_guard() {
+        stream.flags(flags);
+    }
+};
+
+inline __setiosflags setiosflags(ios_base::fmtflags value) {
+    return {value};
+}
+
+inline __resetiosflags resetiosflags(ios_base::fmtflags value) {
+    return {value};
+}
+
+inline __setbase setbase(int value) {
+    return {value};
+}
+
+inline __setprecision setprecision(int value) {
+    return {value};
+}
+
+inline __setw setw(int value) {
+    return {value};
+}
+
+template<class Character>
+__put_time<Character> put_time(
+    const tm* value, const Character* format) {
+    return {value, format};
+}
+
+template<class Character>
+__quoted_output<Character, char_traits<Character>> quoted(
+    const Character* value,
+    Character delimiter = Character('"'),
+    Character escape = Character('\\')) {
+    return {
+        basic_string_view<Character>(value),
+        delimiter,
+        escape,
+    };
+}
+
+template<class Character, class Traits, class Allocator>
+__quoted_output<Character, Traits> quoted(
+    const basic_string<Character, Traits, Allocator>& value,
+    Character delimiter = Character('"'),
+    Character escape = Character('\\')) {
+    return {
+        basic_string_view<Character, Traits>(
+            value.data(), value.size()),
+        delimiter,
+        escape,
+    };
+}
+
+template<class Character, class Traits, class Allocator>
+__quoted_input<Character, Traits, Allocator> quoted(
+    basic_string<Character, Traits, Allocator>& value,
+    Character delimiter = Character('"'),
+    Character escape = Character('\\')) {
+    return {&value, delimiter, escape};
+}
+
+template<class Character, class Traits>
+__quoted_output<Character, Traits> quoted(
+    basic_string_view<Character, Traits> value,
+    Character delimiter = Character('"'),
+    Character escape = Character('\\')) {
+    return {value, delimiter, escape};
+}
+
+template<class Character>
+struct __setfill {
+    Character value;
+};
+
+template<class Character>
+__setfill<Character> setfill(Character value) {
+    return {value};
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream, __setiosflags value) {
+    stream.setf(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream, __resetiosflags value) {
+    stream.unsetf(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream, __setbase value) {
+    if (value.value == 8) {
+        stream.setf(ios_base::oct, ios_base::basefield);
+    } else if (value.value == 10) {
+        stream.setf(ios_base::dec, ios_base::basefield);
+    } else if (value.value == 16) {
+        stream.setf(ios_base::hex, ios_base::basefield);
+    } else {
+        stream.unsetf(ios_base::basefield);
+    }
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream, __setprecision value) {
+    stream.precision(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream, __setw value) {
+    stream.width(value.value);
+    return stream;
+}
+
+template<class StreamCharacter, class Traits, class Character>
+basic_ostream<StreamCharacter, Traits>& operator<<(
+    basic_ostream<StreamCharacter, Traits>& stream,
+    __setfill<Character> value) {
+    stream.fill(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream,
+    __put_time<Character> value) {
+    if constexpr (is_same_v<Character, char>) {
+        char result[4096];
+        const size_t count = ::strftime(
+            result, sizeof(result), value.format, value.value);
+        if (count == 0) {
+            stream.setstate(ios_base::failbit);
+        } else {
+            stream.write(result, static_cast<streamsize>(count));
+        }
+    } else if constexpr (is_same_v<Character, wchar_t>) {
+        wchar_t result[4096];
+        const size_t count = ::wcsftime(
+            result, sizeof(result) / sizeof(result[0]),
+            value.format, value.value);
+        if (count == 0) {
+            stream.setstate(ios_base::failbit);
+        } else {
+            stream.write(result, static_cast<streamsize>(count));
+        }
+    }
+    return stream;
+}
+
+template<class Character, class StreamTraits, class SourceTraits>
+basic_ostream<Character, StreamTraits>& operator<<(
+    basic_ostream<Character, StreamTraits>& stream,
+    __quoted_output<Character, SourceTraits> value) {
+    basic_string<Character, StreamTraits> sequence;
+    sequence.reserve(value.value.size() + 2);
+    sequence.push_back(value.delimiter);
+    for (Character character : value.value) {
+        if (StreamTraits::eq(character, value.escape) ||
+            StreamTraits::eq(character, value.delimiter)) {
+            sequence.push_back(value.escape);
+        }
+        sequence.push_back(character);
+    }
+    sequence.push_back(value.delimiter);
+    return stream << sequence;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream,
+    __quoted_input<Character, Traits, Allocator> value) {
+    return stream << __quoted_output<Character, Traits>{
+        basic_string_view<Character, Traits>(
+            value.value->data(), value.value->size()),
+        value.delimiter,
+        value.escape,
+    };
+}
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream, __setiosflags value) {
+    stream.setf(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream, __resetiosflags value) {
+    stream.unsetf(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream, __setbase value) {
+    if (value.value == 8) {
+        stream.setf(ios_base::oct, ios_base::basefield);
+    } else if (value.value == 10) {
+        stream.setf(ios_base::dec, ios_base::basefield);
+    } else if (value.value == 16) {
+        stream.setf(ios_base::hex, ios_base::basefield);
+    } else {
+        stream.unsetf(ios_base::basefield);
+    }
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream, __setprecision value) {
+    stream.precision(value.value);
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream, __setw value) {
+    stream.width(value.value);
+    return stream;
+}
+
+template<class StreamCharacter, class Traits, class Character>
+basic_istream<StreamCharacter, Traits>& operator>>(
+    basic_istream<StreamCharacter, Traits>& stream,
+    __setfill<Character> value) {
+    stream.fill(value.value);
+    return stream;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream,
+    __quoted_input<Character, Traits, Allocator> value) {
+    Character character{};
+    stream >> character;
+    if (!stream) {
+        return stream;
+    }
+    if (!Traits::eq(character, value.delimiter)) {
+        stream.putback(character);
+        stream >> *value.value;
+        return stream;
+    }
+
+    const ios_base::fmtflags original_flags = stream.flags();
+    __quoted_flags_guard<basic_istream<Character, Traits>> restore_flags{
+        stream,
+        original_flags,
+    };
+    stream.unsetf(ios_base::skipws);
+    value.value->clear();
+    while (stream >> character) {
+        if (Traits::eq(character, value.escape)) {
+            if (stream >> character) {
+                value.value->push_back(character);
+            }
+        } else if (Traits::eq(character, value.delimiter)) {
+            break;
+        } else {
+            value.value->push_back(character);
+        }
+    }
+    return stream;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

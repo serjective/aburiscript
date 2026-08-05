@@ -1,47 +1,145 @@
 #include "preprocessor.h"
 #include "helpers/casting.h"
+#include "abi/abi_policy.h"
 #include "abi/darwin_blocks.h"
+#include "attributes.h"
 #include "builtin_registry.h"
 #include "constexpr/pp_consteval.h"
 #include "perf_stats.h"
 #include "target_feature_gate.h"
+#include "token_spelling.h"
 #include <ctime>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
+#include <array>
 #include <optional>
 
-static HideSetType union_hide_sets(const HideSetType& lhs, const HideSetType& rhs) {
-    if (!lhs) {
-        return rhs;
+uint32_t PreProcess::intern_ident(std::string_view name) {
+    if (uint32_t id = idents.lookup(name)) {
+        return id;
     }
-    if (!rhs) {
-        return lhs;
-    }
-    auto merged = std::make_shared<std::unordered_set<std::string>>(*lhs);
-    merged->insert(rhs->begin(), rhs->end());
-    return merged;
+
+    return idents.intern(sm->spellings.store(name), [&](std::string_view s) {
+        return aburi_lookup_keyword(s, lang_opts);
+    });
 }
 
-static HideSetType intersect_hide_sets(const HideSetType& lhs, const HideSetType& rhs) {
-    if (!lhs || !rhs) {
+void PreProcess::install_macro(MacroDefinition mac) {
+    uint32_t id = intern_ident(mac.name);
+    mac.name_ident = id;
+    idents.info(id).maybe_macro = true;
+    macro_table[id] = std::move(mac);
+}
+
+MacroDefinition* PreProcess::find_macro_by_name(std::string_view name) {
+    uint32_t id = idents.lookup(name);
+    if (id == 0) {
         return nullptr;
     }
-    auto inter = std::make_shared<std::unordered_set<std::string>>();
-    for (const auto& s : *lhs) {
-        if (rhs->contains(s)) {
-            inter->insert(s);
-        }
+    auto it = macro_table.find(id);
+    return it == macro_table.end() ? nullptr : &it->second;
+}
+
+HideSetId PreProcess::hide_set_intern(std::vector<uint32_t> sorted_names) {
+    if (sorted_names.empty()) {
+        return 0;
     }
-    if (inter->empty()) {
-        return nullptr;
+    auto [it, inserted] = hide_set_dedup_.emplace(
+        sorted_names, static_cast<HideSetId>(hide_sets_.size() + 1));
+    if (inserted) {
+        hide_sets_.push_back(std::move(sorted_names));
     }
-    return inter;
+    return it->second;
+}
+
+HideSetId PreProcess::hide_set_insert(HideSetId set, uint32_t name_ident) {
+    uint32_t name_id = name_ident;
+    if (set == 0) {
+        return hide_set_intern({name_id});
+    }
+    uint64_t memo_key = (static_cast<uint64_t>(set) << 32) | name_id;
+    auto memo = hide_insert_memo_.find(memo_key);
+    if (memo != hide_insert_memo_.end()) {
+        return memo->second;
+    }
+    const std::vector<uint32_t>& base = hide_sets_[set - 1];
+    std::vector<uint32_t> merged;
+    merged.reserve(base.size() + 1);
+    auto pos = std::lower_bound(base.begin(), base.end(), name_id);
+    merged.assign(base.begin(), pos);
+    if (pos == base.end() || *pos != name_id) {
+        merged.push_back(name_id);
+    }
+    merged.insert(merged.end(), pos, base.end());
+    HideSetId result = hide_set_intern(std::move(merged));
+    hide_insert_memo_.emplace(memo_key, result);
+    return result;
+}
+
+HideSetId PreProcess::hide_set_union(HideSetId lhs, HideSetId rhs) {
+    if (lhs == 0 || lhs == rhs) {
+        return rhs;
+    }
+    if (rhs == 0) {
+        return lhs;
+    }
+    if (lhs > rhs) {
+        std::swap(lhs, rhs);
+    }
+    uint64_t memo_key = (static_cast<uint64_t>(lhs) << 32) | rhs;
+    auto memo = hide_union_memo_.find(memo_key);
+    if (memo != hide_union_memo_.end()) {
+        return memo->second;
+    }
+    const std::vector<uint32_t>& a = hide_sets_[lhs - 1];
+    const std::vector<uint32_t>& b = hide_sets_[rhs - 1];
+    std::vector<uint32_t> merged;
+    merged.reserve(a.size() + b.size());
+    std::set_union(a.begin(), a.end(), b.begin(), b.end(),
+                   std::back_inserter(merged));
+    HideSetId result = hide_set_intern(std::move(merged));
+    hide_union_memo_.emplace(memo_key, result);
+    return result;
+}
+
+HideSetId PreProcess::hide_set_intersect(HideSetId lhs, HideSetId rhs) {
+    if (lhs == 0 || rhs == 0) {
+        return 0;
+    }
+    if (lhs == rhs) {
+        return lhs;
+    }
+    if (lhs > rhs) {
+        std::swap(lhs, rhs);
+    }
+    uint64_t memo_key = (static_cast<uint64_t>(lhs) << 32) | rhs;
+    auto memo = hide_intersect_memo_.find(memo_key);
+    if (memo != hide_intersect_memo_.end()) {
+        return memo->second;
+    }
+    const std::vector<uint32_t>& a = hide_sets_[lhs - 1];
+    const std::vector<uint32_t>& b = hide_sets_[rhs - 1];
+    std::vector<uint32_t> common;
+    std::set_intersection(a.begin(), a.end(), b.begin(), b.end(),
+                          std::back_inserter(common));
+    HideSetId result = hide_set_intern(std::move(common));
+    hide_intersect_memo_.emplace(memo_key, result);
+    return result;
+}
+
+bool PreProcess::hide_set_contains(HideSetId set, uint32_t name_ident) const {
+    if (set == 0 || name_ident == 0) {
+        return false;
+    }
+    const std::vector<uint32_t>& names = hide_sets_[set - 1];
+    return std::binary_search(names.begin(), names.end(), name_ident);
 }
 
 enum class DirectiveKind {
     Define, Undef, Line, Error, Warning, Pragma, Include, IncludeNext,
-    Import, If, Ifdef, Ifndef, Else, Elif, Endif, Ident, Sccs, Unknown
+    Import, If, Ifdef, Ifndef, Else, Elif, Elifdef, Elifndef, Embed, Endif,
+    Ident, Sccs, Unknown
 };
 
 static std::string perf_header_key(const std::shared_ptr<FileSrc>& file) {
@@ -54,8 +152,8 @@ static std::string perf_header_key(const std::shared_ptr<FileSrc>& file) {
     return (std::filesystem::path(file->directory) / file->file_name).string();
 }
 
-static DirectiveKind classify_directive(const std::string& name) {
-    // Use a static lookup table for O(1) directive dispatch
+static DirectiveKind classify_directive(std::string_view name) {
+
     static const std::unordered_map<std::string_view, DirectiveKind> table = {
         {"define",       DirectiveKind::Define},
         {"undef",        DirectiveKind::Undef},
@@ -71,6 +169,9 @@ static DirectiveKind classify_directive(const std::string& name) {
         {"ifndef",       DirectiveKind::Ifndef},
         {"else",         DirectiveKind::Else},
         {"elif",         DirectiveKind::Elif},
+        {"elifdef",      DirectiveKind::Elifdef},
+        {"elifndef",     DirectiveKind::Elifndef},
+        {"embed",        DirectiveKind::Embed},
         {"endif",        DirectiveKind::Endif},
         {"ident",        DirectiveKind::Ident},
         {"sccs",         DirectiveKind::Sccs},
@@ -92,7 +193,7 @@ static std::optional<size_t> parse_pack_alignment_value(const Token& tok, size_t
     if (tok.type != TokenType::INTEGER_CONST && tok.type != TokenType::PP_NUMBER) {
         return std::nullopt;
     }
-    const std::string& text = tok.value;
+    const std::string& text = std::string(tok.value);
     size_t i = 0;
     while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
         ++i;
@@ -141,7 +242,21 @@ static std::optional<WarningId> warning_id_from_flag(std::string_view flag) {
     return std::nullopt;
 }
 
-static std::vector<Token> tokenize_pragma_text(std::string_view text, SrcLoc loc) {
+static std::string_view byte_spelling(unsigned char value) {
+    static const std::array<std::string, 256> table = [] {
+        std::array<std::string, 256> out;
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = std::to_string(i);
+        }
+        return out;
+    }();
+    return table[value];
+}
+
+static std::vector<Token> tokenize_pragma_text(std::string_view text, SrcLoc loc,
+                                                SpellingArena& arena) {
+
+    text = arena.store(text);
     auto is_pp_identifier_start = [](unsigned char ch, char raw) {
         return raw == '_' || raw == '$' || std::isalpha(ch);
     };
@@ -163,7 +278,7 @@ static std::vector<Token> tokenize_pragma_text(std::string_view text, SrcLoc loc
                 if (!is_pp_identifier_continue(c, text[i])) break;
                 ++i;
             }
-            tokens.emplace_back(TokenType::IDENTIFIER, std::string(text.substr(start, i - start)), loc);
+            tokens.emplace_back(TokenType::IDENTIFIER, text.substr(start, i - start), loc);
             continue;
         }
         if (std::isdigit(ch)) {
@@ -171,7 +286,7 @@ static std::vector<Token> tokenize_pragma_text(std::string_view text, SrcLoc loc
             while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
                 ++i;
             }
-            tokens.emplace_back(TokenType::INTEGER_CONST, std::string(text.substr(start, i - start)), loc);
+            tokens.emplace_back(TokenType::INTEGER_CONST, text.substr(start, i - start), loc);
             continue;
         }
         if (text[i] == '(') {
@@ -206,7 +321,7 @@ static std::vector<Token> tokenize_pragma_text(std::string_view text, SrcLoc loc
                 value += c;
                 ++i;
             }
-            tokens.emplace_back(TokenType::STRING_LITERAL, value, loc);
+            tokens.emplace_back(TokenType::STRING_LITERAL, arena.store(value), loc);
             continue;
         }
         ++i;
@@ -223,120 +338,50 @@ static std::optional<std::string> parse_pragma_macro_name(const std::vector<Toke
         tokens[3].type != TokenType::RIGHT_PAREN) {
         return std::nullopt;
     }
-    return tokens[2].value;
+    return std::string(tokens[2].value);
 }
 
-static std::string literal_prefix_spelling(LiteralPrefix prefix) {
-    switch (prefix) {
-        case LiteralPrefix::L: return "L";
-        case LiteralPrefix::U8: return "u8";
-        case LiteralPrefix::U: return "U";
-        case LiteralPrefix::u: return "u";
-        case LiteralPrefix::None:
-        default:
-            return "";
-    }
-}
-
-static void append_hex_escape(std::string& out, unsigned char byte) {
-    static const char kHex[] = "0123456789ABCDEF";
-    out += "\\x";
-    out.push_back(kHex[(byte >> 4) & 0xF]);
-    out.push_back(kHex[byte & 0xF]);
-}
-
-static std::string escape_literal_payload(std::string_view payload, bool is_char_literal) {
-    std::string escaped;
-    escaped.reserve(payload.size());
-    for (unsigned char byte : payload) {
-        switch (byte) {
-            case '\a': escaped += "\\a"; break;
-            case '\b': escaped += "\\b"; break;
-            case '\f': escaped += "\\f"; break;
-            case '\n': escaped += "\\n"; break;
-            case '\r': escaped += "\\r"; break;
-            case '\t': escaped += "\\t"; break;
-            case '\v': escaped += "\\v"; break;
-            case '\\': escaped += "\\\\"; break;
-            case '"':
-                if (is_char_literal) {
-                    escaped.push_back('"');
-                } else {
-                    escaped += "\\\"";
-                }
-                break;
-            case '\'':
-                if (is_char_literal) {
-                    escaped += "\\'";
-                } else {
-                    escaped.push_back('\'');
-                }
-                break;
-            default:
-                if (byte < 0x20 || byte >= 0x7F) {
-                    append_hex_escape(escaped, byte);
-                } else {
-                    escaped.push_back(static_cast<char>(byte));
-                }
-                break;
-        }
-    }
-    return escaped;
-}
-
-static std::string token_spelling_for_output(const Token& t) {
-    switch (t.type) {
-        case TokenType::STRING_LITERAL:
-            return literal_prefix_spelling(t.literal_prefix) + "\"" +
-                escape_literal_payload(t.value, false) + "\"";
-        case TokenType::CHAR_LITERAL:
-            return literal_prefix_spelling(t.literal_prefix) + "'" +
-                escape_literal_payload(t.value, true) + "'";
+static bool token_can_carry_literal_suffix(TokenType type) {
+    switch (type) {
+        case TokenType::INTEGER_CONST:
         case TokenType::UNSIGNED_INTEGER_CONST:
-            return t.value + "U";
         case TokenType::LONG_CONST:
-            return t.value + "L";
         case TokenType::UNSIGNED_LONG_CONST:
-            return t.value + "UL";
         case TokenType::LONG_LONG_CONST:
-            return t.value + "LL";
         case TokenType::UNSIGNED_LONG_LONG_CONST:
-            return t.value + "ULL";
+        case TokenType::BITINT_CONST:
+        case TokenType::UNSIGNED_BITINT_CONST:
         case TokenType::FLOAT_CONST:
-            return t.value + "F";
+        case TokenType::DOUBLE_CONST:
         case TokenType::LONG_DOUBLE_CONST:
-            return t.value + "L";
-        case TokenType::IMAG_INTEGER_CONST:
-            return t.value + "i";
-        case TokenType::IMAG_UNSIGNED_INTEGER_CONST:
-            return t.value + "Ui";
-        case TokenType::IMAG_LONG_CONST:
-            return t.value + "Li";
-        case TokenType::IMAG_UNSIGNED_LONG_CONST:
-            return t.value + "ULi";
-        case TokenType::IMAG_LONG_LONG_CONST:
-            return t.value + "LLi";
-        case TokenType::IMAG_UNSIGNED_LONG_LONG_CONST:
-            return t.value + "ULLi";
-        case TokenType::IMAG_FLOAT_CONST:
-            return t.value + "Fi";
-        case TokenType::IMAG_DOUBLE_CONST:
-            return t.value + "i";
-        case TokenType::IMAG_LONG_DOUBLE_CONST:
-            return t.value + "Li";
+        case TokenType::CHAR_LITERAL:
+        case TokenType::STRING_LITERAL:
+            return true;
         default:
-            return t.value;
+            return false;
     }
 }
 
-static std::string token_sequence_spelling_for_macro_dump(const std::vector<Token>& tokens) {
+static std::string preprocessor_token_spelling(
+    const Token& token,
+    const IdentTable& idents) {
+    std::string spelling = aburi::token_spelling_for_output(token);
+    if (token.ident != 0 && token_can_carry_literal_suffix(token.type)) {
+        spelling += idents.info(token.ident).spelling;
+    }
+    return spelling;
+}
+
+static std::string token_sequence_spelling_for_macro_dump(
+    const std::vector<Token>& tokens,
+    const IdentTable& idents) {
     std::string text;
     bool first = true;
     for (const auto& token : tokens) {
         if (!first) {
             text.push_back(' ');
         }
-        text += token_spelling_for_output(token);
+        text += preprocessor_token_spelling(token, idents);
         first = false;
     }
     return text;
@@ -350,13 +395,15 @@ static std::vector<Token> builtin_macro_tokens_for_dump(const PreProcess& pp,
             result.emplace_back(TokenType::INTEGER_CONST, "1", SrcLoc());
             break;
         case MacroDefinition::BuiltinKind::File:
+        case MacroDefinition::BuiltinKind::BaseFile:
             result.emplace_back(TokenType::STRING_LITERAL, pp.base_file_name.empty() ? "<stdin>" : pp.base_file_name,
                                 SrcLoc());
             break;
         case MacroDefinition::BuiltinKind::FileName:
             result.emplace_back(TokenType::STRING_LITERAL,
-                                std::filesystem::path(pp.base_file_name.empty() ? "<stdin>" : pp.base_file_name)
-                                    .filename().string(),
+                                pp.sm->spellings.store(
+                                    std::filesystem::path(pp.base_file_name.empty() ? "<stdin>" : pp.base_file_name)
+                                        .filename().string()),
                                 SrcLoc());
             break;
         case MacroDefinition::BuiltinKind::Counter:
@@ -374,7 +421,8 @@ static std::vector<Token> builtin_macro_tokens_for_dump(const PreProcess& pp,
         case MacroDefinition::BuiltinKind::StdcVersion: {
             auto stdc_version = pp.lang_opts.stdc_version_macro_value();
             if (stdc_version.has_value()) {
-                result.emplace_back(TokenType::LONG_CONST, std::to_string(*stdc_version), SrcLoc());
+                result.emplace_back(TokenType::LONG_CONST,
+                                    pp.sm->spellings.store(std::to_string(*stdc_version)), SrcLoc());
             }
             break;
         }
@@ -384,7 +432,8 @@ static std::vector<Token> builtin_macro_tokens_for_dump(const PreProcess& pp,
         case MacroDefinition::BuiltinKind::CPlusPlus: {
             auto cplusplus = pp.lang_opts.cplusplus_macro_value();
             if (cplusplus.has_value()) {
-                result.emplace_back(TokenType::LONG_CONST, std::to_string(*cplusplus), SrcLoc());
+                result.emplace_back(TokenType::LONG_CONST,
+                                    pp.sm->spellings.store(std::to_string(*cplusplus)), SrcLoc());
             }
             break;
         }
@@ -462,7 +511,7 @@ static bool parse_has_include_operand(const std::vector<Token>& tokens, std::str
         header.clear();
         for (size_t i = 1; i + 1 < tokens.size(); ++i) {
             if (tokens[i].type == TokenType::STRING_LITERAL) {
-                header += "\"" + tokens[i].value + "\"";
+                header += "\"" + std::string(tokens[i].value) + "\"";
             } else {
                 header += tokens[i].value;
             }
@@ -484,10 +533,12 @@ static std::string basename_from_path(const std::string& path) {
     return name;
 }
 
-static bool is_builtin_defined_name(const std::string& name) {
+static bool is_builtin_defined_name(std::string_view name) {
     return name == "__has_attribute" ||
            name == "__has_builtin" ||
+           name == "__has_c_attribute" ||
            name == "__has_cpp_attribute" ||
+           name == "__has_embed" ||
            name == "__has_extension" ||
            name == "__has_feature" ||
            name == "__has_warning" ||
@@ -496,16 +547,13 @@ static bool is_builtin_defined_name(const std::string& name) {
            name == "__has_include_next";
 }
 
-static std::string canonicalize_attribute_name(const std::string& name) {
+static std::string canonicalize_preprocessor_attribute_name(const std::string& name) {
     std::string canonical = name;
     size_t scope_pos = canonical.rfind("::");
     if (scope_pos != std::string::npos) {
         canonical = canonical.substr(scope_pos + 2);
     }
-    if (canonical.size() >= 4 && canonical.starts_with("__") && canonical.ends_with("__")) {
-        return canonical.substr(2, canonical.size() - 4);
-    }
-    return canonical;
+    return aburi::canonicalize_attribute_name(canonical);
 }
 
 struct HasQueryOperand {
@@ -547,7 +595,7 @@ static std::optional<HasQueryOperand> extract_has_query_operand(const std::vecto
     }
 
     while (true) {
-        segments.push_back(tokens[index].value);
+        segments.push_back(std::string(tokens[index].value));
         ++index;
         skip_whitespace(index);
         if (index >= tokens.size()) {
@@ -628,7 +676,19 @@ static std::string canonicalize_attribute_namespace(const std::string& ns) {
     return ns;
 }
 
-static uint64_t cpp_standard_attribute_value(const std::string& canonical_name) {
+static uint64_t cpp_standard_attribute_value(const std::string& canonical_name,
+                                             const LangOptions& lang_opts,
+                                             const TargetInfo* target_info) {
+    if (!aburi::AttributeRegistry::instance().is_active(canonical_name)) {
+        return 0;
+    }
+    if (canonical_name == "no_unique_address") {
+        const bool cxx20 = lang_opts.is_cxx_mode() &&
+            (lang_opts.standard.empty() || lang_opts.is_cxx20_or_later());
+        const bool itanium = target_info &&
+            abi_policy_for_target(*target_info).cxx_abi == CxxAbiKind::Itanium;
+        return cxx20 && itanium ? 201803ULL : 0;
+    }
     static const std::unordered_map<std::string, uint64_t> values = {
         {"noreturn", 200809ULL},
         {"deprecated", 201309ULL},
@@ -644,14 +704,22 @@ static uint64_t cpp_standard_attribute_value(const std::string& canonical_name) 
     return it != values.end() ? it->second : 0;
 }
 
-static uint64_t has_cpp_attribute_value(const HasQueryOperand& operand) {
+static bool supports_gnu_attribute_name(const std::string& canonical_name) {
+    return aburi::AttributeRegistry::instance().is_active(canonical_name);
+}
+
+static uint64_t has_cpp_attribute_value(const HasQueryOperand& operand,
+                                        const LangOptions& lang_opts,
+                                        const TargetInfo* target_info) {
     if (operand.is_string_literal) {
         return 0;
     }
 
-    const std::string canonical_name = canonicalize_attribute_name(operand.query);
+    const std::string canonical_name =
+        canonicalize_preprocessor_attribute_name(operand.query);
     if (operand.scope_segments.empty()) {
-        return cpp_standard_attribute_value(canonical_name);
+        return cpp_standard_attribute_value(canonical_name, lang_opts,
+                                            target_info);
     }
 
     if (operand.scope_segments.size() != 1) {
@@ -664,15 +732,49 @@ static uint64_t has_cpp_attribute_value(const HasQueryOperand& operand) {
         return 0;
     }
     if (canonical_ns == "clang") {
-        static const std::unordered_set<std::string> supported_clang_attributes = {
-            "lifetimebound",
-            "noescape",
-            "ptrauth_vtable_pointer",
-        };
-        return supported_clang_attributes.contains(canonical_name) ? 1 : 0;
+        return 0;
     }
     if (canonical_ns == "gnu") {
-        return AttributeRegistry::instance().find(canonical_name) ? 1 : 0;
+        return supports_gnu_attribute_name(canonical_name) ? 1 : 0;
+    }
+    return 0;
+}
+
+static uint64_t c_standard_attribute_value(const std::string& canonical_name) {
+    if (!aburi::AttributeRegistry::instance().is_active(canonical_name)) {
+        return 0;
+    }
+
+    static const std::unordered_map<std::string, uint64_t> values = {
+        {"deprecated", 201904ULL},
+        {"fallthrough", 201904ULL},
+        {"maybe_unused", 201904ULL},
+        {"nodiscard", 202003ULL},
+        {"noreturn", 202202ULL},
+        {"_Noreturn", 202202ULL},
+        {"unsequenced", 202207ULL},
+        {"reproducible", 202207ULL},
+    };
+    auto it = values.find(canonical_name);
+    return it != values.end() ? it->second : 0;
+}
+
+static uint64_t has_c_attribute_value(const HasQueryOperand& operand) {
+    if (operand.is_string_literal) {
+        return 0;
+    }
+    const std::string canonical_name =
+        canonicalize_preprocessor_attribute_name(operand.query);
+    if (operand.scope_segments.empty()) {
+        return c_standard_attribute_value(canonical_name);
+    }
+    if (operand.scope_segments.size() != 1) {
+        return 0;
+    }
+    const std::string canonical_ns =
+        canonicalize_attribute_namespace(operand.scope_segments.front());
+    if (canonical_ns == "gnu") {
+        return supports_gnu_attribute_name(canonical_name) ? 1 : 0;
     }
     return 0;
 }
@@ -689,6 +791,25 @@ static bool has_feature_name(const std::string& name,
     static const std::unordered_set<std::string> kFeatures = {
         "attribute_deprecated_with_message"
     };
+    if (lang_opts.is_objc()) {
+
+        static const std::unordered_set<std::string> kObjCFeatures = {
+            "objc_instancetype", "objc_generics", "objc_generics_variance",
+            "objc_kindof",       "objc_class_property",
+            "objc_fixed_enum",   "objc_bridge_id",
+            "objc_bridge_id_on_typedefs", "nullability",
+            "nullability_on_arrays", "assume_nonnull",
+            "attribute_availability", "attribute_availability_with_message",
+            "enumerator_attributes"
+        };
+        if (kObjCFeatures.contains(name)) {
+            return true;
+        }
+        if (lang_opts.is_objc_arc() &&
+            (name == "objc_arc" || name == "objc_arc_weak")) {
+            return true;
+        }
+    }
     if (kFeatures.contains(name)) {
         return true;
     }
@@ -697,6 +818,15 @@ static bool has_feature_name(const std::string& name,
     }
     if (name == "cxx_atomic") {
         return lang_opts.is_cxx_mode();
+    }
+    if (name == "cxx_raw_string_literals") {
+        return lang_opts.is_cxx_mode();
+    }
+    if (name == "cxx_rtti") {
+        return lang_opts.is_cxx_mode();
+    }
+    if (name == "cxx_exceptions") {
+        return lang_opts.is_cxx_mode() && lang_opts.exceptions_enabled;
     }
     if (name == "c_atomic") {
         if (!lang_opts.is_c_mode()) {
@@ -835,14 +965,6 @@ bool detect_include_guard_fast(const std::string& text, std::string& guard_macro
     saw_pragma_once = false;
     guard_macro.clear();
 
-    // Lightweight line scanner for the canonical header prologue:
-    //   #pragma once (optional)
-    //   #ifndef X or #if !defined(X)
-    //   #define X
-    //   ...
-    //   #endif
-    // with only trivia after the closing #endif. Anything else is not a
-    // whole-file include guard and must not be cached as one.
     enum class GuardScanState {
         Prefix,
         ExpectDefine,
@@ -992,8 +1114,7 @@ void inital_preproc(std::string& text, std::vector<MappingStep>& map) {
 
     map.clear();
     map.reserve(std::max<size_t>(8, size / 64 + 1));
-    // Initial identity mapping so getRealSrcLoc can always decrement
-    // the upper_bound iterator safely for positions before the first change.
+
     map.push_back({0, 0});
 
     auto update_mapping = [&](size_t logical_index, size_t physical_offset) {
@@ -1020,7 +1141,7 @@ void inital_preproc(std::string& text, std::vector<MappingStep>& map) {
                 read_ptr += 2;
                 buffer[write_ptr++] = '\n';
             } else {
-                // Treat lone CR as LF while preserving byte count.
+
                 buffer[write_ptr++] = '\n';
                 read_ptr++;
             }
@@ -1028,8 +1149,7 @@ void inital_preproc(std::string& text, std::vector<MappingStep>& map) {
         }
 
         if (c == '\\' && read_ptr + 1 < size) {
-            // GNU-style line splicing allows horizontal space between backslash
-            // and newline. Consume the full splice and record mapping shift.
+
             size_t splice_ptr = read_ptr + 1;
             while (splice_ptr < size && is_gnu_splice_space(buffer[splice_ptr])) {
                 ++splice_ptr;
@@ -1116,18 +1236,17 @@ void PreProcess::handleDefineDirective(SrcLoc def_loc) {
         error("Invalid name for a macro", nameTok.loc);
         return;
     }
-    auto macdef = MacroDefinition(nameTok.value, def_loc);
+    auto macdef = MacroDefinition(std::string(nameTok.value), def_loc);
     Token future = current_tok_src()->peekToken();
 
     if (future.value == "(" && future.flags.has_leading_space == 0) {
-        // Function-like macros are recognized only when `(` is adjacent to name.
-        macdef.is_function_like = true;
-        current_tok_src()->nextToken(); // consume '('
 
-        // Parse parameters
+        macdef.is_function_like = true;
+        current_tok_src()->nextToken();
+
         Token param = current_tok_src()->nextToken();
         if (param.type == TokenType::RIGHT_PAREN) {
-            // Empty parameter list
+
         } else {
             while (true) {
                 if (param.type == TokenType::ELLIPSIS) {
@@ -1142,13 +1261,13 @@ void PreProcess::handleDefineDirective(SrcLoc def_loc) {
                 if (!param.isIdentifierLike()) {
                     error("Expected identifier in macro parameter list", param.loc);
                 }
-                macdef.parameters.push_back(param.value);
+                macdef.parameters.push_back(std::string(param.value));
                 Token sep = current_tok_src()->nextToken();
                 if (sep.type == TokenType::RIGHT_PAREN) {
                     break;
                 }
                 if (sep.type == TokenType::ELLIPSIS) {
-                    // GNU named variadic macro syntax: NAME(args...)
+
                     macdef.is_variadic = true;
                     Token closing = current_tok_src()->nextToken();
                     if (closing.type != TokenType::RIGHT_PAREN) {
@@ -1180,8 +1299,7 @@ void PreProcess::handleDefineDirective(SrcLoc def_loc) {
         macdef.replacement_list.push_back(tok);
     }
     if (macdef.replacement_list.size() >= 2) {
-        // Validate token-paste placement early so malformed `##` macros do not
-        // enter the table and fail later during expansion.
+
         const Token& first = macdef.replacement_list[0];
         const Token& second = macdef.replacement_list[1];
         if (first.type == TokenType::POUND &&
@@ -1197,7 +1315,7 @@ void PreProcess::handleDefineDirective(SrcLoc def_loc) {
             error("## cannot appear at the end of a macro replacement list", before_last.loc);
         }
     }
-    macro_table[macdef.name] = std::move(macdef);
+    install_macro(std::move(macdef));
 
 }
 void PreProcess::handleUndefDirective(SrcLoc def_loc) {
@@ -1205,7 +1323,9 @@ void PreProcess::handleUndefDirective(SrcLoc def_loc) {
     if (!name_tok.isIdentifierLike()) {
         error("Expected identifier after #undef", name_tok.loc);
     }
-    macro_table.erase(name_tok.value);
+    if (uint32_t id = name_tok.ident ? name_tok.ident : idents.lookup(name_tok.value)) {
+        macro_table.erase(id);
+    }
     while (true) {
         Token tok = current_tok_src()->nextToken();
         if (tok.type == TokenType::Newline || tok.type == TokenType::Eof) break;
@@ -1221,8 +1341,11 @@ void PreProcess::define_object_macro(const std::string& name, const std::string&
     }
     MacroDefinition macdef(name, def_loc);
     if (!value.empty()) {
-        Lexer lex(value, def_loc, sm.get(), lang_opts);
+
+        std::string_view stable_value = sm->spellings.store(value);
+        Lexer lex(stable_value, def_loc, sm.get(), lang_opts);
         lex.pp_number_mode = true;
+        lex.ident_table = &idents;
         while (true) {
             auto tok_opt = lex.next_token();
             if (!tok_opt.has_value()) {
@@ -1236,14 +1359,16 @@ void PreProcess::define_object_macro(const std::string& name, const std::string&
             macdef.replacement_list.push_back(tok);
         }
     }
-    macro_table[macdef.name] = std::move(macdef);
+    install_macro(std::move(macdef));
 }
 
 void PreProcess::undef_macro(const std::string& name) {
     if (name.empty()) {
         return;
     }
-    macro_table.erase(name);
+    if (uint32_t id = idents.lookup(name)) {
+        macro_table.erase(id);
+    }
 }
 
 void PreProcess::init_builtin_state() {
@@ -1261,24 +1386,60 @@ void PreProcess::init_builtin_macros() {
     auto add_builtin = [&](const std::string& name, MacroDefinition::BuiltinKind kind) {
         MacroDefinition mac(name);
         mac.builtin_kind = kind;
-        macro_table[name] = std::move(mac);
+        install_macro(std::move(mac));
     };
     add_builtin("__LINE__", MacroDefinition::BuiltinKind::Line);
     add_builtin("__FILE__", MacroDefinition::BuiltinKind::File);
+    add_builtin("__BASE_FILE__", MacroDefinition::BuiltinKind::BaseFile);
     add_builtin("__FILE_NAME__", MacroDefinition::BuiltinKind::FileName);
     add_builtin("__COUNTER__", MacroDefinition::BuiltinKind::Counter);
     add_builtin("__DATE__", MacroDefinition::BuiltinKind::Date);
     add_builtin("__TIME__", MacroDefinition::BuiltinKind::Time);
     add_builtin("__STDC__", MacroDefinition::BuiltinKind::Stdc);
     add_builtin("__STDC_HOSTED__", MacroDefinition::BuiltinKind::StdcHosted);
+
+    if (lang_opts.optimization_level > 0) {
+        define_object_macro("__OPTIMIZE__", "1");
+        if (lang_opts.optimize_for_size) {
+            define_object_macro("__OPTIMIZE_SIZE__", "1");
+        }
+    }
     if (lang_opts.stdc_version_macro_value().has_value()) {
         add_builtin("__STDC_VERSION__", MacroDefinition::BuiltinKind::StdcVersion);
     }
     if (lang_opts.cplusplus_macro_value().has_value()) {
         add_builtin("__cplusplus", MacroDefinition::BuiltinKind::CPlusPlus);
+        if (target_info) {
+            define_object_macro(
+                "__STDCPP_DEFAULT_NEW_ALIGNMENT__",
+                std::to_string(target_info->default_new_alignment_bytes) +
+                    "UL");
+        }
     }
     if (lang_opts.is_cxx20_or_later()) {
+        define_object_macro("__cpp_char8_t", "202207L");
         define_object_macro("__cpp_concepts", "202002L");
+        define_object_macro("__cpp_conditional_explicit", "201806L");
+    }
+    if (lang_opts.is_cxx_mode()) {
+        define_object_macro("__cpp_raw_strings", "200710L");
+        define_object_macro(
+            "__cpp_range_based_for",
+            lang_opts.is_cxx26_or_later() ? "202211L" : "201603L");
+
+        define_object_macro("__cpp_rtti", "199711L");
+        define_object_macro("__GXX_RTTI", "1");
+        if (lang_opts.exceptions_enabled) {
+            define_object_macro("__cpp_exceptions", "199711L");
+            define_object_macro("__EXCEPTIONS", "1");
+        }
+    }
+    if (lang_opts.is_cxx26_or_later()) {
+        define_object_macro("__cpp_pack_indexing", "202311L");
+        define_object_macro("__cpp_expansion_statements", "202506L");
+    }
+    if (lang_opts.is_cxx_mode() && lang_opts.enable_cpp_reflection) {
+        define_object_macro("__cpp_impl_reflection", "202406L");
     }
     if (lang_opts.is_c_mode()) {
         if (lang_opts.uses_gnu_inline_semantics()) {
@@ -1291,17 +1452,28 @@ void PreProcess::init_builtin_macros() {
         darwin_blocks::blocks_enabled_for_langopts(lang_opts, *target_info)) {
         define_object_macro("__BLOCKS__", "1");
     }
+    if (lang_opts.is_objc()) {
 
-    // Atomic memory order macros
+        define_object_macro("__OBJC__", "1");
+        define_object_macro("__OBJC2__", "1");
+        define_object_macro("OBJC_NEW_PROPERTIES", "1");
+        define_object_macro("__NEXT_RUNTIME__", "1");
+
+        define_object_macro("__kindof", "");
+
+        define_object_macro("__nullable", "_Nullable");
+        define_object_macro("__nonnull", "_Nonnull");
+        define_object_macro("__null_unspecified", "_Null_unspecified");
+    }
+
     auto add_simple_int = [&](const std::string& name, int value) {
         MacroDefinition mac(name);
-        mac.replacement_list.push_back(Token(TokenType::INTEGER_CONST, std::to_string(value), SrcLoc()));
-        macro_table[name] = std::move(mac);
+        mac.replacement_list.push_back(Token(
+            TokenType::INTEGER_CONST,
+            sm->spellings.store(std::to_string(value)), SrcLoc()));
+        install_macro(std::move(mac));
     };
 
-    // Disable _FORTIFY_SOURCE: the hardened __builtin___*_chk functions are
-    // not yet implemented, so prevent system headers from rewriting standard
-    // library calls (e.g. strcat -> __builtin___strcat_chk).
     add_simple_int("_FORTIFY_SOURCE", 0);
     add_simple_int("__ATOMIC_RELAXED", 0);
     add_simple_int("__ATOMIC_CONSUME", 1);
@@ -1310,9 +1482,11 @@ void PreProcess::init_builtin_macros() {
     add_simple_int("__ATOMIC_ACQ_REL", 4);
     add_simple_int("__ATOMIC_SEQ_CST", 5);
 
-    // GCC atomic type properties
     add_simple_int("__GCC_ATOMIC_BOOL_LOCK_FREE", 2);
     add_simple_int("__GCC_ATOMIC_CHAR_LOCK_FREE", 2);
+    if (lang_opts.is_cxx20_or_later()) {
+        add_simple_int("__GCC_ATOMIC_CHAR8_T_LOCK_FREE", 2);
+    }
     add_simple_int("__GCC_ATOMIC_CHAR16_T_LOCK_FREE", 2);
     add_simple_int("__GCC_ATOMIC_CHAR32_T_LOCK_FREE", 2);
     add_simple_int("__GCC_ATOMIC_WCHAR_T_LOCK_FREE", 2);
@@ -1324,10 +1498,11 @@ void PreProcess::init_builtin_macros() {
     add_simple_int("__PRAGMA_REDEFINE_EXTNAME", 1);
     add_simple_int("__PRAGMA_WEAK", 1);
 
-    // Clang atomic type properties (used by Clang's stdatomic.h)
     add_simple_int("__CLANG_ATOMIC_BOOL_LOCK_FREE", 2);
     add_simple_int("__CLANG_ATOMIC_CHAR_LOCK_FREE", 2);
-    add_simple_int("__CLANG_ATOMIC_CHAR8_T_LOCK_FREE", 2);
+    if (lang_opts.is_cxx20_or_later()) {
+        add_simple_int("__CLANG_ATOMIC_CHAR8_T_LOCK_FREE", 2);
+    }
     add_simple_int("__CLANG_ATOMIC_CHAR16_T_LOCK_FREE", 2);
     add_simple_int("__CLANG_ATOMIC_CHAR32_T_LOCK_FREE", 2);
     add_simple_int("__CLANG_ATOMIC_WCHAR_T_LOCK_FREE", 2);
@@ -1337,12 +1512,31 @@ void PreProcess::init_builtin_macros() {
     add_simple_int("__CLANG_ATOMIC_LLONG_LOCK_FREE", 2);
     add_simple_int("__CLANG_ATOMIC_POINTER_LOCK_FREE", 2);
 
-    // Integer limit macros
-    auto add_simple_str = [&](const std::string& name, const std::string& value, TokenType tt = TokenType::INTEGER_CONST) {
+    auto add_simple_str = [&](const std::string& name, std::string_view value, TokenType tt = TokenType::INTEGER_CONST) {
         MacroDefinition mac(name);
         mac.replacement_list.push_back(Token(tt, value, SrcLoc()));
-        macro_table[name] = std::move(mac);
+        install_macro(std::move(mac));
     };
+
+    add_simple_str("__BOOL_WIDTH__", "8");
+    add_simple_str("__SCHAR_WIDTH__", "8");
+    add_simple_str("__SHRT_WIDTH__", "16");
+    add_simple_str("__INT_WIDTH__", "32");
+    add_simple_str("__LONG_WIDTH__", "64");
+    add_simple_str("__LLONG_WIDTH__", "64");
+    add_simple_str("__WCHAR_WIDTH__", "32");
+    add_simple_str("__WINT_WIDTH__", "32");
+    add_simple_str("__INTMAX_WIDTH__", "64");
+    add_simple_str("__UINTMAX_WIDTH__", "64");
+    add_simple_str("__SIZE_WIDTH__", "64");
+    add_simple_str("__PTRDIFF_WIDTH__", "64");
+    add_simple_str("__INTPTR_WIDTH__", "64");
+    add_simple_str("__UINTPTR_WIDTH__", "64");
+    add_simple_str("__SIG_ATOMIC_WIDTH__", "32");
+    add_simple_str("__BITINT_MAXWIDTH__", "128");
+    add_simple_str("__STDC_EMBED_NOT_FOUND__", "0");
+    add_simple_str("__STDC_EMBED_FOUND__", "1");
+    add_simple_str("__STDC_EMBED_EMPTY__", "2");
     add_simple_str("__SCHAR_MAX__", "127");
     add_simple_str("__SHRT_MAX__", "32767");
     add_simple_str("__INT_MAX__", "2147483647");
@@ -1363,14 +1557,12 @@ void PreProcess::init_builtin_macros() {
     add_simple_str("__SIZEOF_SIZE_T__", "8");
     add_simple_str("__SIZEOF_PTRDIFF_T__", "8");
 
-    // GCC-compatible __*_TYPE__ macros (LP64)
-    // Helper to add a multi-token type macro
-    auto add_type_macro = [&](const std::string& name, std::vector<std::pair<TokenType, std::string>> tokens) {
+    auto add_type_macro = [&](const std::string& name, std::vector<std::pair<TokenType, std::string_view>> tokens) {
         MacroDefinition mac(name);
         for (auto& [tt, val] : tokens) {
             mac.replacement_list.push_back(Token(tt, val, SrcLoc()));
         }
-        macro_table[name] = std::move(mac);
+        install_macro(std::move(mac));
     };
     add_type_macro("__INT8_TYPE__", {{TokenType::SIGNED, "signed"}, {TokenType::CHAR, "char"}});
     add_type_macro("__INT16_TYPE__", {{TokenType::SHORT, "short"}});
@@ -1392,10 +1584,8 @@ void PreProcess::init_builtin_macros() {
     add_type_macro("__CHAR32_TYPE__", {{TokenType::UNSIGNED, "unsigned"}, {TokenType::INT, "int"}});
     add_type_macro("__SIG_ATOMIC_TYPE__", {{TokenType::INT, "int"}});
 
-    // C99 integer constant helper macros. Some system headers only define these
-    // via compiler-provided internals that aburi does not predefine yet.
     auto add_unary_cast_fn_macro = [&](const std::string& name,
-                                       std::vector<std::pair<TokenType, std::string>> cast_type_tokens) {
+                                       std::vector<std::pair<TokenType, std::string_view>> cast_type_tokens) {
         MacroDefinition mac(name);
         mac.is_function_like = true;
         mac.parameters.push_back("v");
@@ -1409,7 +1599,7 @@ void PreProcess::init_builtin_macros() {
         mac.replacement_list.emplace_back(TokenType::IDENTIFIER, "v", SrcLoc());
         mac.replacement_list.emplace_back(TokenType::RIGHT_PAREN, ")", SrcLoc());
         mac.replacement_list.emplace_back(TokenType::RIGHT_PAREN, ")", SrcLoc());
-        macro_table[name] = std::move(mac);
+        install_macro(std::move(mac));
     };
 
     add_unary_cast_fn_macro("INT8_C", {{TokenType::INT, "int"}});
@@ -1423,31 +1613,37 @@ void PreProcess::init_builtin_macros() {
     add_unary_cast_fn_macro("INTMAX_C", {{TokenType::LONG, "long"}});
     add_unary_cast_fn_macro("UINTMAX_C", {{TokenType::UNSIGNED, "unsigned"}, {TokenType::LONG, "long"}});
 
-    // Keep a compatibility `bool` macro for C-family legacy code paths.
-    // In C++ mode, `bool` is a core keyword and must not be macro-rewritten.
-    if (!lang_opts.is_cxx_mode()) {
-        MacroDefinition mac("bool");
-        mac.replacement_list.push_back(Token(TokenType::IDENTIFIER, "_Bool", SrcLoc()));
-        macro_table["bool"] = std::move(mac);
-    }
-    // Predefine true/false only for C23-family modes where they are
-    // language keywords. Older GNU modes rely on using these names as
-    // ordinary identifiers in some torture tests.
     if (is_c23_family_standard(lang_opts.standard)) {
-        add_simple_int("true", 1);
-        add_simple_int("false", 0);
         add_simple_int("__bool_true_false_are_defined", 1);
     }
 
-    // Register built-in headers
     builtin_headers["stdarg.h"] = R"(
+/* The system C library includes <stdarg.h> under __need___va_list to obtain
+   only __gnuc_va_list, outside the main include guard. */
+#if defined(__need___va_list)
+#undef __need___va_list
+#ifndef __GNUC_VA_LIST
+#define __GNUC_VA_LIST
+typedef __builtin_va_list __gnuc_va_list;
+#endif
+#else
 #ifndef _ABURI_STDARG_H
 #define _ABURI_STDARG_H
+#ifndef __GNUC_VA_LIST
+#define __GNUC_VA_LIST
+typedef __builtin_va_list __gnuc_va_list;
+#endif
 typedef __builtin_va_list va_list;
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+/* C23 7.16.1.4: va_start takes only the va_list; extra arguments ignored. */
+#define va_start(ap, ...) __builtin_va_start(ap, 0)
+#else
 #define va_start(ap, param) __builtin_va_start(ap, param)
+#endif
 #define va_end(ap) __builtin_va_end(ap)
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
 #define va_copy(dest, src) __builtin_va_copy(dest, src)
+#endif
 #endif
 )";
 
@@ -1522,11 +1718,13 @@ typedef __CHAR32_TYPE__ char32_t;
 typedef signed char int8_t;
 typedef short int16_t;
 typedef int int32_t;
-typedef long long int64_t;
+/* The 64-bit pair follows the target ABI so repeated declarations in system
+   headers retain exact typedef identity. */
+typedef __INT64_TYPE__ int64_t;
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
+typedef __UINT64_TYPE__ uint64_t;
 typedef __INTPTR_TYPE__ intptr_t;
 typedef __UINTPTR_TYPE__ uintptr_t;
 typedef __INTMAX_TYPE__ intmax_t;
@@ -1634,8 +1832,17 @@ typedef uint64_t uint_fast64_t;
 #define _XOPEN_IOV_MAX 16
 #define IOV_MAX 1024
 #define NZERO 20
+/* XSI word-bit counts follow the predefined target widths. */
+#define WORD_BIT __INT_WIDTH__
+#define LONG_BIT __LONG_WIDTH__
 #endif
 )";
+
+    if (target_info && target_info->arch == TargetArch::AARCH64) {
+        builtin_headers["arm_neon.h"] =
+#include "aburi_arm_neon_h.inc"
+            ;
+    }
 }
 
 void PreProcess::init_target_macros(const TargetInfo& target) {
@@ -1655,24 +1862,35 @@ std::vector<Token> PreProcess::expand_builtin_macro(const MacroDefinition& mdef,
     auto logical = sm->getLogicalLocation(trigger.loc);
     switch (mdef.builtin_kind) {
         case MacroDefinition::BuiltinKind::Line:
-            result.emplace_back(TokenType::INTEGER_CONST, std::to_string(logical.line), trigger.loc);
+            result.emplace_back(TokenType::INTEGER_CONST,
+                                sm->spellings.store(std::to_string(logical.line)), trigger.loc);
             break;
         case MacroDefinition::BuiltinKind::File:
-            result.emplace_back(TokenType::STRING_LITERAL, logical.file, trigger.loc);
+            result.emplace_back(TokenType::STRING_LITERAL,
+                                sm->spellings.store(logical.file), trigger.loc);
+            break;
+        case MacroDefinition::BuiltinKind::BaseFile:
+
+            result.emplace_back(TokenType::STRING_LITERAL,
+                                sm->spellings.store(base_file_name), trigger.loc);
             break;
         case MacroDefinition::BuiltinKind::FileName: {
             std::string base = basename_from_path(logical.file);
-            result.emplace_back(TokenType::STRING_LITERAL, base, trigger.loc);
+            result.emplace_back(TokenType::STRING_LITERAL,
+                                sm->spellings.store(base), trigger.loc);
             break;
         }
         case MacroDefinition::BuiltinKind::Counter:
-            result.emplace_back(TokenType::INTEGER_CONST, std::to_string(counter++), trigger.loc);
+            result.emplace_back(TokenType::INTEGER_CONST,
+                                sm->spellings.store(std::to_string(counter++)), trigger.loc);
             break;
         case MacroDefinition::BuiltinKind::Date:
-            result.emplace_back(TokenType::STRING_LITERAL, builtin_date, trigger.loc);
+            result.emplace_back(TokenType::STRING_LITERAL,
+                                sm->spellings.store(builtin_date), trigger.loc);
             break;
         case MacroDefinition::BuiltinKind::Time:
-            result.emplace_back(TokenType::STRING_LITERAL, builtin_time, trigger.loc);
+            result.emplace_back(TokenType::STRING_LITERAL,
+                                sm->spellings.store(builtin_time), trigger.loc);
             break;
         case MacroDefinition::BuiltinKind::Stdc:
             result.emplace_back(TokenType::INTEGER_CONST, "1", trigger.loc);
@@ -1680,7 +1898,8 @@ std::vector<Token> PreProcess::expand_builtin_macro(const MacroDefinition& mdef,
         case MacroDefinition::BuiltinKind::StdcVersion: {
             auto stdc_version = lang_opts.stdc_version_macro_value();
             if (stdc_version.has_value()) {
-                result.emplace_back(TokenType::LONG_CONST, std::to_string(*stdc_version), trigger.loc);
+                result.emplace_back(TokenType::LONG_CONST,
+                                    sm->spellings.store(std::to_string(*stdc_version)), trigger.loc);
             }
             break;
         }
@@ -1690,7 +1909,8 @@ std::vector<Token> PreProcess::expand_builtin_macro(const MacroDefinition& mdef,
         case MacroDefinition::BuiltinKind::CPlusPlus: {
             auto cplusplus = lang_opts.cplusplus_macro_value();
             if (cplusplus.has_value()) {
-                result.emplace_back(TokenType::LONG_CONST, std::to_string(*cplusplus), trigger.loc);
+                result.emplace_back(TokenType::LONG_CONST,
+                                    sm->spellings.store(std::to_string(*cplusplus)), trigger.loc);
             }
             break;
         }
@@ -1700,8 +1920,6 @@ std::vector<Token> PreProcess::expand_builtin_macro(const MacroDefinition& mdef,
     return result;
 }
 
-// Recognizes the exact pattern: `!defined(NAME)` or `!defined NAME`
-// with no extra tokens (used for include-guard detection).
 bool PreProcess::parse_if_not_defined(const std::vector<Token>& tokens, std::string& macro) const {
     size_t i = 0;
     if (i >= tokens.size() || tokens[i].type != TokenType::LOGICAL_NOT) {
@@ -1746,7 +1964,7 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
 
     std::string fast_guard_macro;
     bool saw_pragma_once = false;
-    // Fast text scan handles common guard shapes without spinning up a lexer.
+
     if (detect_include_guard_fast(file->modified_buffer, fast_guard_macro, saw_pragma_once)) {
         if (perf_profiler) {
             perf_profiler->add_counter(PerfCounter::IncludeGuardFastHits);
@@ -1773,11 +1991,9 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
     }
 
     Lexer lex(file->modified_buffer, file->offset, sm.get(), lang_opts);
+    lex.set_phase2_source(file->buffer, &file->change_lists);
     lex.enable_new_line_token = true;
 
-    // Tokenized fallback accepts the same intent but tolerates more trivia
-    // patterns than the fast scanner while still requiring that the whole file
-    // be wrapped by the guard.
     enum class GuardDetectState {
         Prefix,
         ExpectDefine,
@@ -1918,7 +2134,9 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
     }
 }
 
-static std::string format_message_tokens(const std::vector<Token>& toks) {
+static std::string format_message_tokens(
+    const std::vector<Token>& toks,
+    const IdentTable& idents) {
     std::string msg;
     bool first = true;
     for (const auto& t : toks) {
@@ -1926,15 +2144,11 @@ static std::string format_message_tokens(const std::vector<Token>& toks) {
             msg.push_back(' ');
         }
         if (t.type == TokenType::STRING_LITERAL) {
-            msg += literal_prefix_spelling(t.literal_prefix);
-            msg.push_back('"');
-            msg += t.value;
-            msg.push_back('"');
+            msg += preprocessor_token_spelling(t, idents);
         } else if (t.type == TokenType::CHAR_LITERAL) {
-            msg += literal_prefix_spelling(t.literal_prefix);
-            msg.push_back('\'');
-            msg += t.value;
-            msg.push_back('\'');
+            msg += preprocessor_token_spelling(t, idents);
+        } else if (token_can_carry_literal_suffix(t.type)) {
+            msg += preprocessor_token_spelling(t, idents);
         } else {
             msg += t.value;
         }
@@ -1954,7 +2168,7 @@ void PreProcess::handleLineDirective(SrcLoc def_loc) {
         error("Expected line number after #line", def_loc);
     }
     Token first = tokens[0];
-    // Convert PP_NUMBER to proper integer token for #line
+
     if (first.type == TokenType::PP_NUMBER) {
         bool decimal_digits_only = !first.value.empty();
         for (char ch : first.value) {
@@ -1964,13 +2178,12 @@ void PreProcess::handleLineDirective(SrcLoc def_loc) {
             }
         }
         if (decimal_digits_only) {
-            // #line accepts a decimal digit sequence; treat PP numbers with
-            // leading zeros as decimal here even if they are not valid C
-            // integer constants in normal expression context (e.g. 032768).
+
             first.type = TokenType::INTEGER_CONST;
         } else {
             try {
                 Lexer relex(first.value, first.loc, nullptr, lang_opts);
+                relex.spelling_arena = &sm->spellings;
                 auto tok = relex.next_token();
                 if (tok.has_value() && tok->type != TokenType::UNKNOWN && tok->type != TokenType::Eof) {
                     auto next = relex.next_token();
@@ -1992,7 +2205,7 @@ void PreProcess::handleLineDirective(SrcLoc def_loc) {
     }
     uint32_t line_num = 0;
     try {
-        line_num = static_cast<uint32_t>(std::stoll(first.value));
+        line_num = static_cast<uint32_t>(std::stoll(std::string(first.value)));
     } catch (...) {
         error("Invalid line number in #line directive", first.loc);
     }
@@ -2034,7 +2247,7 @@ void PreProcess::handleErrorDirective(SrcLoc def_loc) {
         if (t.type == TokenType::Newline || t.type == TokenType::Eof) break;
         tokens.push_back(t);
     }
-    std::string msg = format_message_tokens(tokens);
+    std::string msg = format_message_tokens(tokens, idents);
     if (msg.empty()) {
         msg = "error";
     }
@@ -2048,7 +2261,10 @@ void PreProcess::handleWarningDirective(SrcLoc def_loc) {
         if (t.type == TokenType::Newline || t.type == TokenType::Eof) break;
         tokens.push_back(t);
     }
-    std::string msg = format_message_tokens(tokens);
+    if (sm && sm->inhibit_warnings) {
+        return;
+    }
+    std::string msg = format_message_tokens(tokens, idents);
     if (msg.empty()) {
         msg = "warning";
     }
@@ -2127,7 +2343,7 @@ void PreProcess::handlePragmaOperator(SrcLoc op_loc) {
         error("Expected string literal in _Pragma",
               arg.loc.isInvalid() ? op_loc : arg.loc);
     }
-    auto tokens = tokenize_pragma_text(arg.value, op_loc);
+    auto tokens = tokenize_pragma_text(arg.value, op_loc, sm->spellings);
     handlePragmaTokens(tokens, op_loc);
 }
 
@@ -2148,12 +2364,14 @@ void PreProcess::handlePragmaTokens(const std::vector<Token>& tokens, SrcLoc def
         handlePackPragma(tokens, 0, def_loc);
         return;
     }
-    auto install_pragma_alias_macro = [&](const std::string& from, const std::string& to) {
-        MacroDefinition alias(from);
+
+    auto install_pragma_alias_macro = [&](std::string_view from, std::string_view to) {
+        std::string from_name(from);
+        MacroDefinition alias(from_name);
         Token repl(TokenType::IDENTIFIER, to, def_loc);
         repl.flags.part_of_macro_define = 1;
         alias.replacement_list.push_back(std::move(repl));
-        macro_table[from] = std::move(alias);
+        install_macro(std::move(alias));
     };
     if (first.type == TokenType::IDENTIFIER && first.value == "redefine_extname") {
         if (tokens.size() >= 3 && tokens[1].isIdentifierLike() && tokens[2].isIdentifierLike()) {
@@ -2162,11 +2380,15 @@ void PreProcess::handlePragmaTokens(const std::vector<Token>& tokens, SrcLoc def
         return;
     }
     if (first.type == TokenType::IDENTIFIER && first.value == "weak") {
+
         if (tokens.size() >= 4 &&
             tokens[1].isIdentifierLike() &&
             tokens[2].type == TokenType::ASSIGN &&
             tokens[3].isIdentifierLike()) {
-            install_pragma_alias_macro(tokens[1].value, tokens[3].value);
+            sm->pragma_weak_directives.push_back(
+                {std::string(tokens[1].value), std::string(tokens[3].value), def_loc});
+        } else if (tokens.size() >= 2 && tokens[1].isIdentifierLike()) {
+            sm->pragma_weak_directives.push_back({std::string(tokens[1].value), "", def_loc});
         }
         return;
     }
@@ -2184,6 +2406,22 @@ void PreProcess::handlePragmaTokens(const std::vector<Token>& tokens, SrcLoc def
             handleOptimizePragma(tokens, 2, def_loc);
             return;
         }
+        if (tokens.size() >= 3 &&
+            tokens[1].type == TokenType::IDENTIFIER &&
+            tokens[1].value == "visibility") {
+
+            if (tokens[2].value == "push" &&
+                tokens.size() >= 6 &&
+                tokens[3].type == TokenType::LEFT_PAREN &&
+                tokens[4].isIdentifierLike() &&
+                tokens[5].type == TokenType::RIGHT_PAREN) {
+                sm->pragma_visibility_directives.push_back(
+                    {true, std::string(tokens[4].value), def_loc});
+            } else if (tokens[2].value == "pop") {
+                sm->pragma_visibility_directives.push_back({false, "", def_loc});
+            }
+            return;
+        }
     }
     if (first.type == TokenType::IDENTIFIER &&
         (first.value == "push_macro" || first.value == "pop_macro")) {
@@ -2193,10 +2431,9 @@ void PreProcess::handlePragmaTokens(const std::vector<Token>& tokens, SrcLoc def
         }
         if (first.value == "push_macro") {
             MacroPushEntry entry;
-            auto it = macro_table.find(*macro_name);
-            if (it != macro_table.end()) {
+            if (const MacroDefinition* existing = find_macro_by_name(*macro_name)) {
                 entry.existed = true;
-                entry.definition = it->second;
+                entry.definition = *existing;
             }
             macro_push_stack[*macro_name].push_back(std::move(entry));
         } else {
@@ -2210,9 +2447,9 @@ void PreProcess::handlePragmaTokens(const std::vector<Token>& tokens, SrcLoc def
                 macro_push_stack.erase(it);
             }
             if (entry.existed) {
-                macro_table[*macro_name] = std::move(entry.definition);
-            } else {
-                macro_table.erase(*macro_name);
+                install_macro(std::move(entry.definition));
+            } else if (uint32_t id = idents.lookup(*macro_name)) {
+                macro_table.erase(id);
             }
         }
         return;
@@ -2281,7 +2518,7 @@ void PreProcess::handleDiagnosticPragma(const std::vector<Token>& tokens, size_t
     if (tokens[start_idx].type != TokenType::IDENTIFIER) {
         return;
     }
-    const std::string& action = tokens[start_idx].value;
+    const std::string& action = std::string(tokens[start_idx].value);
     if (action == "push") {
         diag_state_stack.push_back(current_diag_state_id);
         return;
@@ -2322,8 +2559,7 @@ void PreProcess::handleOptimizePragma(const std::vector<Token>& tokens, size_t s
     (void)tokens;
     (void)start_idx;
     (void)def_loc;
-    // Compatibility behavior: accept and ignore optimization pragmas.
-    // This covers #pragma GCC/clang optimize(...) and _Pragma("GCC optimize(...)").
+
 }
 
 static const std::string& normalize_dir(const std::string& path) {
@@ -2457,6 +2693,321 @@ static std::shared_ptr<FileSrc> resolve_include_file(SourceManager* sm,
     return sm->lookThroughPaths(file_name);
 }
 
+static void convert_pp_number_tokens(std::vector<Token>& tokens,
+                                     const LangOptions& lang_opts,
+                                     SpellingArena& spellings) {
+    for (Token& t : tokens) {
+        if (t.type != TokenType::PP_NUMBER) {
+            continue;
+        }
+        try {
+            Lexer relex(t.value, t.loc, nullptr, lang_opts);
+            relex.spelling_arena = &spellings;
+            auto converted = relex.next_token();
+            auto rest = relex.next_token();
+            if (converted.has_value() && converted->type != TokenType::UNKNOWN &&
+                converted->type != TokenType::Eof &&
+                rest.has_value() && rest->type == TokenType::Eof) {
+                t.type = converted->type;
+                t.value = converted->value;
+            }
+        } catch (...) {
+        }
+    }
+}
+
+int PreProcess::evaluate_has_embed(const std::vector<Token>& arg_tokens, SrcLoc loc) {
+    std::vector<Token> line;
+    for (const Token& t : arg_tokens) {
+        if (t.type != TokenType::Whitespace && t.type != TokenType::Newline) {
+            line.push_back(t);
+        }
+    }
+    if (line.empty()) {
+        error("expected \"FILENAME\" or <FILENAME> in __has_embed", loc);
+    }
+    bool is_system = false;
+    std::string resource;
+    size_t idx = 0;
+    if (line[0].type == TokenType::STRING_LITERAL) {
+        resource = line[0].value;
+        idx = 1;
+    } else if (line[0].type == TokenType::LESS_THAN || line[0].value == "<") {
+        size_t close_idx = line.size();
+        for (size_t i = 1; i < line.size(); ++i) {
+            if (line[i].value == ">" || line[i].type == TokenType::GREATER_THAN) {
+                close_idx = i;
+                break;
+            }
+        }
+        if (close_idx == line.size()) {
+            error("missing '>' in __has_embed", loc);
+        }
+        is_system = true;
+        for (size_t i = 1; i < close_idx; ++i) {
+            resource += line[i].value;
+        }
+        idx = close_idx + 1;
+    } else {
+        error("expected \"FILENAME\" or <FILENAME> in __has_embed", loc);
+    }
+
+    bool have_limit = false;
+    uint64_t limit = 0;
+    while (idx < line.size()) {
+        Token name_tok = line[idx];
+        if (!name_tok.isIdentifierLike()) {
+            return 0;
+        }
+        std::string pname = std::string(name_tok.value);
+        if (pname.size() > 4 && pname.compare(0, 2, "__") == 0 &&
+            pname.compare(pname.size() - 2, 2, "__") == 0) {
+            pname = pname.substr(2, pname.size() - 4);
+        }
+        ++idx;
+        std::vector<Token> group;
+        if (idx < line.size() && line[idx].type == TokenType::LEFT_PAREN) {
+            int depth = 1;
+            ++idx;
+            while (idx < line.size() && depth > 0) {
+                if (line[idx].type == TokenType::LEFT_PAREN) {
+                    depth++;
+                } else if (line[idx].type == TokenType::RIGHT_PAREN) {
+                    depth--;
+                    if (depth == 0) {
+                        ++idx;
+                        break;
+                    }
+                }
+                group.push_back(line[idx]);
+                ++idx;
+            }
+        }
+        if (pname == "limit") {
+            convert_pp_number_tokens(group, lang_opts, sm->spellings);
+            auto eval = evaluate_pp_constant_expression(group);
+            if (!eval.ok || eval.value < 0) {
+                return 0;
+            }
+            have_limit = true;
+            limit = static_cast<uint64_t>(eval.value);
+        } else if (pname != "prefix" && pname != "suffix" && pname != "if_empty") {
+
+            return 0;
+        }
+    }
+
+    auto curr_file = sm->getFileWithId(current_file_id);
+    std::shared_ptr<FileSrc> resolved =
+        resolve_include_file(sm.get(), curr_file, resource, is_system, false);
+    if (!resolved) {
+        return 0;
+    }
+    size_t count = resolved->buffer.size();
+    if (have_limit && limit < count) {
+        count = static_cast<size_t>(limit);
+    }
+    return count == 0 ? 2 : 1;
+}
+
+void PreProcess::handleEmbedDirective(SrcLoc def_loc) {
+    std::vector<Token> raw_tokens;
+    Token raw_first = current_tok_src()->peekToken();
+    bool should_expand = !(raw_first.type == TokenType::LESS_THAN ||
+                           raw_first.type == TokenType::STRING_LITERAL);
+    if (should_expand) {
+        auto orig_tokstack_size = tok_stack.size();
+        while (true) {
+            Token t = nextToken(true, orig_tokstack_size);
+            if (t.type == TokenType::Newline || t.type == TokenType::Eof) break;
+            raw_tokens.push_back(t);
+        }
+    } else {
+        while (true) {
+            Token t = current_tok_src()->nextToken();
+            if (t.type == TokenType::Newline || t.type == TokenType::Eof) break;
+            raw_tokens.push_back(t);
+        }
+    }
+    std::vector<Token> line;
+    for (const Token& t : raw_tokens) {
+        if (t.type != TokenType::Whitespace) {
+            line.push_back(t);
+        }
+    }
+    if (line.empty()) {
+        error("expected \"FILENAME\" or <FILENAME> after #embed", def_loc);
+    }
+
+    bool is_system = false;
+    std::string resource;
+    size_t idx = 0;
+    if (line[0].type == TokenType::STRING_LITERAL) {
+        resource = line[0].value;
+        idx = 1;
+    } else if (line[0].type == TokenType::LESS_THAN || line[0].value == "<") {
+        size_t close_idx = line.size();
+        for (size_t i = 1; i < line.size(); ++i) {
+            if (line[i].value == ">" || line[i].type == TokenType::GREATER_THAN) {
+                close_idx = i;
+                break;
+            }
+        }
+        if (close_idx == line.size()) {
+            error("Invalid #embed directive, missing '>'", line.back().loc);
+        }
+        is_system = true;
+        for (size_t i = 1; i < close_idx; ++i) {
+            resource += line[i].value;
+        }
+        idx = close_idx + 1;
+    } else {
+        error("expected \"FILENAME\" or <FILENAME> after #embed", line[0].loc);
+    }
+
+    bool have_limit = false;
+    uint64_t limit = 0;
+    bool have_if_empty = false;
+    std::vector<Token> prefix_tokens;
+    std::vector<Token> suffix_tokens;
+    std::vector<Token> if_empty_tokens;
+    while (idx < line.size()) {
+        Token name_tok = line[idx];
+        if (!name_tok.isIdentifierLike()) {
+            error("expected parameter name in #embed", name_tok.loc);
+        }
+        std::string pname = std::string(name_tok.value);
+        if (pname.size() > 4 && pname.compare(0, 2, "__") == 0 &&
+            pname.compare(pname.size() - 2, 2, "__") == 0) {
+            pname = pname.substr(2, pname.size() - 4);
+        }
+        ++idx;
+        bool has_group = false;
+        std::vector<Token> group;
+        if (idx < line.size() && line[idx].type == TokenType::LEFT_PAREN) {
+            has_group = true;
+            int depth = 1;
+            ++idx;
+            while (idx < line.size() && depth > 0) {
+                if (line[idx].type == TokenType::LEFT_PAREN) {
+                    depth++;
+                } else if (line[idx].type == TokenType::RIGHT_PAREN) {
+                    depth--;
+                    if (depth == 0) {
+                        ++idx;
+                        break;
+                    }
+                }
+                group.push_back(line[idx]);
+                ++idx;
+            }
+            if (depth != 0) {
+                error("unterminated #embed parameter", name_tok.loc);
+            }
+        }
+        if (pname == "limit") {
+            if (!has_group) {
+                error("#embed 'limit' parameter requires an argument", name_tok.loc);
+            }
+            convert_pp_number_tokens(group, lang_opts, sm->spellings);
+            auto eval = evaluate_pp_constant_expression(group);
+            if (!eval.ok || eval.value < 0) {
+                error("#embed 'limit' must be a non-negative integer constant expression",
+                      name_tok.loc);
+            }
+            have_limit = true;
+            limit = static_cast<uint64_t>(eval.value);
+        } else if (pname == "prefix") {
+            if (!has_group) {
+                error("#embed 'prefix' parameter requires an argument", name_tok.loc);
+            }
+            prefix_tokens = group;
+        } else if (pname == "suffix") {
+            if (!has_group) {
+                error("#embed 'suffix' parameter requires an argument", name_tok.loc);
+            }
+            suffix_tokens = group;
+        } else if (pname == "if_empty") {
+            if (!has_group) {
+                error("#embed 'if_empty' parameter requires an argument", name_tok.loc);
+            }
+            have_if_empty = true;
+            if_empty_tokens = group;
+        } else {
+            error("unknown #embed parameter '" + std::string(name_tok.value) + "'", name_tok.loc);
+        }
+    }
+    (void)have_if_empty;
+
+    auto curr_file = sm->getFileWithId(current_file_id);
+    std::shared_ptr<FileSrc> resolved =
+        resolve_include_file(sm.get(), curr_file, resource, is_system, false);
+    if (!resolved) {
+        error("'" + resource + "' file not found in #embed", def_loc);
+    }
+
+    const std::string& data = resolved->buffer;
+    size_t count = data.size();
+    if (have_limit && limit < count) {
+        count = static_cast<size_t>(limit);
+    }
+
+    std::vector<Token> out;
+    if (count == 0) {
+        out = if_empty_tokens;
+    } else {
+        out.insert(out.end(), prefix_tokens.begin(), prefix_tokens.end());
+        for (size_t i = 0; i < count; ++i) {
+            if (i > 0) {
+                out.emplace_back(TokenType::COMMA, ",", def_loc);
+            }
+            Token byte_tok(TokenType::INTEGER_CONST,
+                           byte_spelling(static_cast<unsigned char>(data[i])),
+                           def_loc);
+            byte_tok.flags.has_leading_space = 1;
+            out.push_back(byte_tok);
+        }
+        out.insert(out.end(), suffix_tokens.begin(), suffix_tokens.end());
+    }
+    if (out.empty()) {
+        return;
+    }
+    auto src_offset = sm->createMacroEntry(def_loc, def_loc, out.size());
+    for (auto& t : out) {
+        t.loc = src_offset;
+        src_offset.increment();
+    }
+    tok_stack.push_back(std::make_unique<ExpansionTokenSrc>(std::move(out), src_offset));
+}
+
+bool PreProcess::push_pre_include(const std::string& file_name) {
+    if (!sm) {
+        return false;
+    }
+
+    std::shared_ptr<FileSrc> file = sm->getFileFromLoc(file_name, ".");
+    if (!file) {
+        file = sm->lookThroughQuotePaths(file_name);
+    }
+    if (!file) {
+        file = sm->lookThroughPaths(file_name);
+    }
+    if (!file) {
+        error(sm->formatIncludeLookupFailure(file_name));
+        return false;
+    }
+    detect_include_guard(file);
+    if (perf_profiler) {
+        perf_profiler->record_resolved_header_request(perf_header_key(file));
+        perf_profiler->enter_header(perf_header_key(file), file->buffer.size(),
+            perf_parser_tokens_emitted);
+    }
+    tok_stack.push_back(std::make_unique<FileTokenSrc>(
+        file, file->offset, sm.get(), lang_opts, &idents));
+    current_file_id = file->file_id;
+    return true;
+}
+
 void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_import) {
     bool isSystem = false;
     std::string file_name;
@@ -2481,8 +3032,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         error("Invalid argument for include directive, expected \" or < but got end of line", def_loc);
     }
     if (tokens[0].type == TokenType::STRING_LITERAL) {
-        // GCC/Clang accept trailing tokens after #include with a warning.
-        // Keep preprocessing moving by ignoring those trailing tokens.
+
         isSystem = false;
         file_name = tokens[0].value;
     } else if (tokens[0].value == "<" || tokens[0].type == TokenType::LESS_THAN) {
@@ -2502,13 +3052,13 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         isSystem = true;
         for (size_t i = 1; i < close_idx; ++i) {
             if (tokens[i].type == TokenType::STRING_LITERAL) {
-                file_name += "\"" + tokens[i].value + "\"";
+                file_name += "\"" + std::string(tokens[i].value) + "\"";
             } else {
                 file_name += tokens[i].value;
             }
         }
     } else {
-        error("Invalid argument for include directive, expected \" or < but got " + tokens[0].value, tokens[0].loc);
+        error("Invalid argument for include directive, expected \" or < but got " + std::string(tokens[0].value), tokens[0].loc);
     }
     if (perf_profiler) {
         perf_profiler->record_header_request(file_name);
@@ -2521,7 +3071,14 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
             perf_profiler->add_counter(PerfCounter::IncludeImportRequests);
         }
     }
-    const bool use_builtin_header_first = isSystem && !lang_opts.is_cxx_mode();
+
+    const bool is_resource_builtin_header =
+        file_name == "arm_neon.h" || file_name == "stddef.h" ||
+        file_name == "stdarg.h" || file_name == "stdbool.h" ||
+        file_name == "stdalign.h" || file_name == "stdnoreturn.h";
+    const bool use_builtin_header_first =
+        isSystem && !lang_opts.is_cxx_mode() &&
+        (builtin_headers_enabled || is_resource_builtin_header);
     if (use_builtin_header_first) {
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
@@ -2534,7 +3091,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
                     builtin_sloc->buffer.size(), perf_parser_tokens_emitted);
             }
             tok_stack.push_back(
-                std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
+                std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts, &idents));
             current_file_id = builtin_sloc->file_id;
             return;
         }
@@ -2545,8 +3102,9 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         error("Internal error: couldn't find file_id in handleIncludeDirective", def_loc);
     }
     new_file = resolve_include_file(sm.get(), curr_file, file_name, isSystem, is_next);
-    // dup code but its fine because dependence on custom headers should be temporary
-    if (!new_file && isSystem && lang_opts.is_cxx_mode()) {
+
+    if (!new_file && isSystem && lang_opts.is_cxx_mode() &&
+        builtin_headers_enabled) {
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
             auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
@@ -2558,7 +3116,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
                     builtin_sloc->buffer.size(), perf_parser_tokens_emitted);
             }
             tok_stack.push_back(
-                std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
+                std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts, &idents));
             current_file_id = builtin_sloc->file_id;
             return;
         }
@@ -2600,7 +3158,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         }
         return;
     }
-    if (!new_file->include_guard.empty() && macro_table.contains(new_file->include_guard)) {
+    if (!new_file->include_guard.empty() && has_macro_name(new_file->include_guard)) {
         if (perf_profiler) {
             perf_profiler->record_header_skip(perf_header_key(new_file),
                 PerfCounter::IncludeSkippedMacroGuard);
@@ -2617,19 +3175,13 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         perf_profiler->enter_header(perf_header_key(new_file), new_file->buffer.size(),
             perf_parser_tokens_emitted);
     }
-    tok_stack.push_back(std::make_unique<FileTokenSrc>(new_file, new_file->offset, sm.get(), lang_opts));
+    tok_stack.push_back(std::make_unique<FileTokenSrc>(new_file, new_file->offset, sm.get(), lang_opts, &idents));
     current_file_id = new_file->file_id;
     included_files.insert(new_file->file_id);
 
 }
 void PreProcess::expand_object_macro(const Token& trigger, const MacroDefinition& mdef) {
-    HideSetType newHideSet = nullptr;
-    if (trigger.hide_set) {
-        newHideSet = std::make_shared<std::unordered_set<std::string>>(*trigger.hide_set);
-    } else {
-        newHideSet = std::make_shared<std::unordered_set<std::string>>();
-    }
-    newHideSet->insert(mdef.name);
+    HideSetId newHideSet = hide_set_insert(trigger.hide_set, mdef.name_ident);
     std::vector<Token> expandedTokens;
     if (mdef.builtin_kind != MacroDefinition::BuiltinKind::None) {
         expandedTokens = expand_builtin_macro(mdef, trigger);
@@ -2648,11 +3200,11 @@ void PreProcess::expand_object_macro(const Token& trigger, const MacroDefinition
     }
     auto src_offset = this->sm->createMacroEntry(def_loc, trigger.loc, token_size);
     for (auto& t : expandedTokens) {
-        t.hide_set = union_hide_sets(t.hide_set, newHideSet);
+        t.hide_set = hide_set_union(t.hide_set, newHideSet);
         t.loc = src_offset;
         src_offset.increment();
     }
-    // preserve leading/newline marker
+
     if (!expandedTokens.empty()) {
         expandedTokens[0].flags.has_leading_space = trigger.flags.has_leading_space;
         expandedTokens[0].flags.start_of_line = trigger.flags.start_of_line;
@@ -2662,7 +3214,77 @@ void PreProcess::expand_object_macro(const Token& trigger, const MacroDefinition
 std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& trigger, const ArgsType &args) {
     size_t idx = 0;
     std::vector<Token> expandedTokens;
-    const std::vector<Token> &body = mdef.replacement_list;
+
+    size_t va_opt_fixed_param_count = mdef.parameters.size();
+    if (mdef.is_variadic && va_opt_fixed_param_count > 0) {
+        va_opt_fixed_param_count -= 1;
+    }
+    bool variadic_args_present = false;
+    if (mdef.is_variadic && args.size() > va_opt_fixed_param_count) {
+        for (size_t i = va_opt_fixed_param_count;
+             i < args.size() && !variadic_args_present; ++i) {
+            for (const Token& arg_tok : args[i]) {
+                if (arg_tok.type != TokenType::Whitespace &&
+                    arg_tok.type != TokenType::Newline) {
+                    variadic_args_present = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    const std::vector<Token>* body_ptr = &mdef.replacement_list;
+    std::vector<Token> va_opt_body;
+    bool mentions_va_opt = false;
+    for (const Token& t : mdef.replacement_list) {
+        if (t.isIdentifierLike() && t.value == "__VA_OPT__") {
+            mentions_va_opt = true;
+            break;
+        }
+    }
+    if (mentions_va_opt) {
+        for (size_t i = 0; i < mdef.replacement_list.size(); ++i) {
+            const Token& t = mdef.replacement_list[i];
+            if (!(t.isIdentifierLike() && t.value == "__VA_OPT__")) {
+                va_opt_body.push_back(t);
+                continue;
+            }
+            if (!mdef.is_variadic) {
+                error("__VA_OPT__ can only appear in a variadic macro", t.loc);
+            }
+            if (i + 1 >= mdef.replacement_list.size() ||
+                mdef.replacement_list[i + 1].type != TokenType::LEFT_PAREN) {
+                error("expected '(' after __VA_OPT__", t.loc);
+            }
+            size_t j = i + 2;
+            int depth = 1;
+            std::vector<Token> group;
+            for (; j < mdef.replacement_list.size(); ++j) {
+                const Token& gt = mdef.replacement_list[j];
+                if (gt.type == TokenType::LEFT_PAREN) {
+                    depth++;
+                } else if (gt.type == TokenType::RIGHT_PAREN) {
+                    depth--;
+                    if (depth == 0) {
+                        break;
+                    }
+                }
+                if (gt.isIdentifierLike() && gt.value == "__VA_OPT__") {
+                    error("__VA_OPT__ cannot appear inside __VA_OPT__", gt.loc);
+                }
+                group.push_back(gt);
+            }
+            if (depth != 0) {
+                error("unterminated __VA_OPT__", t.loc);
+            }
+            if (variadic_args_present) {
+                va_opt_body.insert(va_opt_body.end(), group.begin(), group.end());
+            }
+            i = j;
+        }
+        body_ptr = &va_opt_body;
+    }
+    const std::vector<Token> &body = *body_ptr;
     auto src_offset = this->sm->createMacroEntry(mdef.def_loc, trigger.loc, body.size());
 
     auto stringify_tokens = [&](const std::vector<Token>& toks) -> std::string {
@@ -2678,20 +3300,12 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
                 out.push_back(' ');
             }
             std::string spelling;
-            if (t.type == TokenType::STRING_LITERAL) {
-                spelling = literal_prefix_spelling(t.literal_prefix) + "\"" + t.value + "\"";
-            } else if (t.type == TokenType::CHAR_LITERAL) {
-                spelling = literal_prefix_spelling(t.literal_prefix) + "'" + t.value + "'";
-            } else {
-                spelling = t.value;
-            }
+            spelling = preprocessor_token_spelling(t, idents);
             out += spelling;
             first = false;
             pending_whitespace = false;
         }
-        // Token::value for string literals is already a cooked payload; adding
-        // another escape pass here injects literal backslash bytes into runtime
-        // strings for #stringized arguments (e.g. "\"abc\"" instead of "\"abc\"").
+
         return out;
     };
 
@@ -2711,34 +3325,29 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
         return out;
     };
 
-    auto token_spelling = [](const Token& t) -> std::string {
-        switch (t.type) {
-            case TokenType::LONG_CONST:              return t.value + "L";
-            case TokenType::LONG_LONG_CONST:         return t.value + "LL";
-            case TokenType::UNSIGNED_INTEGER_CONST:   return t.value + "U";
-            case TokenType::UNSIGNED_LONG_CONST:      return t.value + "UL";
-            case TokenType::UNSIGNED_LONG_LONG_CONST: return t.value + "ULL";
-            case TokenType::FLOAT_CONST:             return t.value + "F";
-            default:                                  return t.value;
-        }
+    auto token_spelling = [&](const Token& token) -> std::string {
+        return preprocessor_token_spelling(token, idents);
     };
 
     auto paste_tokens = [&](const Token& lhs, const Token& rhs) -> Token {
-        std::string text = token_spelling(lhs) + token_spelling(rhs);
+
+        std::string_view text =
+            sm->spellings.store(token_spelling(lhs) + token_spelling(rhs));
         Lexer paste_lex(text, lhs.loc, sm.get(), lang_opts);
         paste_lex.pp_number_mode = true;
+        paste_lex.ident_table = &idents;
         auto first = paste_lex.next_token();
         if (!first.has_value() || first->type == TokenType::UNKNOWN || first->type == TokenType::Eof) {
-            error("Invalid token pasting result: " + text, lhs.loc);
+            error("Invalid token pasting result: " + std::string(text), lhs.loc);
         }
         auto second = paste_lex.next_token();
         if (!second.has_value() || second->type != TokenType::Eof) {
-            error("Token pasting produced multiple tokens: " + text, lhs.loc);
+            error("Token pasting produced multiple tokens: " + std::string(text), lhs.loc);
         }
         Token pasted = first.value();
         pasted.flags.has_leading_space = lhs.flags.has_leading_space;
         pasted.flags.start_of_line = lhs.flags.start_of_line;
-        pasted.hide_set = intersect_hide_sets(lhs.hide_set, rhs.hide_set);
+        pasted.hide_set = hide_set_intersect(lhs.hide_set, rhs.hide_set);
         return pasted;
     };
 
@@ -2794,6 +3403,20 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
         }
     };
 
+    auto append_param_tokens = [&](const std::vector<Token>& toks,
+                                   const Token& param_tok) {
+        bool first = true;
+        for (const auto& t : toks) {
+            Token copy = t;
+            if (first) {
+                copy.flags.has_leading_space = param_tok.flags.has_leading_space;
+                copy.flags.start_of_line = param_tok.flags.start_of_line;
+                first = false;
+            }
+            append_token(copy);
+        }
+    };
+
     auto is_paste_op = [&](size_t pos) -> bool {
         return pos + 1 < body.size() &&
             body[pos].type == TokenType::POUND &&
@@ -2805,7 +3428,7 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
         if (!t.isIdentifierLike()) {
             return false;
         }
-        param_idx = mdef.get_param_idx(t.value);
+        param_idx = mdef.get_param_idx(std::string(t.value));
         return param_idx != -1;
     };
 
@@ -2850,14 +3473,14 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
     while (idx < body.size()) {
         Token tok = body[idx];
 
-        // Stringification (# param)
         if (tok.type == TokenType::POUND && !is_paste_op(idx)) {
             if (idx + 1 < body.size()) {
                 int param_idx = -1;
                 if (is_param_token(body[idx + 1], param_idx)) {
                     std::vector<Token> raw_tokens = get_unexpanded_param_tokens(param_idx);
                     std::string str = stringify_tokens(raw_tokens);
-                    Token str_tok(TokenType::STRING_LITERAL, str, tok.loc);
+                    Token str_tok(TokenType::STRING_LITERAL,
+                                  sm->spellings.store(str), tok.loc);
                     str_tok.flags = tok.flags;
                     append_token(str_tok);
                     idx += 2;
@@ -2866,7 +3489,6 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
             }
         }
 
-        // Token pasting (## T)
         if (is_paste_op(idx)) {
             if (idx + 2 >= body.size()) {
                 error("## at end of macro replacement list", body[idx].loc);
@@ -2875,20 +3497,17 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
             int rhs_param_idx = -1;
             if (is_param_token(rhs_tok, rhs_param_idx)) {
                 auto sel = trim_paste_tokens(get_unexpanded_param_tokens(rhs_param_idx));
-                // GNU ##__VA_ARGS__ extension: when ## precedes __VA_ARGS__
-                // and the preceding token is a comma:
-                //   - empty __VA_ARGS__: remove the comma
-                //   - non-empty __VA_ARGS__: keep the comma, substitute normally (no paste)
+
                 if (rhs_param_idx == variadic_idx &&
                     !expandedTokens.empty() &&
                     expandedTokens.back().type == TokenType::COMMA) {
                     if (sel.empty()) {
-                        // Remove the preceding comma
+
                         expandedTokens.pop_back();
                         if (src_offset.offset > 0) src_offset.offset -= 1;
                     } else {
-                        // Don't paste, just append the variadic args
-                        append_tokens(sel);
+
+                        append_param_tokens(sel, rhs_tok);
                     }
                     idx += 3;
                     continue;
@@ -2908,28 +3527,32 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
 
         int param_idx = -1;
         if (is_param_token(tok, param_idx)) {
-            // Parameter followed by ##
+
             if (idx + 2 < body.size() && is_paste_op(idx + 1)) {
                 auto sel = trim_paste_tokens(get_unexpanded_param_tokens(param_idx));
                 if (sel.empty()) {
                     if (idx + 3 < body.size()) {
                         int rhs_param_idx = -1;
                         if (is_param_token(body[idx + 3], rhs_param_idx)) {
-                            append_tokens(trim_paste_tokens(get_unexpanded_param_tokens(rhs_param_idx)));
+                            append_param_tokens(
+                                trim_paste_tokens(get_unexpanded_param_tokens(rhs_param_idx)),
+                                body[idx + 3]);
                             idx += 4;
                             continue;
                         }
+
+                        append_token(body[idx + 3]);
                         idx += 4;
                         continue;
                     }
                     idx += 3;
                     continue;
                 }
-                append_tokens(sel);
+                append_param_tokens(sel, tok);
                 idx += 1;
                 continue;
             }
-            append_tokens(get_expanded_param_tokens(param_idx));
+            append_param_tokens(get_expanded_param_tokens(param_idx), tok);
             idx += 1;
             continue;
         }
@@ -2941,15 +3564,12 @@ std::vector<Token> PreProcess::subst(const MacroDefinition& mdef, const Token& t
 
 }
 void PreProcess::expand_function_macro(const Token& trigger, const MacroDefinition& m) {
-    // Steps we need to do
-    // 1. Read the arguments of the caller and capture the right paren token. Be sure to handle nesteing
-    // 2. Calculate the intersection of the hideset of the original caller token and the right paren token
+
     ArgsType args;
     std::vector<Token> current_arg;
     int paren_depth = 0;
 
-    // Consume the opening parenthesis
-    Token open_paren = current_tok_src()->nextToken(); // Should be '('
+    Token open_paren = current_tok_src()->nextToken();
     if (open_paren.type != TokenType::LEFT_PAREN) {
         error("Expected '(' after function-like macro name", trigger.loc);
     }
@@ -2957,9 +3577,106 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
     Token closing_paren;
 
     while (true) {
+
+        if (skipping && !isProcessingConditional) {
+            auto* src = current_tok_src();
+            if (src->lex && !skip_to_next_directive(src->lex.get())) {
+                error("Unexpected EOF in macro argument list", trigger.loc);
+            }
+        }
         Token t = current_tok_src()->nextToken();
         if (t.type == TokenType::Eof) {
             error("Unexpected EOF in macro argument list", trigger.loc);
+        }
+
+        // C11 6.10.3p11 leaves directives inside macro arguments undefined;
+        // GCC and clang process conditionals. Conditionals are handled;
+        // anything else is a hard error instead of token soup.
+        // Skipped only while collecting file-text arguments: when a
+        // function-like macro is expanded to evaluate a #if/#elif
+        // expression (isProcessingConditional), the operands are on the
+        // directive's own logical line and a '#' cannot appear.
+        if (!isProcessingConditional &&
+            t.type == TokenType::POUND && t.flags.start_of_line &&
+            !t.flags.part_of_macro_define) {
+            Token directive = current_tok_src()->nextToken();
+            if (directive.type == TokenType::Newline) {
+                continue;
+            }
+            DirectiveKind dk = DirectiveKind::Unknown;
+            if (directive.type == TokenType::IDENTIFIER ||
+                directive.type == TokenType::ELSE ||
+                directive.type == TokenType::IF) {
+                dk = classify_directive(directive.value);
+            }
+            if (skipping) {
+                switch (dk) {
+                    case DirectiveKind::Else:
+                        handleElseDirective(directive.loc);
+                        continue;
+                    case DirectiveKind::Elif:
+                        handleElifDirective(directive.loc);
+                        continue;
+                    case DirectiveKind::Elifdef:
+                        handleElifdefDirective(directive.loc, false);
+                        continue;
+                    case DirectiveKind::Elifndef:
+                        handleElifdefDirective(directive.loc, true);
+                        continue;
+                    case DirectiveKind::Endif:
+                        handleEndifDirective(directive.loc);
+                        continue;
+                    case DirectiveKind::If:
+                    case DirectiveKind::Ifdef:
+                    case DirectiveKind::Ifndef:
+
+                        conditional_stack.push_back({true, false});
+                        [[fallthrough]];
+                    default:
+                        while (true) {
+                            Token rest = current_tok_src()->nextToken();
+                            if (rest.type == TokenType::Newline ||
+                                rest.type == TokenType::Eof) {
+                                break;
+                            }
+                        }
+                        continue;
+                }
+            }
+            switch (dk) {
+                case DirectiveKind::If:
+                    handleIfDirective(directive.loc);
+                    continue;
+                case DirectiveKind::Ifdef:
+                    handleIfDefDirective(directive.loc, false);
+                    continue;
+                case DirectiveKind::Ifndef:
+                    handleIfDefDirective(directive.loc, true);
+                    continue;
+                case DirectiveKind::Else:
+                    handleElseDirective(directive.loc);
+                    continue;
+                case DirectiveKind::Elif:
+                    handleElifDirective(directive.loc);
+                    continue;
+                case DirectiveKind::Elifdef:
+                    handleElifdefDirective(directive.loc, false);
+                    continue;
+                case DirectiveKind::Elifndef:
+                    handleElifdefDirective(directive.loc, true);
+                    continue;
+                case DirectiveKind::Endif:
+                    handleEndifDirective(directive.loc);
+                    continue;
+                default:
+                    error("preprocessor directive is not supported inside "
+                          "macro arguments",
+                          directive.loc);
+                    continue;
+            }
+        }
+        if (skipping && !isProcessingConditional) {
+            continue;
         }
 
         if (t.type == TokenType::LEFT_PAREN) {
@@ -2967,7 +3684,7 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
             current_arg.push_back(t);
         } else if (t.type == TokenType::RIGHT_PAREN) {
             if (paren_depth == 0) {
-                // End of arguments
+
                 args.push_back(current_arg);
                 closing_paren = t;
                 break;
@@ -2983,7 +3700,6 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
         }
     }
 
-    // Handle empty argument case (e.g. MACRO())
     if (args.size() == 1 && args[0].empty() && m.parameters.empty()) {
         args.clear();
     }
@@ -3012,21 +3728,8 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
         perf_profiler->add_counter(PerfCounter::MacroArgumentTokens, arg_tokens);
     }
 
-    // Calculate intersection of hidesets
-    HideSetType newHideSet = std::make_shared<std::unordered_set<std::string>>();
-
-    // Intersection of trigger.hide_set and closing_paren.hide_set
-    if (trigger.hide_set && closing_paren.hide_set) {
-        for (const auto& s : *trigger.hide_set) {
-            if (closing_paren.hide_set->contains(s)) {
-                newHideSet->insert(s);
-            }
-        }
-    }
-
-
-    // Add the macro name itself to the hideset
-    newHideSet->insert(m.name);
+    HideSetId newHideSet = hide_set_insert(
+        hide_set_intersect(trigger.hide_set, closing_paren.hide_set), m.name_ident);
     std::vector<Token> expandedTokens = subst(m, trigger, args);
     if (perf_profiler) {
         perf_profiler->record_macro_expansion(m.name, expandedTokens.size(), true);
@@ -3035,7 +3738,7 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
     }
     auto src_offset = this->sm->createMacroEntry(m.def_loc, trigger.loc, expandedTokens.size());
     for (auto& t : expandedTokens) {
-        t.hide_set = union_hide_sets(t.hide_set, newHideSet);
+        t.hide_set = hide_set_union(t.hide_set, newHideSet);
     }
     if (!expandedTokens.empty()) {
         expandedTokens[0].flags.has_leading_space = trigger.flags.has_leading_space;
@@ -3062,13 +3765,8 @@ bool PreProcess::skip_to_next_directive(Lexer* lex) {
     size_t pos = lex->position;
     const size_t len = src.size();
 
-    // Track whether we're at the start of a line.  If the lexer was just
-    // positioned (e.g. after reading the previous directive's newline) we
-    // treat the current position as start-of-line.
-    bool at_line_start = true;  // conservative: first iteration is line start
+    bool at_line_start = true;
 
-    // If the character just before the current position is not a newline (and
-    // we're not at position 0), we're in the middle of a line.
     if (pos > 0 && src[pos - 1] != '\n') {
         at_line_start = false;
     }
@@ -3076,20 +3774,17 @@ bool PreProcess::skip_to_next_directive(Lexer* lex) {
     while (pos < len) {
         char c = src[pos];
 
-        // --- newline: next char starts a new line ---
         if (c == '\n') {
             pos++;
             at_line_start = true;
             continue;
         }
 
-        // --- whitespace at start of line: skip, stay at line start ---
         if (at_line_start && (c == ' ' || c == '\t')) {
             pos++;
             continue;
         }
 
-        // --- '#' at start of line: found a directive ---
         if (at_line_start && c == '#') {
             lex->position = pos;
             lex->pending_start_of_line = true;
@@ -3097,20 +3792,17 @@ bool PreProcess::skip_to_next_directive(Lexer* lex) {
             return true;
         }
 
-        // From here, we're not at line start for subsequent characters
         at_line_start = false;
 
-        // --- line comment: skip to end of line ---
         if (c == '/' && pos + 1 < len && src[pos + 1] == '/') {
             pos += 2;
             while (pos < len && src[pos] != '\n') {
                 pos++;
             }
-            // Don't consume the newline — the top of the loop will handle it
+
             continue;
         }
 
-        // --- block comment: skip to closing */ ---
         if (c == '/' && pos + 1 < len && src[pos + 1] == '*') {
             pos += 2;
             while (pos + 1 < len) {
@@ -3118,66 +3810,195 @@ bool PreProcess::skip_to_next_directive(Lexer* lex) {
                     pos += 2;
                     break;
                 }
-                // Track newlines inside block comments so we know if the
-                // first character after the comment is at line start.
+
                 if (src[pos] == '\n') {
                     at_line_start = true;
                 }
                 pos++;
             }
             if (pos >= len) {
-                // Unterminated block comment — let the real lexer report it
+
                 break;
             }
             continue;
         }
 
-        // --- string literal: skip to closing quote or newline ---
         if (c == '"' || c == '\'') {
             char quote = c;
             pos++;
             while (pos < len && src[pos] != quote && src[pos] != '\n') {
                 if (src[pos] == '\\' && pos + 1 < len) {
-                    pos++; // skip the escaped character
+                    pos++;
                 }
                 pos++;
             }
             if (pos < len && src[pos] == quote) {
-                pos++; // skip closing quote
+                pos++;
             }
-            // If we hit a newline (unterminated string), don't consume it
+
             continue;
         }
 
-        // --- any other character: skip ---
         pos++;
     }
 
-    // Reached EOF
     lex->position = pos;
     return false;
 }
 
-// todo: we probably need a wrapper that ignores "nothings".
-// nextToken - "one day at a time"-kinda function, returns nothing after we process a directive
-// this will never remove "old" token stack entries. It might add to stack howver
-// if peeloff is true, we will  remove any exhausted sources
-Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
-    // while loop that breaks
+bool PreProcess::try_module_directive(const Token& intro) {
+    bool has_export = intro.type == TokenType::EXPORT_KEYWORD;
+    bool is_module = intro.type == TokenType::IDENTIFIER && intro.value == "module";
+    bool is_import = intro.type == TokenType::IDENTIFIER && intro.value == "import";
+    if (!has_export && !is_module && !is_import) {
+        return false;
+    }
+    auto* src = current_tok_src();
+    if (!src->lex) {
+        return false;
+    }
+    auto saved = src->lex->get_state();
+    Token kw_tok = intro;
+    if (has_export) {
+        Token t = src->nextToken();
+        if (t.type != TokenType::IDENTIFIER ||
+            (t.value != "module" && t.value != "import")) {
+            src->lex->set_state(saved);
+            return false;
+        }
+        kw_tok = t;
+        is_module = t.value == "module";
+        is_import = !is_module;
+    }
+    Token follower = src->peekToken();
+    bool recognized;
+    if (is_import) {
+
+        recognized = follower.isIdentifierLike() ||
+            follower.type == TokenType::COLON ||
+            follower.type == TokenType::LESS_THAN ||
+            (follower.type == TokenType::STRING_LITERAL &&
+             follower.literal_prefix == LiteralPrefix::None);
+    } else {
+
+        recognized = follower.isIdentifierLike() ||
+            follower.type == TokenType::COLON ||
+            follower.type == TokenType::SEMICOLON;
+    }
+    if (!recognized) {
+        src->lex->set_state(saved);
+        return false;
+    }
+    if (is_module) {
+        handleModuleDirective(intro, has_export, kw_tok);
+    } else {
+        handleImportDirective(intro, has_export, kw_tok);
+    }
+    return true;
+}
+
+void PreProcess::handleModuleDirective(const Token& intro, bool has_export,
+                                       const Token& kw_tok) {
+    auto* src = current_tok_src();
+    if (has_export) {
+        Token exp = intro;
+        exp.type = TokenType::EXPORT_KEYWORD;
+        module_line_pending_.push_back(exp);
+    }
+    Token mod = kw_tok;
+    mod.type = TokenType::MODULE_KEYWORD;
+    module_line_pending_.push_back(mod);
+
+    Token follower = src->peekToken();
+    if (follower.type == TokenType::SEMICOLON) {
+
+        if (module_file_state == ModuleFileState::None) {
+            module_file_state = ModuleFileState::GlobalFragment;
+        }
+        return;
+    }
+    if (follower.type == TokenType::COLON) {
+
+        module_file_state = ModuleFileState::PrivateFragment;
+        return;
+    }
+
+    module_file_state = ModuleFileState::Purview;
+    bool partition_seen = false;
     while (true) {
+        Token id = src->nextToken();
+        if (!id.isIdentifierLike()) {
+            error("expected identifier in module name", id.loc);
+        }
+        uint32_t id_ident = id.ident ? id.ident : intern_ident(id.value);
+        auto mit = macro_table.find(id_ident);
+        if (mit != macro_table.end() && !mit->second.is_function_like) {
+            error("module name component '" + std::string(id.value) +
+                  "' cannot be an object-like macro", id.loc);
+        }
+        module_line_pending_.push_back(id);
+        Token next = src->peekToken();
+        if (next.type == TokenType::LEFT_PAREN) {
+            error("module name component '" + std::string(id.value) +
+                  "' cannot be followed by '('", next.loc);
+        }
+        if (next.type == TokenType::DOT) {
+            module_line_pending_.push_back(src->nextToken());
+            continue;
+        }
+        if (next.type == TokenType::COLON && !partition_seen) {
+            partition_seen = true;
+            module_line_pending_.push_back(src->nextToken());
+            continue;
+        }
+        return;
+    }
+}
+
+void PreProcess::handleImportDirective(const Token& intro, bool has_export,
+                                       const Token& kw_tok) {
+    auto* src = current_tok_src();
+
+    if (module_file_state == ModuleFileState::GlobalFragment) {
+        error("an import declaration cannot appear in the global module fragment",
+              kw_tok.loc);
+    } else if (module_file_state != ModuleFileState::None && tok_stack.size() > 1) {
+        error("an import directive cannot appear in a file included by a module unit",
+              kw_tok.loc);
+    }
+    if (has_export) {
+        Token exp = intro;
+        exp.type = TokenType::EXPORT_KEYWORD;
+        module_line_pending_.push_back(exp);
+    }
+    Token imp = kw_tok;
+    imp.type = TokenType::IMPORT_KEYWORD;
+    module_line_pending_.push_back(imp);
+
+    Token follower = src->peekToken();
+    if (follower.type == TokenType::LESS_THAN ||
+        (follower.type == TokenType::STRING_LITERAL &&
+         follower.literal_prefix == LiteralPrefix::None)) {
+        error("header units are not supported yet", follower.loc);
+    }
+}
+
+Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
+
+    while (true) {
+        if (!module_line_pending_.empty()) {
+
+            Token pending = module_line_pending_.front();
+            module_line_pending_.pop_front();
+            return pending;
+        }
         if (tok_stack.empty()) return {TokenType::Eof, "", 0};
 
-        // When skipping preprocessor conditional blocks, tokens inside those
-        // blocks don't need to be valid C tokens (e.g. deliberate syntax
-        // errors used as compile-time assertions).  Use a fast raw-character
-        // scanner to jump directly to the next '#' at start of line, avoiding
-        // full lexer work (string allocation, keyword lookup, etc.) for every
-        // token in the skipped region.
         Token tok{TokenType::Eof, "", 0};
         if (skipping && !isProcessingConditional) {
             auto* src = current_tok_src();
             if (src->lex) {
-                // Fast path: scan raw characters for # at start of line
+
                 size_t skip_start = perf_profiler ? src->lex->position : 0;
                 bool found_directive = skip_to_next_directive(src->lex.get());
                 if (perf_profiler) {
@@ -3189,14 +4010,14 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
                     }
                 }
                 if (!found_directive) {
-                    // Hit EOF
+
                     tok = Token{TokenType::Eof, "", src->lex->get_loc_at_pos()};
                 } else {
-                    // Positioned at #, read the token normally
+
                     tok = src->nextToken();
                 }
             } else {
-                // Expansion source (shouldn't normally happen when skipping)
+
                 tok = src->nextToken();
             }
         } else {
@@ -3215,23 +4036,19 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
             }
             return {TokenType::Eof, "", tok.loc};
         }
-        // either directive is on a new line or the beginning of the file
-        // we shouldn't be here for parsing conditional expresions
-        if (tok.type == TokenType::POUND && tok.flags.start_of_line == 1 && tok.flags.part_of_macro_define == 0) {
-            // If tok.flags.part_of_macro_define is null, we didn't come here as a result of macro exspansion
-            // see 6.10.5.4.3 in C23 standard for why we need it to be nullptr
 
-            // preproc directive
+        if (tok.type == TokenType::POUND && tok.flags.start_of_line == 1 && tok.flags.part_of_macro_define == 0) {
+
             auto next = current_tok_src()->nextToken();
             if (next.type == TokenType::Newline) {
-                // null directive
+
                 continue;
             }
             if (next.type == TokenType::IDENTIFIER
                 || next.type == TokenType::ELSE || next.type == TokenType::IF) {
                 DirectiveKind dk = classify_directive(next.value);
                 if (skipping) {
-                    // If skipping, we only care about directives that change conditional state
+
                     switch (dk) {
                         case DirectiveKind::Else:
                             handleElseDirective(tok.loc);
@@ -3239,19 +4056,24 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
                         case DirectiveKind::Elif:
                             handleElifDirective(tok.loc);
                             continue;
+                        case DirectiveKind::Elifdef:
+                            handleElifdefDirective(tok.loc, false);
+                            continue;
+                        case DirectiveKind::Elifndef:
+                            handleElifdefDirective(tok.loc, true);
+                            continue;
                         case DirectiveKind::Endif:
                             handleEndifDirective(tok.loc);
                             continue;
                         case DirectiveKind::If:
                         case DirectiveKind::Ifdef:
                         case DirectiveKind::Ifndef:
-                            // Nested conditional in skipped block
-                            // Push a dummy state so we can match the corresponding endif
+
                             conditional_stack.push_back({true, false});
-                            // fall through to consume rest of line
+
                             [[fallthrough]];
                         default:
-                            // Consume until newline (tokens may be invalid in skipped blocks)
+
                             try {
                                 while (true) {
                                     auto t = current_tok_src()->nextToken();
@@ -3284,7 +4106,7 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
                         handlePragmaDirective(tok.loc); continue;
                     case DirectiveKind::Ident:
                     case DirectiveKind::Sccs: {
-                        // #ident / #sccs — ignore rest of line
+
                         auto orig_tokstack_size = tok_stack.size();
                         while (true) {
                             Token t = nextToken(true, orig_tokstack_size);
@@ -3308,15 +4130,30 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
                         handleElseDirective(tok.loc); continue;
                     case DirectiveKind::Elif:
                         handleElifDirective(tok.loc); continue;
+                    case DirectiveKind::Elifdef:
+                        handleElifdefDirective(tok.loc, false); continue;
+                    case DirectiveKind::Elifndef:
+                        handleElifdefDirective(tok.loc, true); continue;
+                    case DirectiveKind::Embed:
+                        handleEmbedDirective(tok.loc); continue;
                     case DirectiveKind::Endif:
                         handleEndifDirective(tok.loc); continue;
                     case DirectiveKind::Unknown:
-                        break; // fall through to non-directive handling
+                        break;
                 }
             }
 
         }
         if (skipping && !isProcessingConditional) {
+            continue;
+        }
+
+        // The [cpp.pre] preprocessing invariant recognizes module directives
+        // only at a file source's logical-line start, never from expansion.
+        if (lang_opts.modules_enabled() && !isProcessingConditional &&
+            tok.flags.start_of_line == 1 && tok.flags.part_of_macro_define == 0 &&
+            current_tok_src()->get_src_kind() == TokenSrcKind::File &&
+            try_module_directive(tok)) {
             continue;
         }
 
@@ -3349,43 +4186,44 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
             continue;
         }
         if (tok.isIdentifierLike()) {
-            const std::string& name = tok.value;
-            if (tok.hide_set && tok.hide_set->contains(name)) {
-                // we've seen this before
+            if (tok.ident == 0) {
+
+                tok.ident = intern_ident(tok.value);
+            }
+            if (tok.hide_set && hide_set_contains(tok.hide_set, tok.ident)) {
+
                 return tok;
             }
-            auto it = macro_table.find(name);
+            if (!idents.info(tok.ident).maybe_macro) {
+                return tok;
+            }
+            auto it = macro_table.find(tok.ident);
             if (it == macro_table.end()) {
                 return tok;
             }
             if (it->second.is_function_like) {
-                // Check if followed by (
+
                 Token next = current_tok_src()->peekToken();
-                // C standard: whitespace (including newlines) between a
-                // function-like macro name and '(' does not prevent
-                // macro invocation (C11 6.10.3p10)
+
                 if (next.type == TokenType::Newline) {
                     while (current_tok_src()->peekToken().type == TokenType::Newline) {
-                        current_tok_src()->nextToken(); // consume newline
+                        current_tok_src()->nextToken();
                     }
                     next = current_tok_src()->peekToken();
                 }
-                // If the current expansion source is exhausted, walk down the
-                // token stack to find the ( in an ancestor source. This handles
-                // counting-macro patterns where expansion produces a function-like
-                // macro name and the arguments live in an outer source.
-                // Respect peelofflimit so we never peek across an
-                // expand_arg_tokens boundary into unrelated sources.
+
                 if (next.type == TokenType::Eof) {
                     size_t lower_bound = peelofflimit == 0 ? 0 : peelofflimit - 1;
                     for (int si = (int)tok_stack.size() - 2; si >= (int)lower_bound; --si) {
+                        while (tok_stack[si]->peekToken().type == TokenType::Newline) {
+                            tok_stack[si]->nextToken();
+                        }
                         next = tok_stack[si]->peekToken();
                         if (next.type != TokenType::Eof) break;
                     }
                 }
                 if (next.type == TokenType::LEFT_PAREN) {
-                    // Pop all exhausted expansion sources so that
-                    // expand_function_macro reads ( from the right place.
+
                     size_t pop_limit = std::max((size_t)1, peelofflimit);
                     while (current_tok_src()->peekToken().type == TokenType::Eof
                            && tok_stack.size() > pop_limit) {
@@ -3394,11 +4232,11 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
                     expand_function_macro(tok, it->second);
                     continue;
                 } else {
-                    // Not a call, treat as normal identifier
+
                     return tok;
                 }
             } else {
-                // object-like
+
                 expand_object_macro(tok, it->second);
                 continue;
             }
@@ -3415,47 +4253,68 @@ std::vector<Token> PreProcess::tokenize() {
     uint64_t pp_number_relex_successes = 0;
     uint64_t string_literal_concats = 0;
     std::vector<Token> tokens;
-    // Pre-allocate based on source size: roughly 1 token per 4-5 characters
+
     auto main_file = sm->getFileWithId(0);
     if (main_file) {
         tokens.reserve(main_file->buffer.size() / 4);
     }
+
+    Lexer relex(std::string_view(), SrcLoc(), sm.get(), lang_opts);
+    relex.ident_table = &idents;
     while (true) {
         auto token = nextToken(true);
         if (token.type == TokenType::Newline) {
-            // todo: will we ever reach here?
-            continue; // don't push
+
+            continue;
         }
-        // Convert PP_NUMBER to proper numeric token before emitting to parser.
-        // If it re-lexes to a single valid number, replace the type/value.
-        // Otherwise keep it as PP_NUMBER and let the parser handle it
-        // (e.g. version numbers like 10.12.1 in availability attributes).
+
         if (token.type == TokenType::PP_NUMBER) {
             ++pp_number_relex_attempts;
-            try {
-                Lexer relex(token.value, token.loc, sm.get(), lang_opts);
+
+            bool plain_integer = !token.value.empty();
+            const char digit_limit = token.value[0] == '0' ? '7' : '9';
+            for (char c : token.value) {
+                if (c < '0' || c > digit_limit) {
+                    plain_integer = false;
+                    break;
+                }
+            }
+            if (plain_integer) {
+                token.type = TokenType::INTEGER_CONST;
+                ++pp_number_relex_successes;
+            } else try {
+                relex.reset(token.value, token.loc);
                 auto tok = relex.next_token();
                 if (tok.has_value() && tok->type != TokenType::UNKNOWN && tok->type != TokenType::Eof) {
                     auto next = relex.next_token();
                     if (next.has_value() && next->type == TokenType::Eof) {
                         token.type = tok->type;
                         token.value = tok->value;
+                        token.ident = tok->ident;
                         ++pp_number_relex_successes;
                     }
-                    // else: can't re-lex as single token, keep as PP_NUMBER
+
                 }
-                // else: can't re-lex at all, keep as PP_NUMBER
+
             } catch (const std::runtime_error&) {
-                // Keep non-standard pp-numbers like 10_7 intact so the parser
-                // can handle platform-specific attribute spellings.
+
             }
         }
         if (token.type == TokenType::STRING_LITERAL &&
             !tokens.empty() &&
             tokens.back().type == TokenType::STRING_LITERAL) {
-            tokens.back().value += token.value;
-            tokens.back().hide_set = union_hide_sets(tokens.back().hide_set, token.hide_set);
+            if (tokens.back().ident != 0 && token.ident != 0 &&
+                tokens.back().ident != token.ident) {
+                error("inconsistent user-defined suffixes in string literal concatenation",
+                      token.loc);
+            }
+            tokens.back().value =
+                sm->spellings.store_concat(tokens.back().value, token.value);
+            tokens.back().hide_set = hide_set_union(tokens.back().hide_set, token.hide_set);
             tokens.back().literal_prefix = merge_literal_prefix(tokens.back().literal_prefix, token.literal_prefix);
+            if (tokens.back().ident == 0) {
+                tokens.back().ident = token.ident;
+            }
             ++string_literal_concats;
         } else {
             if (token.type != TokenType::Eof && sm) {
@@ -3470,6 +4329,36 @@ std::vector<Token> PreProcess::tokenize() {
             break;
         }
     }
+
+    size_t literal_suffix_count = 0;
+    for (const Token& token : tokens) {
+        if (token.ident != 0 &&
+            token_can_carry_literal_suffix(token.type)) {
+            ++literal_suffix_count;
+        }
+    }
+    if (literal_suffix_count != 0) {
+        std::vector<Token> parser_tokens;
+        parser_tokens.reserve(tokens.size() + literal_suffix_count);
+        for (Token token : tokens) {
+            if (token.ident == 0 ||
+                !token_can_carry_literal_suffix(token.type)) {
+                parser_tokens.push_back(token);
+                continue;
+            }
+            const uint32_t suffix_ident = token.ident;
+            token.ident = 0;
+            parser_tokens.push_back(token);
+            Token suffix(TokenType::LITERAL_SUFFIX,
+                         idents.info(suffix_ident).spelling,
+                         token.loc);
+            suffix.ident = suffix_ident;
+            parser_tokens.push_back(suffix);
+        }
+        tokens = std::move(parser_tokens);
+        perf_parser_tokens_emitted += literal_suffix_count;
+    }
+
     if (perf_profiler) {
         perf_profiler->add_counter(PerfCounter::ParserTokensEmitted,
             perf_parser_tokens_emitted);
@@ -3487,16 +4376,68 @@ std::vector<Token> PreProcess::tokenize() {
     return tokens;
 }
 
-void PreProcess::emit_preprocessed_text(std::ostream& out) {
+namespace {
+
+bool is_ident_or_number_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '$';
+}
+
+bool tokens_would_paste(const std::string& prev, const std::string& next) {
+    if (prev.empty() || next.empty()) {
+        return false;
+    }
+    const char a = prev.back();
+    const char b = next.front();
+    if (is_ident_or_number_char(a) && is_ident_or_number_char(b)) {
+        return true;
+    }
+
+    if ((a >= '0' && a <= '9') && b == '.') {
+        return true;
+    }
+    if (a == '.' && ((b >= '0' && b <= '9') || b == '.')) {
+        return true;
+    }
+    if ((a == 'e' || a == 'E' || a == 'p' || a == 'P') &&
+        (b == '+' || b == '-') && (prev[0] >= '0' && prev[0] <= '9')) {
+        return true;
+    }
+    static constexpr std::string_view kPastablePairs[] = {
+        "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->", "++", "--",
+        "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "##", "//", "/*",
+        "<:", ":>", "<%", "%>", "%:", "::",
+    };
+    const char pair[2] = {a, b};
+    for (std::string_view candidate : kPastablePairs) {
+        if (candidate[0] == pair[0] && candidate[1] == pair[1]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void PreProcess::emit_preprocessed_text(std::ostream& out, bool line_markers) {
     PerfScopedTimer timer(perf_profiler, PerfPhase::PreprocessEmit);
     bool at_line_start = true;
     bool have_last_token = false;
+    std::string last_spelling;
     int32_t last_file_id = -1;
     uint32_t last_line = 0;
     uint32_t newlines_since_last_token = 0;
     std::vector<int32_t> include_stack;
 
     auto emit_line_marker = [&](uint32_t line, const std::string& file, int flag) {
+        if (!line_markers) {
+
+            if (!at_line_start) {
+                out.put('\n');
+                at_line_start = true;
+            }
+            return;
+        }
         if (!at_line_start) {
             out.put('\n');
         }
@@ -3579,10 +4520,14 @@ void PreProcess::emit_preprocessed_text(std::ostream& out) {
             out.put('\n');
             at_line_start = true;
         }
-        if (!at_line_start && token.flags.has_leading_space) {
+        std::string spelling = preprocessor_token_spelling(token, idents);
+        if (!at_line_start &&
+            (token.flags.has_leading_space ||
+             tokens_would_paste(last_spelling, spelling))) {
             out.put(' ');
         }
-        out << token_spelling_for_output(token);
+        out << spelling;
+        last_spelling = std::move(spelling);
         at_line_start = false;
 
         have_last_token = true;
@@ -3623,23 +4568,26 @@ void PreProcess::emit_macro_definitions(std::ostream& out) {
             ? macro->replacement_list
             : builtin_macro_tokens_for_dump(*this, *macro);
         if (!replacement.empty()) {
-            out << " " << token_sequence_spelling_for_macro_dump(replacement);
+            out << " " << token_sequence_spelling_for_macro_dump(
+                replacement, idents);
         }
         out << "\n";
     }
 }
 
 bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
-    // 1. Handle preprocessor query builtins.
+
     std::vector<Token> after_has;
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (tokens[i].type == TokenType::IDENTIFIER) {
-            const std::string& name = tokens[i].value;
+            const std::string& name = std::string(tokens[i].value);
             bool is_has = (name == "__has_attribute" || name == "__has_builtin" ||
+                name == "__has_c_attribute" ||
                 name == "__has_cpp_attribute" || name == "__has_extension" ||
                 name == "__has_feature" || name == "__has_warning" ||
                 name == "__is_identifier" ||
-                name == "__has_include" || name == "__has_include_next");
+                name == "__has_include" || name == "__has_include_next" ||
+                name == "__has_embed");
             if (is_has) {
                 if (i + 1 >= tokens.size() || tokens[i + 1].type != TokenType::LEFT_PAREN) {
                     after_has.push_back(tokens[i]);
@@ -3678,6 +4626,8 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                     std::shared_ptr<FileSrc> found = resolve_include_file(
                         sm.get(), curr_file, header, is_system, name == "__has_include_next");
                     result = found ? 1 : 0;
+                } else if (name == "__has_embed") {
+                    result = evaluate_has_embed(arg_tokens, tokens[i].loc);
                 } else {
                     if (name == "__is_identifier") {
                         auto operand = extract_identifier_query_operand(arg_tokens);
@@ -3688,30 +4638,25 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                     } else if (auto arg_name = extract_has_query_operand(arg_tokens)) {
                         const std::string& query = arg_name->query;
                         if (name == "__has_attribute") {
-                            const std::string canon = canonicalize_attribute_name(query);
-                            result = AttributeRegistry::instance().find(canon) ? 1 : 0;
+                            const std::string canon =
+                                canonicalize_preprocessor_attribute_name(query);
+                            result = supports_gnu_attribute_name(canon) ? 1 : 0;
                         } else if (name == "__has_cpp_attribute") {
-                            result = static_cast<int>(has_cpp_attribute_value(*arg_name));
+                            result = static_cast<int>(has_cpp_attribute_value(
+                                *arg_name, lang_opts, target_info.get()));
+                        } else if (name == "__has_c_attribute") {
+                            result = static_cast<int>(has_c_attribute_value(*arg_name));
                         } else if (name == "__has_feature") {
                             result = has_feature_name(query, lang_opts, target_info.get()) ? 1 : 0;
                         } else if (name == "__has_extension") {
                             result = has_extension_name(query, lang_opts, target_info.get()) ? 1 : 0;
                         } else if (name == "__has_builtin") {
-                            bool builtin_available = BuiltinRegistry::instance().is_builtin(query);
+                            bool builtin_available = BuiltinRegistry::instance().is_supported(query);
                             if (builtin_available && target_info) {
                                 auto gate = TargetFeatureGate::from_target_info(*target_info);
                                 builtin_available = gate.is_builtin_available(query);
                             }
                             result = builtin_available ? 1 : 0;
-                            // Also check our dedicated builtins not in the registry
-                            if (!result) {
-                                BuiltinTypeTransformKind builtin_transform_kind;
-                                if (lookup_builtin_type_transform_kind(
-                                        query,
-                                        builtin_transform_kind)) {
-                                    result = 1;
-                                }
-                            }
                             if (!result) {
                                 if (query == "__builtin_va_start" || query == "__builtin_va_end" ||
                                     query == "__builtin_va_arg" || query == "__builtin_va_copy" ||
@@ -3724,18 +4669,19 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                         }
                     }
                 }
-                after_has.emplace_back(TokenType::INTEGER_CONST, std::to_string(result), tokens[i].loc);
+                after_has.emplace_back(TokenType::INTEGER_CONST,
+                                       sm->spellings.store(std::to_string(result)), tokens[i].loc);
                 i = j;
                 continue;
             }
         }
         after_has.push_back(tokens[i]);
     }
-    // 2. Handle 'defined' operator
+
     std::vector<Token> after_defined;
     for (size_t i = 0; i < after_has.size(); ++i) {
         if (after_has[i].isIdentifierLike() && after_has[i].value == "defined") {
-            // Handle defined(X) or defined X
+
             if (i + 1 >= after_has.size()) {
                 error("Missing argument to defined", after_has[i].loc);
             }
@@ -3756,15 +4702,15 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                 error("Expected identifier after defined", after_has[i+1].loc);
             }
 
-            bool is_defined = macro_table.find(macro_name) != macro_table.end() ||
+            bool is_defined = has_macro_name(macro_name) ||
                               is_builtin_defined_name(macro_name);
             after_defined.push_back(Token(TokenType::INTEGER_CONST, is_defined ? "1" : "0", after_has[i].loc));
         } else {
             after_defined.push_back(after_has[i]);
         }
     }
-    // 3. In C++ mode, 'true' and 'false' are treated as 1/0 in #if expressions.
-    if (lang_opts.is_cxx_mode()) {
+
+    if (lang_opts.is_cxx_mode() || lang_opts.is_c23_or_later()) {
         for (auto& t : after_defined) {
             if (t.type == TokenType::TRUE_KW || t.value == "true") {
                 t.type = TokenType::INTEGER_CONST;
@@ -3777,19 +4723,20 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
             }
         }
     }
-    // 4. Replace remaining identifiers with 0
+
     for (auto& t : after_defined) {
         if (t.isIdentifierLike()) {
             t.type = TokenType::INTEGER_CONST;
             t.value = "0";
         }
     }
-    // 5. Convert PP_NUMBER tokens to proper numeric tokens (error if invalid)
+
     for (auto& t : after_defined) {
         if (t.type == TokenType::PP_NUMBER) {
             bool converted = false;
             try {
                 Lexer relex(t.value, t.loc, nullptr, lang_opts);
+                relex.spelling_arena = &sm->spellings;
                 auto tok = relex.next_token();
                 if (tok.has_value() && tok->type != TokenType::UNKNOWN && tok->type != TokenType::Eof) {
                     auto next = relex.next_token();
@@ -3801,7 +4748,7 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                 }
             } catch (...) {}
             if (!converted) {
-                error("invalid token in preprocessor expression: " + t.value, t.loc);
+                error("invalid token in preprocessor expression: " + std::string(t.value), t.loc);
             }
         }
     }
@@ -3833,13 +4780,13 @@ void PreProcess::handleIfDirective(SrcLoc loc) {
     isProcessingConditional = false;
     defined_state = DefinedOperatorState::None;
     if (skipping) {
-        conditional_stack.push_back({true, false}); // Inherit skipping
+        conditional_stack.push_back({true, false});
         return;
     }
 
     bool result = evaluateConstantExpression(expr_tokens);
     conditional_stack.push_back({result, result});
-    // if constexpr =0, then skip, If non zero, don't skip
+
     skipping = !result;
 }
 
@@ -3848,12 +4795,12 @@ void PreProcess::handleIfDefDirective(SrcLoc loc, bool is_ifndef) {
     if (!t.isIdentifierLike()) {
         error("Expected identifier after #ifdef/#ifndef", loc);
     }
-    // Consume until newline
+
     while (true) {
         Token next = current_tok_src()->nextToken();
         if (next.type == TokenType::Newline || next.type == TokenType::Eof) break;
         if (next.type != TokenType::Whitespace) {
-            // gcc seems to let this be?
+
              error("Extra tokens after #ifdef/#ifndef directive", loc);
         }
     }
@@ -3863,14 +4810,16 @@ void PreProcess::handleIfDefDirective(SrcLoc loc, bool is_ifndef) {
         return;
     }
 
-    bool is_defined = macro_table.find(t.value) != macro_table.end() || is_builtin_defined_name(t.value);
+    bool is_defined = (t.ident ? macro_table.contains(t.ident)
+                               : has_macro_name(t.value)) ||
+                      is_builtin_defined_name(t.value);
     bool result = is_ifndef ? !is_defined : is_defined;
     conditional_stack.push_back({result, result});
     skipping = !result;
 }
 
 void PreProcess::handleElseDirective(SrcLoc loc) {
-    // Consume until newline
+
     while (true) {
         Token next = current_tok_src()->nextToken();
         if (next.type == TokenType::Newline || next.type == TokenType::Eof) break;
@@ -3882,17 +4831,15 @@ void PreProcess::handleElseDirective(SrcLoc loc) {
 
     ConditionalState& state = conditional_stack.back();
     if (state.was_successful) {
-        // If a previous branch was taken, we skip this else block
-        // If we already skipping and we get a nested if block, this should help us keep skipping
+
         state.is_active = false;
         skipping = true;
     } else {
-        // If no previous branch was taken, we take this else block
+
         state.is_active = true;
         state.was_successful = true;
         skipping = false;
     }
-
 
 }
 
@@ -3916,11 +4863,11 @@ void PreProcess::handleElifDirective(SrcLoc loc) {
 
     ConditionalState& state = conditional_stack.back();
     if (state.was_successful) {
-        // If a previous branch was taken, we skip this elif block
+
         state.is_active = false;
         skipping = true;
     } else {
-        // Evaluate condition
+
         bool result = evaluateConstantExpression(expr_tokens);
         if (result) {
             state.is_active = true;
@@ -3933,8 +4880,48 @@ void PreProcess::handleElifDirective(SrcLoc loc) {
     }
 }
 
+void PreProcess::handleElifdefDirective(SrcLoc loc, bool is_elifndef) {
+    Token t = current_tok_src()->nextToken();
+    while (t.type == TokenType::Whitespace) {
+        t = current_tok_src()->nextToken();
+    }
+    bool have_name = t.isIdentifierLike();
+    std::string macro_name = have_name ? std::string(t.value) : std::string();
+
+    while (t.type != TokenType::Newline && t.type != TokenType::Eof) {
+        t = current_tok_src()->nextToken();
+    }
+
+    if (conditional_stack.empty()) {
+        error(is_elifndef ? "#elifndef without #if" : "#elifdef without #if", loc);
+    }
+
+    ConditionalState& state = conditional_stack.back();
+    if (state.was_successful) {
+        state.is_active = false;
+        skipping = true;
+        return;
+    }
+    if (!have_name) {
+        error(is_elifndef ? "Expected identifier after #elifndef"
+                          : "Expected identifier after #elifdef",
+              loc);
+    }
+    bool is_defined = has_macro_name(macro_name) ||
+                      is_builtin_defined_name(macro_name);
+    bool result = is_elifndef ? !is_defined : is_defined;
+    if (result) {
+        state.is_active = true;
+        state.was_successful = true;
+        skipping = false;
+    } else {
+        state.is_active = false;
+        skipping = true;
+    }
+}
+
 void PreProcess::handleEndifDirective(SrcLoc loc) {
-    // Consume until newline
+
     while (true) {
         Token next = current_tok_src()->nextToken();
         if (next.type == TokenType::Newline || next.type == TokenType::Eof) break;
@@ -3946,7 +4933,6 @@ void PreProcess::handleEndifDirective(SrcLoc loc) {
 
     conditional_stack.pop_back();
 
-    // Restore skipping state based on parent
     if (conditional_stack.empty()) {
         skipping = false;
     } else {

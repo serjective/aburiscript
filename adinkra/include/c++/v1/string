@@ -1,0 +1,1526 @@
+#ifndef ADINKRA_STRING
+#define ADINKRA_STRING
+
+#include <__adinkra/char_traits>
+#include <__adinkra/config>
+#include <__adinkra/storage>
+#include <algorithm>
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <iosfwd>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type>
+class __string_iterator {
+    template<class>
+    friend class __string_iterator;
+
+public:
+    using iterator_category = random_access_iterator_tag;
+    using iterator_concept = contiguous_iterator_tag;
+    using value_type = remove_cv_t<Type>;
+    using difference_type = ptrdiff_t;
+    using pointer = Type*;
+    using reference = Type&;
+
+    constexpr __string_iterator() noexcept : pointer_(nullptr) {}
+
+    explicit constexpr __string_iterator(pointer value) noexcept
+        : pointer_(value) {}
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    constexpr __string_iterator(
+        const __string_iterator<Other>& other) noexcept
+        : pointer_(other.pointer_) {}
+
+    _ADINKRA_NODISCARD constexpr pointer base() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference operator*() const noexcept {
+        return *pointer_;
+    }
+
+    _ADINKRA_NODISCARD constexpr pointer operator->() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](difference_type index) const noexcept {
+        return pointer_[index];
+    }
+
+    constexpr __string_iterator& operator++() noexcept {
+        ++pointer_;
+        return *this;
+    }
+
+    constexpr __string_iterator operator++(int) noexcept {
+        __string_iterator result(*this);
+        ++pointer_;
+        return result;
+    }
+
+    constexpr __string_iterator& operator--() noexcept {
+        --pointer_;
+        return *this;
+    }
+
+    constexpr __string_iterator operator--(int) noexcept {
+        __string_iterator result(*this);
+        --pointer_;
+        return result;
+    }
+
+    constexpr __string_iterator&
+    operator+=(difference_type count) noexcept {
+        pointer_ += count;
+        return *this;
+    }
+
+    constexpr __string_iterator&
+    operator-=(difference_type count) noexcept {
+        pointer_ -= count;
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr __string_iterator
+    operator+(difference_type count) const noexcept {
+        return __string_iterator(
+            count == 0 ? pointer_ : pointer_ + count);
+    }
+
+    _ADINKRA_NODISCARD constexpr __string_iterator
+    operator-(difference_type count) const noexcept {
+        return __string_iterator(
+            count == 0 ? pointer_ : pointer_ - count);
+    }
+
+private:
+    pointer pointer_;
+};
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool operator==(
+    const __string_iterator<Left>& left,
+    const __string_iterator<Right>& right) noexcept {
+    return left.base() == right.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr auto operator<=>(
+    const __string_iterator<Left>& left,
+    const __string_iterator<Right>& right) noexcept {
+    return left.base() <=> right.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr ptrdiff_t operator-(
+    const __string_iterator<Left>& left,
+    const __string_iterator<Right>& right) noexcept {
+    return left.base() == right.base()
+        ? 0
+        : left.base() - right.base();
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr __string_iterator<Type> operator+(
+    ptrdiff_t count,
+    const __string_iterator<Type>& iterator) noexcept {
+    return iterator + count;
+}
+
+template<class Character, class Traits = char_traits<Character>,
+         class Allocator = allocator<Character>>
+class basic_string {
+public:
+    using traits_type = Traits;
+    using value_type = Character;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+    using iterator = __string_iterator<value_type>;
+    using const_iterator = __string_iterator<const value_type>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    static constexpr size_type npos = static_cast<size_type>(-1);
+
+private:
+    static constexpr size_type local_capacity_value =
+        23 / sizeof(Character) > 0 ? 23 / sizeof(Character) : 1;
+
+    Character local_[local_capacity_value + 1];
+    pointer data_;
+    size_type size_;
+    size_type capacity_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+
+public:
+    constexpr basic_string() noexcept(noexcept(Allocator()))
+        : local_{}, data_(local_), size_(0),
+          capacity_(local_capacity_value), allocator_() {}
+
+    constexpr explicit basic_string(
+        const Allocator& allocator_value) noexcept
+        : local_{}, data_(local_), size_(0),
+          capacity_(local_capacity_value), allocator_(allocator_value) {}
+
+    basic_string(
+        const Character* value, size_type count,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(allocator_value) {
+        assign(value, count);
+    }
+
+    basic_string(
+        const Character* value,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(
+              value, Traits::length(value), allocator_value) {}
+
+    explicit basic_string(
+        basic_string_view<Character, Traits> value,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(
+              value.data(), value.size(), allocator_value) {}
+
+    template<class StringViewLike>
+        requires (
+            is_convertible_v<
+                const StringViewLike&,
+                basic_string_view<Character, Traits>> &&
+            !is_convertible_v<
+                const StringViewLike&, const Character*>)
+    explicit basic_string(
+        const StringViewLike& value,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(
+              basic_string_view<Character, Traits>(value),
+              allocator_value) {}
+
+    template<class StringViewLike>
+        requires is_convertible_v<
+            const StringViewLike&,
+            basic_string_view<Character, Traits>>
+    basic_string(
+        const StringViewLike& value, size_type position,
+        size_type count,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(
+              basic_string_view<Character, Traits>(value).substr(
+                  position, count),
+              allocator_value) {}
+
+    basic_string(
+        size_type count, Character value,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(allocator_value) {
+        assign(count, value);
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    basic_string(
+        InputIterator first, InputIterator last,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(allocator_value) {
+        for (; first != last; ++first) {
+            push_back(*first);
+        }
+    }
+
+    basic_string(
+        initializer_list<Character> values,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(values.begin(), values.end(), allocator_value) {}
+
+    basic_string(const basic_string& other)
+        : basic_string(allocator_traits<Allocator>::
+                           select_on_container_copy_construction(
+                               other.allocator_)) {
+        assign(other.data_, other.size_);
+    }
+
+    basic_string(
+        const basic_string& other, const Allocator& allocator_value)
+        : basic_string(allocator_value) {
+        assign(other.data_, other.size_);
+    }
+
+    basic_string(
+        const basic_string& other, size_type position,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(allocator_value) {
+        other.check_position(position);
+        assign(other.data_ + position, other.size_ - position);
+    }
+
+    basic_string(
+        const basic_string& other, size_type position, size_type count,
+        const Allocator& allocator_value = Allocator())
+        : basic_string(allocator_value) {
+        other.check_position(position);
+        assign(
+            other.data_ + position,
+            std::min(count, other.size_ - position));
+    }
+
+    basic_string(basic_string&& other)
+        noexcept(is_nothrow_move_constructible_v<Allocator>)
+        : local_{}, data_(local_), size_(0),
+          capacity_(local_capacity_value),
+          allocator_(std::move(other.allocator_)) {
+        take_or_copy(other);
+    }
+
+    basic_string(
+        basic_string&& other, const Allocator& allocator_value)
+        : basic_string(allocator_value) {
+        if (allocator_ == other.allocator_ && !other.uses_local()) {
+            take_heap(other);
+        } else {
+            assign(other.data_, other.size_);
+            other.clear();
+        }
+    }
+
+    ~basic_string() {
+        release_heap();
+    }
+
+    basic_string& operator=(const basic_string& other) {
+        if (this != std::addressof(other)) {
+            if constexpr (allocator_traits<Allocator>::
+                              propagate_on_container_copy_assignment::value) {
+                if (!(allocator_ == other.allocator_)) {
+                    release_heap();
+                    reset_local();
+                }
+                allocator_ = other.allocator_;
+            }
+            assign(other.data_, other.size_);
+        }
+        return *this;
+    }
+
+    basic_string& operator=(basic_string&& other)
+        noexcept(allocator_traits<Allocator>::
+                     propagate_on_container_move_assignment::value ||
+                 allocator_traits<Allocator>::is_always_equal::value) {
+        if (this == std::addressof(other)) {
+            return *this;
+        }
+
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_move_assignment::value) {
+            release_heap();
+            reset_local();
+            allocator_ = std::move(other.allocator_);
+            take_or_copy(other);
+        } else if (allocator_ == other.allocator_) {
+            release_heap();
+            reset_local();
+            take_or_copy(other);
+        } else {
+            assign(other.data_, other.size_);
+            other.clear();
+        }
+        return *this;
+    }
+
+    basic_string& operator=(const Character* value) {
+        return assign(value);
+    }
+
+    template<class StringViewLike>
+        requires (
+            is_convertible_v<
+                const StringViewLike&,
+                basic_string_view<Character, Traits>> &&
+            !is_convertible_v<
+                const StringViewLike&, const Character*>)
+    basic_string& operator=(const StringViewLike& value) {
+        basic_string_view<Character, Traits> view(value);
+        return assign(view.data(), view.size());
+    }
+
+    basic_string& operator=(Character value) {
+        return assign(1, value);
+    }
+
+    basic_string& operator=(initializer_list<Character> values) {
+        return assign(values.begin(), values.size());
+    }
+
+    basic_string& assign(const basic_string& other) {
+        return assign(other.data_, other.size_);
+    }
+
+    basic_string& assign(basic_string_view<Character, Traits> value) {
+        return assign(value.data(), value.size());
+    }
+
+    basic_string& assign(
+        const basic_string& other, size_type position,
+        size_type count = npos) {
+        if (position > other.size_) {
+            throw out_of_range("basic_string::assign");
+        }
+        return assign(
+            other.data_ + position,
+            std::min(count, other.size_ - position));
+    }
+
+    basic_string& assign(const Character* value, size_type count) {
+        if (points_inside(value)) {
+            const size_type offset =
+                static_cast<size_type>(value - data_);
+            if (offset + count > size_) {
+                throw out_of_range("basic_string::assign");
+            }
+            Traits::move(data_, data_ + offset, count);
+            size_ = count;
+            data_[size_] = Character();
+            return *this;
+        }
+        ensure_capacity(count);
+        Traits::copy(data_, value, count);
+        size_ = count;
+        data_[size_] = Character();
+        return *this;
+    }
+
+    basic_string& assign(const Character* value) {
+        return assign(value, Traits::length(value));
+    }
+
+    basic_string& assign(size_type count, Character value) {
+        ensure_capacity(count);
+        Traits::assign(data_, count, value);
+        size_ = count;
+        data_[size_] = Character();
+        return *this;
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    basic_string& assign(InputIterator first, InputIterator last) {
+        clear();
+        for (; first != last; ++first) {
+            push_back(*first);
+        }
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD allocator_type get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    _ADINKRA_NODISCARD reference at(size_type position) {
+        check_index(position);
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD const_reference at(size_type position) const {
+        check_index(position);
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD reference operator[](size_type position) noexcept {
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD const_reference
+    operator[](size_type position) const noexcept {
+        return data_[position];
+    }
+
+    _ADINKRA_NODISCARD reference front() noexcept { return data_[0]; }
+    _ADINKRA_NODISCARD const_reference front() const noexcept {
+        return data_[0];
+    }
+    _ADINKRA_NODISCARD reference back() noexcept {
+        return data_[size_ - 1];
+    }
+    _ADINKRA_NODISCARD const_reference back() const noexcept {
+        return data_[size_ - 1];
+    }
+
+    _ADINKRA_NODISCARD const Character* c_str() const noexcept {
+        return data_;
+    }
+    _ADINKRA_NODISCARD Character* data() noexcept { return data_; }
+    _ADINKRA_NODISCARD const Character* data() const noexcept {
+        return data_;
+    }
+
+    _ADINKRA_NODISCARD iterator begin() noexcept {
+        return iterator(data_);
+    }
+    _ADINKRA_NODISCARD const_iterator begin() const noexcept {
+        return const_iterator(data_);
+    }
+    _ADINKRA_NODISCARD const_iterator cbegin() const noexcept {
+        return const_iterator(data_);
+    }
+    _ADINKRA_NODISCARD iterator end() noexcept {
+        return iterator(data_ + size_);
+    }
+    _ADINKRA_NODISCARD const_iterator end() const noexcept {
+        return const_iterator(data_ + size_);
+    }
+    _ADINKRA_NODISCARD const_iterator cend() const noexcept {
+        return const_iterator(data_ + size_);
+    }
+    _ADINKRA_NODISCARD reverse_iterator rbegin() noexcept {
+        return reverse_iterator(end());
+    }
+    _ADINKRA_NODISCARD const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    _ADINKRA_NODISCARD const_reverse_iterator crbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    _ADINKRA_NODISCARD reverse_iterator rend() noexcept {
+        return reverse_iterator(begin());
+    }
+    _ADINKRA_NODISCARD const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+    _ADINKRA_NODISCARD const_reverse_iterator crend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD bool empty() const noexcept { return size_ == 0; }
+    _ADINKRA_NODISCARD size_type size() const noexcept { return size_; }
+    _ADINKRA_NODISCARD size_type length() const noexcept { return size_; }
+    _ADINKRA_NODISCARD size_type capacity() const noexcept {
+        return capacity_;
+    }
+    _ADINKRA_NODISCARD size_type max_size() const noexcept {
+        const size_type allocation_max =
+            allocator_traits<Allocator>::max_size(allocator_);
+        return allocation_max == 0 ? 0 : allocation_max - 1;
+    }
+
+    void reserve(size_type requested) {
+        if (requested > max_size()) {
+            throw length_error("basic_string::reserve");
+        }
+        if (requested > capacity_) {
+            reallocate(requested);
+        }
+    }
+
+    void shrink_to_fit() {
+        if (uses_local()) {
+            return;
+        }
+        if (size_ <= local_capacity_value) {
+            pointer previous = data_;
+            const size_type previous_capacity = capacity_;
+            Traits::copy(local_, previous, size_ + 1);
+            data_ = local_;
+            capacity_ = local_capacity_value;
+            allocator_traits<Allocator>::deallocate(
+                allocator_, previous, previous_capacity + 1);
+        } else if (size_ < capacity_) {
+            reallocate(size_);
+        }
+    }
+
+    void clear() noexcept {
+        size_ = 0;
+        data_[0] = Character();
+    }
+
+    basic_string& insert(
+        size_type position, const basic_string& value) {
+        return insert(position, value.data_, value.size_);
+    }
+
+    basic_string& insert(
+        size_type position, basic_string_view<Character, Traits> value) {
+        return insert(position, value.data(), value.size());
+    }
+
+    basic_string& insert(
+        size_type position, basic_string_view<Character, Traits> value,
+        size_type source_position, size_type count = npos) {
+        if (source_position > value.size()) {
+            throw out_of_range("basic_string::insert");
+        }
+        return insert(
+            position, value.data() + source_position,
+            std::min(count, value.size() - source_position));
+    }
+
+    basic_string& insert(
+        size_type position, const basic_string& value,
+        size_type source_position, size_type count = npos) {
+        if (source_position > value.size_) {
+            throw out_of_range("basic_string::insert");
+        }
+        return insert(
+            position, value.data_ + source_position,
+            std::min(count, value.size_ - source_position));
+    }
+
+    basic_string& insert(
+        size_type position, const Character* value, size_type count) {
+        check_position(position);
+        if (points_inside(value)) {
+            basic_string temporary(value, count, allocator_);
+            return insert(position, temporary.data_, temporary.size_);
+        }
+        ensure_extra_capacity(count);
+        Traits::move(
+            data_ + position + count, data_ + position,
+            size_ - position + 1);
+        Traits::copy(data_ + position, value, count);
+        size_ += count;
+        return *this;
+    }
+
+    basic_string& insert(size_type position, const Character* value) {
+        return insert(position, value, Traits::length(value));
+    }
+
+    basic_string& insert(
+        size_type position, size_type count, Character value) {
+        check_position(position);
+        ensure_extra_capacity(count);
+        Traits::move(
+            data_ + position + count, data_ + position,
+            size_ - position + 1);
+        Traits::assign(data_ + position, count, value);
+        size_ += count;
+        return *this;
+    }
+
+    iterator insert(const_iterator position, Character value) {
+        const size_type offset =
+            static_cast<size_type>(position.base() - data_);
+        insert(offset, 1, value);
+        return iterator(data_ + offset);
+    }
+
+    iterator insert(
+        const_iterator position, size_type count, Character value) {
+        const size_type offset =
+            static_cast<size_type>(position.base() - data_);
+        insert(offset, count, value);
+        return iterator(data_ + offset);
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    iterator insert(
+        const_iterator position,
+        InputIterator first, InputIterator last) {
+        const size_type offset =
+            static_cast<size_type>(position.base() - data_);
+        basic_string incoming(first, last, allocator_);
+        insert(offset, incoming.data_, incoming.size_);
+        return iterator(data_ + offset);
+    }
+
+    basic_string& erase(size_type position = 0, size_type count = npos) {
+        check_position(position);
+        const size_type removed = std::min(count, size_ - position);
+        Traits::move(
+            data_ + position, data_ + position + removed,
+            size_ - position - removed + 1);
+        size_ -= removed;
+        return *this;
+    }
+
+    iterator erase(const_iterator position) {
+        const size_type offset =
+            static_cast<size_type>(position.base() - data_);
+        erase(offset, 1);
+        return iterator(data_ + offset);
+    }
+
+    iterator erase(const_iterator first, const_iterator last) {
+        const size_type offset =
+            static_cast<size_type>(first.base() - data_);
+        erase(offset, static_cast<size_type>(last - first));
+        return iterator(data_ + offset);
+    }
+
+    void push_back(Character value) {
+        ensure_extra_capacity(1);
+        data_[size_++] = value;
+        data_[size_] = Character();
+    }
+
+    void pop_back() {
+        data_[--size_] = Character();
+    }
+
+    basic_string& append(const basic_string& value) {
+        return append(value.data_, value.size_);
+    }
+
+    basic_string& append(basic_string_view<Character, Traits> value) {
+        return append(value.data(), value.size());
+    }
+
+    basic_string& append(
+        const basic_string& value, size_type position,
+        size_type count = npos) {
+        if (position > value.size_) {
+            throw out_of_range("basic_string::append");
+        }
+        return append(
+            value.data_ + position,
+            std::min(count, value.size_ - position));
+    }
+
+    basic_string& append(const Character* value, size_type count) {
+        if (points_inside(value)) {
+            const size_type offset =
+                static_cast<size_type>(value - data_);
+            ensure_extra_capacity(count);
+            value = data_ + offset;
+        } else {
+            ensure_extra_capacity(count);
+        }
+        Traits::move(data_ + size_, value, count);
+        size_ += count;
+        data_[size_] = Character();
+        return *this;
+    }
+
+    basic_string& append(const Character* value) {
+        return append(value, Traits::length(value));
+    }
+
+    basic_string& append(size_type count, Character value) {
+        ensure_extra_capacity(count);
+        Traits::assign(data_ + size_, count, value);
+        size_ += count;
+        data_[size_] = Character();
+        return *this;
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    basic_string& append(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            push_back(*first);
+        }
+        return *this;
+    }
+
+    basic_string& operator+=(const basic_string& value) {
+        return append(value);
+    }
+    basic_string& operator+=(
+        basic_string_view<Character, Traits> value) {
+        return append(value);
+    }
+    basic_string& operator+=(const Character* value) {
+        return append(value);
+    }
+    basic_string& operator+=(Character value) {
+        push_back(value);
+        return *this;
+    }
+    basic_string& operator+=(initializer_list<Character> values) {
+        return append(values.begin(), values.end());
+    }
+
+    basic_string& replace(
+        size_type position, size_type count,
+        const Character* value, size_type value_count) {
+        check_position(position);
+        if (points_inside(value)) {
+            basic_string temporary(value, value_count, allocator_);
+            return replace(
+                position, count, temporary.data_, temporary.size_);
+        }
+        erase(position, count);
+        return insert(position, value, value_count);
+    }
+
+    basic_string& replace(
+        size_type position, size_type count,
+        const Character* value) {
+        return replace(
+            position, count, value, Traits::length(value));
+    }
+
+    basic_string& replace(
+        size_type position, size_type count,
+        const basic_string& value) {
+        return replace(
+            position, count, value.data_, value.size_);
+    }
+
+    basic_string& replace(
+        size_type position, size_type count,
+        basic_string_view<Character, Traits> value) {
+        return replace(
+            position, count, value.data(), value.size());
+    }
+
+    basic_string& replace(
+        size_type position, size_type count,
+        size_type replacement_count, Character value) {
+        check_position(position);
+        erase(position, count);
+        return insert(position, replacement_count, value);
+    }
+
+    basic_string& replace(
+        const_iterator first, const_iterator last,
+        const basic_string& value) {
+        return replace(
+            static_cast<size_type>(first.base() - data_),
+            static_cast<size_type>(last - first),
+            value.data_, value.size_);
+    }
+
+    basic_string& replace(
+        const_iterator first, const_iterator last,
+        basic_string_view<Character, Traits> value) {
+        return replace(
+            static_cast<size_type>(first.base() - data_),
+            static_cast<size_type>(last - first),
+            value.data(), value.size());
+    }
+
+    basic_string& replace(
+        const_iterator first, const_iterator last,
+        const Character* value, size_type count) {
+        return replace(
+            static_cast<size_type>(first.base() - data_),
+            static_cast<size_type>(last - first), value, count);
+    }
+
+    basic_string& replace(
+        const_iterator first, const_iterator last,
+        const Character* value) {
+        return replace(first, last, value, Traits::length(value));
+    }
+
+    basic_string& replace(
+        const_iterator first, const_iterator last,
+        size_type count, Character value) {
+        return replace(
+            static_cast<size_type>(first.base() - data_),
+            static_cast<size_type>(last - first), count, value);
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    basic_string& replace(
+        const_iterator first, const_iterator last,
+        InputIterator replacement_first,
+        InputIterator replacement_last) {
+        basic_string replacement(
+            replacement_first, replacement_last, allocator_);
+        return replace(first, last, replacement);
+    }
+
+    void resize(size_type count, Character value) {
+        if (count < size_) {
+            erase(count);
+        } else if (count > size_) {
+            append(count - size_, value);
+        }
+    }
+
+    void resize(size_type count) {
+        resize(count, Character());
+    }
+
+    void swap(basic_string& other) {
+        if (this == std::addressof(other)) {
+            return;
+        }
+        basic_string temporary(std::move(*this));
+        *this = std::move(other);
+        other = std::move(temporary);
+    }
+
+    _ADINKRA_NODISCARD size_type copy(
+        Character* destination, size_type count,
+        size_type position = 0) const {
+        check_position(position);
+        const size_type copied = std::min(count, size_ - position);
+        Traits::copy(destination, data_ + position, copied);
+        return copied;
+    }
+
+    _ADINKRA_NODISCARD basic_string substr(
+        size_type position = 0, size_type count = npos) const {
+        check_position(position);
+        return basic_string(
+            data_ + position, std::min(count, size_ - position));
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        basic_string_view<Character, Traits> other) const noexcept {
+        return basic_string_view<Character, Traits>(
+            data_, size_).compare(other);
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        size_type position, size_type count,
+        basic_string_view<Character, Traits> other) const {
+        return view().substr(position, count).compare(other);
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        const basic_string& other) const noexcept {
+        return compare(
+            basic_string_view<Character, Traits>(
+                other.data_, other.size_));
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        size_type position, size_type count,
+        const basic_string& other) const {
+        return compare(position, count, other.view());
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        size_type position, size_type count,
+        const basic_string& other, size_type other_position,
+        size_type other_count = npos) const {
+        return compare(
+            position, count,
+            other.view().substr(other_position, other_count));
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        const Character* other) const {
+        return compare(basic_string_view<Character, Traits>(other));
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        size_type position, size_type count,
+        const Character* other) const {
+        return compare(
+            position, count,
+            basic_string_view<Character, Traits>(other));
+    }
+
+    _ADINKRA_NODISCARD int compare(
+        size_type position, size_type count,
+        const Character* other, size_type other_count) const {
+        return compare(
+            position, count,
+            basic_string_view<Character, Traits>(
+                other, other_count));
+    }
+
+    _ADINKRA_NODISCARD bool starts_with(
+        basic_string_view<Character, Traits> prefix) const noexcept {
+        return view().starts_with(prefix);
+    }
+
+    _ADINKRA_NODISCARD bool starts_with(Character prefix) const noexcept {
+        return view().starts_with(prefix);
+    }
+
+    _ADINKRA_NODISCARD bool starts_with(
+        const Character* prefix) const {
+        return starts_with(
+            basic_string_view<Character, Traits>(prefix));
+    }
+
+    _ADINKRA_NODISCARD bool ends_with(
+        basic_string_view<Character, Traits> suffix) const noexcept {
+        return view().ends_with(suffix);
+    }
+
+    _ADINKRA_NODISCARD bool ends_with(Character suffix) const noexcept {
+        return view().ends_with(suffix);
+    }
+
+    _ADINKRA_NODISCARD bool ends_with(const Character* suffix) const {
+        return ends_with(
+            basic_string_view<Character, Traits>(suffix));
+    }
+
+    _ADINKRA_NODISCARD size_type find(
+        basic_string_view<Character, Traits> sought,
+        size_type position = 0) const noexcept {
+        return view().find(sought, position);
+    }
+
+    _ADINKRA_NODISCARD size_type find(
+        const basic_string& sought,
+        size_type position = 0) const noexcept {
+        return find(
+            basic_string_view<Character, Traits>(
+                sought.data_, sought.size_),
+            position);
+    }
+
+    _ADINKRA_NODISCARD size_type find(
+        const Character* sought, size_type position = 0) const {
+        return find(
+            basic_string_view<Character, Traits>(sought), position);
+    }
+
+    _ADINKRA_NODISCARD size_type find(
+        Character sought, size_type position = 0) const noexcept {
+        return view().find(sought, position);
+    }
+
+    _ADINKRA_NODISCARD size_type rfind(
+        basic_string_view<Character, Traits> sought,
+        size_type position = npos) const noexcept {
+        return view().rfind(sought, position);
+    }
+
+    _ADINKRA_NODISCARD size_type rfind(
+        const basic_string& sought,
+        size_type position = npos) const noexcept {
+        return rfind(
+            basic_string_view<Character, Traits>(
+                sought.data_, sought.size_),
+            position);
+    }
+
+    _ADINKRA_NODISCARD size_type rfind(
+        const Character* sought,
+        size_type position = npos) const {
+        return rfind(
+            basic_string_view<Character, Traits>(sought),
+            position);
+    }
+
+    _ADINKRA_NODISCARD size_type rfind(
+        Character sought,
+        size_type position = npos) const noexcept {
+        return view().rfind(sought, position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_of(
+        basic_string_view<Character, Traits> sought,
+        size_type position = 0) const noexcept {
+        for (size_type current = position;
+             current < size_; ++current) {
+            if (Traits::find(
+                    sought.data(), sought.size(), data_[current]) !=
+                nullptr) {
+                return current;
+            }
+        }
+        return npos;
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_of(
+        const basic_string& sought,
+        size_type position = 0) const noexcept {
+        return find_first_of(
+            basic_string_view<Character, Traits>(
+                sought.data_, sought.size_),
+            position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_of(
+        const Character* sought,
+        size_type position = 0) const {
+        return find_first_of(
+            basic_string_view<Character, Traits>(sought), position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_of(
+        Character sought,
+        size_type position = 0) const noexcept {
+        return find(sought, position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_last_of(
+        basic_string_view<Character, Traits> sought,
+        size_type position = npos) const noexcept {
+        if (size_ == 0 || sought.empty()) {
+            return npos;
+        }
+        size_type current =
+            std::min(position, size_ - 1);
+        for (;;) {
+            if (Traits::find(
+                    sought.data(), sought.size(), data_[current]) !=
+                nullptr) {
+                return current;
+            }
+            if (current == 0) {
+                break;
+            }
+            --current;
+        }
+        return npos;
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_not_of(
+        basic_string_view<Character, Traits> sought,
+        size_type position = 0) const noexcept {
+        for (size_type current = position;
+             current < size_; ++current) {
+            if (Traits::find(
+                    sought.data(), sought.size(), data_[current]) ==
+                nullptr) {
+                return current;
+            }
+        }
+        return npos;
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_not_of(
+        Character sought,
+        size_type position = 0) const noexcept {
+        for (size_type current = position;
+             current < size_; ++current) {
+            if (!Traits::eq(data_[current], sought)) {
+                return current;
+            }
+        }
+        return npos;
+    }
+
+    _ADINKRA_NODISCARD size_type find_first_not_of(
+        const Character* sought,
+        size_type position = 0) const {
+        return find_first_not_of(
+            basic_string_view<Character, Traits>(sought), position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_last_of(
+        const Character* sought,
+        size_type position = npos) const {
+        return find_last_of(
+            basic_string_view<Character, Traits>(sought), position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_last_of(
+        Character sought,
+        size_type position = npos) const noexcept {
+        return rfind(sought, position);
+    }
+
+    _ADINKRA_NODISCARD size_type find_last_not_of(
+        basic_string_view<Character, Traits> sought,
+        size_type position = npos) const noexcept {
+        if (size_ == 0) {
+            return npos;
+        }
+        size_type current =
+            std::min(position, size_ - 1);
+        for (;;) {
+            if (Traits::find(
+                    sought.data(), sought.size(), data_[current]) ==
+                nullptr) {
+                return current;
+            }
+            if (current == 0) {
+                break;
+            }
+            --current;
+        }
+        return npos;
+    }
+
+    _ADINKRA_NODISCARD size_type find_last_not_of(
+        Character sought,
+        size_type position = npos) const noexcept {
+        if (size_ == 0) {
+            return npos;
+        }
+        size_type current = std::min(position, size_ - 1);
+        for (;;) {
+            if (!Traits::eq(data_[current], sought)) {
+                return current;
+            }
+            if (current == 0) {
+                break;
+            }
+            --current;
+        }
+        return npos;
+    }
+
+    _ADINKRA_NODISCARD size_type find_last_not_of(
+        const Character* sought,
+        size_type position = npos) const {
+        return find_last_not_of(
+            basic_string_view<Character, Traits>(sought), position);
+    }
+
+    constexpr operator basic_string_view<Character, Traits>() const noexcept {
+        return basic_string_view<Character, Traits>(data_, size_);
+    }
+
+private:
+    _ADINKRA_NODISCARD bool uses_local() const noexcept {
+        return data_ == local_;
+    }
+
+    _ADINKRA_NODISCARD
+    basic_string_view<Character, Traits> view() const noexcept {
+        return basic_string_view<Character, Traits>(data_, size_);
+    }
+
+    _ADINKRA_NODISCARD bool
+    points_inside(const Character* value) const noexcept {
+        const uintptr_t address =
+            reinterpret_cast<uintptr_t>(value);
+        const uintptr_t first =
+            reinterpret_cast<uintptr_t>(data_);
+        const uintptr_t last =
+            reinterpret_cast<uintptr_t>(data_ + size_);
+        return address >= first && address <= last;
+    }
+
+    void check_index(size_type position) const {
+        if (position >= size_) {
+            throw out_of_range("basic_string::at");
+        }
+    }
+
+    void check_position(size_type position) const {
+        if (position > size_) {
+            throw out_of_range("basic_string position");
+        }
+    }
+
+    void reset_local() noexcept {
+        data_ = local_;
+        size_ = 0;
+        capacity_ = local_capacity_value;
+        local_[0] = Character();
+    }
+
+    void release_heap() noexcept {
+        if (!uses_local()) {
+            allocator_traits<Allocator>::deallocate(
+                allocator_, data_, capacity_ + 1);
+        }
+    }
+
+    void take_heap(basic_string& other) noexcept {
+        data_ = other.data_;
+        size_ = other.size_;
+        capacity_ = other.capacity_;
+        other.reset_local();
+    }
+
+    void take_or_copy(basic_string& other) {
+        if (other.uses_local()) {
+            assign(other.data_, other.size_);
+            other.clear();
+        } else {
+            take_heap(other);
+        }
+    }
+
+    void ensure_extra_capacity(size_type extra) {
+        if (extra > max_size() - size_) {
+            throw length_error("basic_string capacity exceeds max_size");
+        }
+        ensure_capacity(size_ + extra);
+    }
+
+    void ensure_capacity(size_type required) {
+        if (required > capacity_) {
+            reallocate(__storage::recommend_capacity(
+                capacity_, required, max_size()));
+        }
+    }
+
+    void reallocate(size_type requested) {
+        pointer replacement =
+            allocator_traits<Allocator>::allocate(
+                allocator_, requested + 1);
+        Traits::copy(replacement, data_, size_ + 1);
+        release_heap();
+        data_ = replacement;
+        capacity_ = requested;
+    }
+};
+
+using string = basic_string<char>;
+using wstring = basic_string<wchar_t>;
+#if defined(__cpp_char8_t)
+using u8string = basic_string<char8_t>;
+#endif
+using u16string = basic_string<char16_t>;
+using u32string = basic_string<char32_t>;
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream,
+    basic_string<Character, Traits, Allocator>& value);
+
+template<class Character, class Traits, class Allocator>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream,
+    const basic_string<Character, Traits, Allocator>& value);
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>& stream,
+    basic_string<Character, Traits, Allocator>& value,
+    Character delimiter);
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>&& stream,
+    basic_string<Character, Traits, Allocator>& value,
+    Character delimiter);
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>& stream,
+    basic_string<Character, Traits, Allocator>& value);
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>&& stream,
+    basic_string<Character, Traits, Allocator>& value);
+
+_ADINKRA_EXPORT string to_string(int value);
+_ADINKRA_EXPORT string to_string(unsigned int value);
+_ADINKRA_EXPORT string to_string(long value);
+_ADINKRA_EXPORT string to_string(unsigned long value);
+_ADINKRA_EXPORT string to_string(long long value);
+_ADINKRA_EXPORT string to_string(unsigned long long value);
+_ADINKRA_EXPORT string to_string(float value);
+_ADINKRA_EXPORT string to_string(double value);
+_ADINKRA_EXPORT string to_string(long double value);
+
+_ADINKRA_EXPORT int stoi(
+    const string& value, size_t* position = nullptr, int base = 10);
+_ADINKRA_EXPORT long stol(
+    const string& value, size_t* position = nullptr, int base = 10);
+_ADINKRA_EXPORT unsigned long stoul(
+    const string& value, size_t* position = nullptr, int base = 10);
+_ADINKRA_EXPORT long long stoll(
+    const string& value, size_t* position = nullptr, int base = 10);
+_ADINKRA_EXPORT unsigned long long stoull(
+    const string& value, size_t* position = nullptr, int base = 10);
+_ADINKRA_EXPORT float stof(
+    const string& value, size_t* position = nullptr);
+_ADINKRA_EXPORT double stod(
+    const string& value, size_t* position = nullptr);
+_ADINKRA_EXPORT long double stold(
+    const string& value, size_t* position = nullptr);
+
+template<class Character, class Traits, class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const basic_string<Character, Traits, Allocator>& left,
+    const basic_string<Character, Traits, Allocator>& right) noexcept {
+    return left.size() == right.size() && left.compare(right) == 0;
+}
+
+template<class Character, class Traits, class Allocator>
+_ADINKRA_NODISCARD auto operator<=>(
+    const basic_string<Character, Traits, Allocator>& left,
+    const basic_string<Character, Traits, Allocator>& right) noexcept {
+    const int result = left.compare(right);
+    if constexpr (
+        requires { typename Traits::comparison_category; }) {
+        using category = typename Traits::comparison_category;
+        return result < 0 ? category::less
+             : result > 0 ? category::greater
+                          : category::equivalent;
+    } else {
+        return result < 0 ? weak_ordering::less
+             : result > 0 ? weak_ordering::greater
+                          : weak_ordering::equivalent;
+    }
+}
+
+template<class Character, class Traits, class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const basic_string<Character, Traits, Allocator>& left,
+    const Character* right) {
+    return left.compare(right) == 0;
+}
+
+template<class Character, class Traits, class Allocator>
+_ADINKRA_NODISCARD auto operator<=>(
+    const basic_string<Character, Traits, Allocator>& left,
+    const Character* right) {
+    const int result = left.compare(right);
+    return result < 0 ? strong_ordering::less
+         : result > 0 ? strong_ordering::greater
+                      : strong_ordering::equal;
+}
+
+template<class Character, class Traits, class Allocator>
+_ADINKRA_NODISCARD auto operator<=>(
+    const Character* left,
+    const basic_string<Character, Traits, Allocator>& right) {
+    const int result = right.compare(left);
+    return result < 0 ? strong_ordering::greater
+         : result > 0 ? strong_ordering::less
+                      : strong_ordering::equal;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_string<Character, Traits, Allocator> operator+(
+    const basic_string<Character, Traits, Allocator>& left,
+    const basic_string<Character, Traits, Allocator>& right) {
+    basic_string<Character, Traits, Allocator> result(left);
+    result.append(right);
+    return result;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_string<Character, Traits, Allocator> operator+(
+    const basic_string<Character, Traits, Allocator>& left,
+    const Character* right) {
+    basic_string<Character, Traits, Allocator> result(left);
+    result.append(right);
+    return result;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_string<Character, Traits, Allocator> operator+(
+    const basic_string<Character, Traits, Allocator>& left,
+    Character right) {
+    basic_string<Character, Traits, Allocator> result(left);
+    result.push_back(right);
+    return result;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_string<Character, Traits, Allocator> operator+(
+    const Character* left,
+    const basic_string<Character, Traits, Allocator>& right) {
+    basic_string<Character, Traits, Allocator> result(left);
+    result.append(right);
+    return result;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_string<Character, Traits, Allocator> operator+(
+    Character left,
+    const basic_string<Character, Traits, Allocator>& right) {
+    basic_string<Character, Traits, Allocator> result(1, left);
+    result.append(right);
+    return result;
+}
+
+template<class Character, class Traits, class Allocator>
+void swap(
+    basic_string<Character, Traits, Allocator>& left,
+    basic_string<Character, Traits, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Character, class Traits, class Allocator, class Value>
+typename basic_string<Character, Traits, Allocator>::size_type erase(
+    basic_string<Character, Traits, Allocator>& value,
+    const Value& removed_value) {
+    const auto previous_size = value.size();
+    const auto new_end =
+        std::remove(value.begin(), value.end(), removed_value);
+    value.erase(new_end, value.end());
+    return previous_size - value.size();
+}
+
+template<class Character, class Traits, class Allocator, class Predicate>
+typename basic_string<Character, Traits, Allocator>::size_type erase_if(
+    basic_string<Character, Traits, Allocator>& value,
+    Predicate predicate) {
+    const auto previous_size = value.size();
+    const auto new_end =
+        std::remove_if(value.begin(), value.end(), predicate);
+    value.erase(new_end, value.end());
+    return previous_size - value.size();
+}
+
+template<class Character, class Traits, class Allocator>
+struct hash<basic_string<Character, Traits, Allocator>> {
+    using argument_type = basic_string<Character, Traits, Allocator>;
+    using result_type = size_t;
+
+    size_t operator()(
+        const basic_string<Character, Traits, Allocator>& value)
+        const noexcept {
+        size_t result =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1469598103934665603ULL)
+                : static_cast<size_t>(2166136261U);
+        const size_t prime =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1099511628211ULL)
+                : static_cast<size_t>(16777619U);
+        const unsigned char* bytes =
+            reinterpret_cast<const unsigned char*>(value.data());
+        for (size_t index = 0;
+             index < value.size() * sizeof(Character); ++index) {
+            result ^= bytes[index];
+            result *= prime;
+        }
+        return result;
+    }
+};
+
+inline namespace literals {
+inline namespace string_literals {
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wuser-defined-literals"
+#endif
+
+inline string operator""s(const char* value, size_t size) {
+    return string(value, size);
+}
+
+inline wstring operator""s(const wchar_t* value, size_t size) {
+    return wstring(value, size);
+}
+
+#if defined(__cpp_char8_t)
+inline u8string operator""s(const char8_t* value, size_t size) {
+    return u8string(value, size);
+}
+#endif
+
+inline u16string operator""s(const char16_t* value, size_t size) {
+    return u16string(value, size);
+}
+
+inline u32string operator""s(const char32_t* value, size_t size) {
+    return u32string(value, size);
+}
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+} // namespace string_literals
+} // namespace literals
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,72 @@
+#ifndef ADINKRA_CSTDLIB
+#define ADINKRA_CSTDLIB
+
+#include <__adinkra/config>
+#include <cerrno>
+#include <stdlib.h>
+
+inline long abs(long value) noexcept {
+    return ::labs(value);
+}
+
+inline long long abs(long long value) noexcept {
+    return ::llabs(value);
+}
+
+#ifndef ADINKRA_FLOAT_ABS_DEFINED
+#define ADINKRA_FLOAT_ABS_DEFINED
+inline constexpr float abs(float value) noexcept {
+    return __builtin_fabsf(value);
+}
+
+inline constexpr double abs(double value) noexcept {
+    return __builtin_fabs(value);
+}
+
+inline constexpr long double abs(long double value) noexcept {
+    return __builtin_fabsl(value);
+}
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+using ::div_t;
+using ::ldiv_t;
+using ::lldiv_t;
+using ::abort;
+using ::abs;
+using ::atexit;
+using ::atof;
+using ::atoi;
+using ::atol;
+using ::atoll;
+using ::bsearch;
+using ::calloc;
+using ::div;
+using ::exit;
+using ::free;
+using ::getenv;
+using ::labs;
+using ::ldiv;
+using ::llabs;
+using ::lldiv;
+using ::malloc;
+using ::mblen;
+using ::mbstowcs;
+using ::mbtowc;
+using ::qsort;
+using ::rand;
+using ::realloc;
+using ::srand;
+using ::strtod;
+using ::strtof;
+using ::strtol;
+using ::strtold;
+using ::strtoll;
+using ::strtoul;
+using ::strtoull;
+using ::system;
+using ::wcstombs;
+using ::wctomb;
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

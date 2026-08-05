@@ -1,0 +1,77 @@
+#ifndef ADINKRA_INTERNAL_REGEX_RUNTIME
+#define ADINKRA_INTERNAL_REGEX_RUNTIME
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <cstdint>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __regex_runtime {
+
+struct traits {
+    void* context;
+    void* (*clone)(const void*);
+    void (*destroy)(void*);
+    uint32_t (*translate)(const void*, uint32_t, bool);
+    bool (*is_class)(
+        const void*, uint32_t, const uint32_t*, size_t, bool);
+    bool (*valid_class)(
+        const void*, const uint32_t*, size_t, bool);
+    bool (*is_equivalent)(
+        const void*, uint32_t, const uint32_t*, size_t);
+    bool (*in_range)(
+        const void*, uint32_t, uint32_t, uint32_t, bool, bool);
+    int (*value)(const void*, uint32_t, int);
+    size_t (*lookup_collate)(
+        const void*, const uint32_t*, size_t, uint32_t*, size_t);
+};
+
+struct error {
+    int code;
+    size_t position;
+};
+
+struct span {
+    ptrdiff_t first;
+    ptrdiff_t second;
+    bool matched;
+};
+
+enum class match_status {
+    no_match,
+    matched,
+    error_complexity,
+    error_stack
+};
+
+struct program;
+
+_ADINKRA_EXPORT program* compile(
+    const uint32_t* expression,
+    size_t size,
+    unsigned flags,
+    const traits& character_traits,
+    error& result);
+
+_ADINKRA_EXPORT void retain(program* value) noexcept;
+_ADINKRA_EXPORT void release(program* value) noexcept;
+_ADINKRA_EXPORT size_t mark_count(const program* value) noexcept;
+_ADINKRA_EXPORT unsigned flags(const program* value) noexcept;
+
+_ADINKRA_EXPORT match_status search(
+    const program* expression,
+    const uint32_t* input,
+    size_t size,
+    uint32_t previous,
+    bool has_previous,
+    unsigned match_flags,
+    bool require_full_match,
+    span* results,
+    size_t result_count);
+
+} // namespace __regex_runtime
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

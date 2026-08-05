@@ -1,0 +1,227 @@
+#ifndef ADINKRA_SPAN
+#define ADINKRA_SPAN
+
+#include <__adinkra/config>
+#include <array>
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+inline constexpr size_t dynamic_extent = static_cast<size_t>(-1);
+
+template<class Element, size_t Extent = dynamic_extent>
+class span {
+public:
+    using element_type = Element;
+    using value_type = remove_cv_t<Element>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using pointer = Element*;
+    using const_pointer = const Element*;
+    using reference = Element&;
+    using const_reference = const Element&;
+    using iterator = pointer;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+
+    static constexpr size_type extent = Extent;
+
+    constexpr span() noexcept
+        requires (Extent == 0 || Extent == dynamic_extent)
+        : data_(nullptr), size_(0) {}
+
+    constexpr span(pointer data, size_type count) noexcept
+        : data_(data), size_(count) {}
+
+    template<class End>
+        requires (
+            is_pointer_v<End> &&
+            is_convertible_v<End, pointer>)
+    constexpr span(pointer first, End last) noexcept
+        : data_(first),
+          size_(static_cast<size_type>(
+              static_cast<pointer>(last) - first)) {}
+
+    template<size_t Size>
+        requires (Extent == dynamic_extent || Extent == Size)
+    constexpr span(type_identity_t<Element> (&array_value)[Size]) noexcept
+        : data_(array_value), size_(Size) {}
+
+    template<class Other, size_t Size>
+        requires is_convertible_v<Other(*)[], Element(*)[]> &&
+                 (Extent == dynamic_extent || Extent == Size)
+    constexpr span(array<Other, Size>& array_value) noexcept
+        : data_(array_value.data()), size_(Size) {}
+
+    template<class Other, size_t Size>
+        requires is_convertible_v<const Other(*)[], Element(*)[]> &&
+                 (Extent == dynamic_extent || Extent == Size)
+    constexpr span(const array<Other, Size>& array_value) noexcept
+        : data_(array_value.data()), size_(Size) {}
+
+    template<class Other, size_t OtherExtent>
+        requires is_convertible_v<Other(*)[], Element(*)[]> &&
+                 (Extent == dynamic_extent ||
+                  OtherExtent == dynamic_extent ||
+                  Extent == OtherExtent)
+    constexpr explicit(
+        Extent != dynamic_extent && OtherExtent == dynamic_extent)
+    span(const span<Other, OtherExtent>& other) noexcept
+        : data_(other.data()), size_(other.size()) {}
+
+    template<class Range>
+        requires requires(Range& value) {
+            std::begin(value);
+            value.size();
+        } &&
+        (is_lvalue_reference_v<Range&&> ||
+         is_const_v<element_type>) &&
+        is_convertible_v<
+            decltype(std::to_address(
+                std::begin(declval<Range&>()))), pointer>
+    constexpr explicit(
+        Extent != dynamic_extent)
+    span(Range&& value) noexcept
+        : data_(std::to_address(std::begin(value))),
+          size_(value.size()) {}
+
+    _ADINKRA_NODISCARD constexpr iterator begin() const noexcept {
+        return data_;
+    }
+
+    _ADINKRA_NODISCARD constexpr iterator end() const noexcept {
+        return data_ + size_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reverse_iterator rbegin() const noexcept {
+        return reverse_iterator(end());
+    }
+
+    _ADINKRA_NODISCARD constexpr reverse_iterator rend() const noexcept {
+        return reverse_iterator(begin());
+    }
+
+    _ADINKRA_NODISCARD constexpr reference front() const noexcept {
+        return data_[0];
+    }
+
+    _ADINKRA_NODISCARD constexpr reference back() const noexcept {
+        return data_[size_ - 1];
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](size_type index) const noexcept {
+        return data_[index];
+    }
+
+    _ADINKRA_NODISCARD constexpr pointer data() const noexcept {
+        return data_;
+    }
+
+    _ADINKRA_NODISCARD constexpr size_type size() const noexcept {
+        if constexpr (Extent == dynamic_extent) {
+            return size_;
+        } else {
+            return Extent;
+        }
+    }
+
+    _ADINKRA_NODISCARD constexpr size_type size_bytes() const noexcept {
+        return size() * sizeof(element_type);
+    }
+
+    _ADINKRA_NODISCARD constexpr bool empty() const noexcept {
+        return size() == 0;
+    }
+
+    template<size_t Count>
+    _ADINKRA_NODISCARD constexpr auto first() const noexcept {
+        static_assert(Count <= Extent || Extent == dynamic_extent);
+        return span<Element, Count>(data_, Count);
+    }
+
+    _ADINKRA_NODISCARD constexpr span<Element, dynamic_extent>
+    first(size_type count) const noexcept {
+        return {data_, count};
+    }
+
+    template<size_t Count>
+    _ADINKRA_NODISCARD constexpr auto last() const noexcept {
+        static_assert(Count <= Extent || Extent == dynamic_extent);
+        return span<Element, Count>(data_ + size_ - Count, Count);
+    }
+
+    _ADINKRA_NODISCARD constexpr span<Element, dynamic_extent>
+    last(size_type count) const noexcept {
+        return {data_ + size_ - count, count};
+    }
+
+    template<size_t Offset, size_t Count = dynamic_extent>
+    _ADINKRA_NODISCARD constexpr auto subspan() const noexcept {
+        static_assert(Offset <= Extent);
+        static_assert(
+            Count == dynamic_extent || Count <= Extent - Offset);
+        constexpr size_type result_extent =
+            Count != dynamic_extent
+                ? Count
+                : (Extent != dynamic_extent
+                    ? Extent - Offset
+                    : dynamic_extent);
+        const size_type result_size =
+            Count != dynamic_extent ? Count : size_ - Offset;
+        return span<Element, result_extent>(
+            data_ + Offset, result_size);
+    }
+
+    _ADINKRA_NODISCARD constexpr span<Element, dynamic_extent>
+    subspan(size_type offset,
+            size_type count = dynamic_extent) const noexcept {
+        const size_type result_size =
+            count == dynamic_extent ? size_ - offset : count;
+        return {data_ + offset, result_size};
+    }
+
+private:
+    pointer data_;
+    size_type size_;
+};
+
+template<class Type, size_t Size>
+span(Type (&)[Size]) -> span<Type, Size>;
+
+template<class Type, size_t Size>
+span(array<Type, Size>&) -> span<Type, Size>;
+
+template<class Type, size_t Size>
+span(const array<Type, Size>&) -> span<const Type, Size>;
+
+template<class Range>
+span(Range&) -> span<
+    remove_reference_t<decltype(*std::begin(declval<Range&>()))>>;
+
+template<class Type, size_t Extent>
+_ADINKRA_NODISCARD span<const byte,
+    Extent == dynamic_extent ? dynamic_extent : sizeof(Type) * Extent>
+as_bytes(span<Type, Extent> value) noexcept {
+    return {
+        reinterpret_cast<const byte*>(value.data()),
+        value.size_bytes()
+    };
+}
+
+template<class Type, size_t Extent>
+    requires (!is_const_v<Type>)
+_ADINKRA_NODISCARD span<byte,
+    Extent == dynamic_extent ? dynamic_extent : sizeof(Type) * Extent>
+as_writable_bytes(span<Type, Extent> value) noexcept {
+    return {
+        reinterpret_cast<byte*>(value.data()),
+        value.size_bytes()
+    };
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

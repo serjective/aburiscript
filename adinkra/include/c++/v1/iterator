@@ -1,0 +1,1099 @@
+#ifndef ADINKRA_ITERATOR
+#define ADINKRA_ITERATOR
+
+#include <__adinkra/config>
+#include <concepts>
+#include <cstddef>
+#include <initializer_list>
+#include <iosfwd>
+#include <streambuf>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct input_iterator_tag {};
+struct output_iterator_tag {};
+struct forward_iterator_tag : input_iterator_tag {};
+struct bidirectional_iterator_tag : forward_iterator_tag {};
+struct random_access_iterator_tag : bidirectional_iterator_tag {};
+struct contiguous_iterator_tag : random_access_iterator_tag {};
+
+struct default_sentinel_t {};
+inline constexpr default_sentinel_t default_sentinel{};
+
+template<class Category, class Type, class Distance = ptrdiff_t,
+         class Pointer = Type*, class Reference = Type&>
+struct iterator {
+    using iterator_category = Category;
+    using value_type = Type;
+    using difference_type = Distance;
+    using pointer = Pointer;
+    using reference = Reference;
+};
+
+template<class Iterator, class = void>
+struct iterator_traits {};
+
+namespace __iterator_detail {
+
+template<class Iterator, class = void>
+struct iterator_pointer {
+    using type = void;
+};
+
+template<class Iterator>
+struct iterator_pointer<
+    Iterator, void_t<typename Iterator::pointer>> {
+    using type = typename Iterator::pointer;
+};
+
+template<class Iterator, class = void>
+struct iterator_reference {
+    using type = decltype(*declval<Iterator&>());
+};
+
+template<class Iterator>
+struct iterator_reference<
+    Iterator, void_t<typename Iterator::reference>> {
+    using type = typename Iterator::reference;
+};
+
+} // namespace __iterator_detail
+
+template<class Iterator>
+struct iterator_traits<
+    Iterator,
+    void_t<
+        typename Iterator::difference_type,
+        typename Iterator::value_type,
+        typename Iterator::iterator_category>> {
+    using difference_type = typename Iterator::difference_type;
+    using value_type = typename Iterator::value_type;
+    using pointer =
+        typename __iterator_detail::iterator_pointer<Iterator>::type;
+    using reference =
+        typename __iterator_detail::iterator_reference<Iterator>::type;
+    using iterator_category = typename Iterator::iterator_category;
+};
+
+template<class Type>
+struct iterator_traits<Type*, void> {
+    using difference_type = ptrdiff_t;
+    using value_type = remove_cv_t<Type>;
+    using pointer = Type*;
+    using reference = Type&;
+    using iterator_category = random_access_iterator_tag;
+    using iterator_concept = contiguous_iterator_tag;
+};
+
+template<class Iterator>
+using iter_difference_t = typename iterator_traits<remove_cvref_t<Iterator>>::difference_type;
+
+template<class Iterator>
+using iter_value_t = typename iterator_traits<remove_cvref_t<Iterator>>::value_type;
+
+template<class Iterator>
+using iter_reference_t = decltype(*declval<Iterator&>());
+
+template<class Iterator>
+using iter_rvalue_reference_t = decltype(std::move(*declval<Iterator&>()));
+
+template<class Output, class Type>
+concept indirectly_writable =
+    requires(Output&& output, Type&& value) {
+        *output = std::forward<Type>(value);
+        *std::forward<Output>(output) = std::forward<Type>(value);
+    };
+
+template<class Iterator>
+concept weakly_incrementable =
+    requires(Iterator iterator) {
+        ++iterator;
+        iterator++;
+    };
+
+template<class Iterator>
+concept input_or_output_iterator =
+    requires(Iterator iterator) {
+        *iterator;
+    } && weakly_incrementable<Iterator>;
+
+template<class Iterator, class = void>
+struct __iterator_concept {
+    using type =
+        typename iterator_traits<Iterator>::iterator_category;
+};
+
+template<class Iterator>
+struct __iterator_concept<
+    Iterator,
+    void_t<typename iterator_traits<
+        remove_cvref_t<Iterator>>::iterator_concept>> {
+    using type =
+        typename iterator_traits<
+            remove_cvref_t<Iterator>>::iterator_concept;
+};
+
+template<class Iterator>
+using __iterator_concept_t =
+    typename __iterator_concept<remove_cvref_t<Iterator>>::type;
+
+template<class Iterator>
+concept indirectly_readable =
+    requires(const remove_cvref_t<Iterator>& iterator) {
+        typename iter_value_t<Iterator>;
+        *iterator;
+    };
+
+template<class Iterator>
+concept input_iterator =
+    input_or_output_iterator<Iterator> &&
+    indirectly_readable<Iterator> &&
+    derived_from<__iterator_concept_t<Iterator>,
+                 input_iterator_tag> &&
+    equality_comparable<Iterator>;
+
+template<class Iterator>
+concept forward_iterator =
+    input_iterator<Iterator> &&
+    derived_from<__iterator_concept_t<Iterator>,
+                 forward_iterator_tag> &&
+    default_initializable<Iterator> &&
+    requires(Iterator iterator) {
+        { iterator++ } -> same_as<Iterator>;
+    };
+
+template<class Sentinel, class Iterator>
+concept sentinel_for =
+    semiregular<Sentinel> &&
+    input_or_output_iterator<Iterator> &&
+    weakly_equality_comparable_with<Sentinel, Iterator>;
+
+template<class Sentinel, class Iterator>
+concept sized_sentinel_for =
+    sentinel_for<Sentinel, Iterator> &&
+    requires(const Iterator& iterator, const Sentinel& sentinel) {
+        sentinel - iterator;
+        iterator - sentinel;
+    };
+
+template<class Input, class Output>
+concept indirectly_movable =
+    indirectly_readable<Input> &&
+    indirectly_writable<Output, iter_rvalue_reference_t<Input>>;
+
+template<class Input, class Output>
+concept indirectly_movable_storable =
+    indirectly_movable<Input, Output> &&
+    indirectly_writable<Output, iter_value_t<Input>> &&
+    movable<iter_value_t<Input>>;
+
+template<class Input, class Output>
+concept indirectly_copyable =
+    indirectly_readable<Input> &&
+    indirectly_writable<Output, iter_reference_t<Input>>;
+
+template<class Input, class Output>
+concept indirectly_copyable_storable =
+    indirectly_copyable<Input, Output> &&
+    indirectly_writable<Output, iter_value_t<Input>&> &&
+    indirectly_writable<Output, const iter_value_t<Input>&> &&
+    copyable<iter_value_t<Input>>;
+
+template<class Left, class Right = Left>
+concept indirectly_swappable =
+    indirectly_readable<Left> &&
+    indirectly_readable<Right> &&
+    is_assignable_v<iter_reference_t<Left>,
+                    iter_reference_t<Right>> &&
+    is_assignable_v<iter_reference_t<Right>,
+                    iter_reference_t<Left>> &&
+    requires(const Left left, const Right right) {
+        swap(*left, *left);
+        swap(*right, *right);
+        swap(*left, *right);
+        swap(*right, *left);
+    };
+
+template<class Iterator>
+concept random_access_iterator =
+    input_or_output_iterator<Iterator> &&
+    is_base_of_v<
+        random_access_iterator_tag,
+        typename iterator_traits<Iterator>::iterator_category>;
+
+template<class Iterator>
+concept contiguous_iterator =
+    random_access_iterator<Iterator> &&
+    (is_pointer_v<remove_cvref_t<Iterator>> ||
+     requires {
+         typename remove_cvref_t<Iterator>::iterator_concept;
+         requires is_base_of_v<
+             contiguous_iterator_tag,
+             typename remove_cvref_t<Iterator>::iterator_concept>;
+     });
+
+template<class Iterator, class Type>
+concept output_iterator =
+    input_or_output_iterator<Iterator> &&
+    indirectly_writable<Iterator, Type> &&
+    requires(Iterator iterator, Type&& value) {
+        *iterator++ = std::forward<Type>(value);
+    };
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto begin(Container& container)
+    -> decltype(container.begin()) {
+    return container.begin();
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto begin(const Container& container)
+    -> decltype(container.begin()) {
+    return container.begin();
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr Type* begin(Type (&array)[Size]) noexcept {
+    return array;
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto end(Container& container)
+    -> decltype(container.end()) {
+    return container.end();
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto end(const Container& container)
+    -> decltype(container.end()) {
+    return container.end();
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr Type* end(Type (&array)[Size]) noexcept {
+    return array + Size;
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto cbegin(const Container& container)
+    -> decltype(std::begin(container)) {
+    return std::begin(container);
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto cend(const Container& container)
+    -> decltype(std::end(container)) {
+    return std::end(container);
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto size(const Container& container)
+    -> decltype(container.size()) {
+    return container.size();
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr size_t size(const Type (&)[Size]) noexcept {
+    return Size;
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto ssize(const Container& container)
+    noexcept(noexcept(container.size()))
+    -> common_type_t<
+        ptrdiff_t, make_signed_t<decltype(container.size())>> {
+    using result_type = common_type_t<
+        ptrdiff_t, make_signed_t<decltype(container.size())>>;
+    return static_cast<result_type>(container.size());
+}
+
+template<class Type, ptrdiff_t Size>
+_ADINKRA_NODISCARD constexpr ptrdiff_t
+ssize(const Type (&)[Size]) noexcept {
+    return Size;
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto empty(const Container& container)
+    -> decltype(container.empty()) {
+    return container.empty();
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr bool empty(const Type (&)[Size]) noexcept {
+    return false;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr bool empty(initializer_list<Type> list) noexcept {
+    return list.size() == 0;
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto data(Container& container)
+    -> decltype(container.data()) {
+    return container.data();
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto data(const Container& container)
+    -> decltype(container.data()) {
+    return container.data();
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr Type* data(Type (&array)[Size]) noexcept {
+    return array;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr const Type*
+data(initializer_list<Type> list) noexcept {
+    return list.begin();
+}
+
+template<class InputIterator>
+constexpr iter_difference_t<InputIterator>
+distance(InputIterator first, InputIterator last) {
+    if constexpr (is_base_of_v<random_access_iterator_tag,
+                               typename iterator_traits<InputIterator>::iterator_category>) {
+        return last - first;
+    } else {
+        iter_difference_t<InputIterator> result = 0;
+        while (first != last) {
+            ++first;
+            ++result;
+        }
+        return result;
+    }
+}
+
+template<class InputIterator, class Distance>
+constexpr void advance(InputIterator& iterator, Distance distance_value) {
+    using Category = typename iterator_traits<InputIterator>::iterator_category;
+    if constexpr (is_base_of_v<random_access_iterator_tag, Category>) {
+        iterator += distance_value;
+    } else if constexpr (is_base_of_v<bidirectional_iterator_tag, Category>) {
+        if (distance_value >= 0) {
+            while (distance_value-- > 0) {
+                ++iterator;
+            }
+        } else {
+            while (distance_value++ < 0) {
+                --iterator;
+            }
+        }
+    } else {
+        while (distance_value-- > 0) {
+            ++iterator;
+        }
+    }
+}
+
+template<class InputIterator>
+_ADINKRA_NODISCARD constexpr InputIterator
+next(InputIterator iterator, iter_difference_t<InputIterator> count = 1) {
+    std::advance(iterator, count);
+    return iterator;
+}
+
+template<class Type, class Character = char,
+         class Traits = char_traits<Character>,
+         class Distance = ptrdiff_t>
+class istream_iterator {
+public:
+    using iterator_category = input_iterator_tag;
+    using value_type = Type;
+    using difference_type = Distance;
+    using pointer = const Type*;
+    using reference = const Type&;
+    using char_type = Character;
+    using traits_type = Traits;
+    using istream_type = basic_istream<Character, Traits>;
+
+    constexpr istream_iterator() noexcept
+        : stream_(nullptr), value_() {}
+
+    istream_iterator(istream_type& stream)
+        : stream_(&stream), value_() {
+        read();
+    }
+
+    reference operator*() const noexcept {
+        return value_;
+    }
+
+    pointer operator->() const noexcept {
+        return &value_;
+    }
+
+    istream_iterator& operator++() {
+        read();
+        return *this;
+    }
+
+    istream_iterator operator++(int) {
+        istream_iterator previous(*this);
+        read();
+        return previous;
+    }
+
+    friend bool operator==(
+        const istream_iterator& left,
+        const istream_iterator& right) noexcept {
+        return left.stream_ == right.stream_;
+    }
+
+private:
+    void read() {
+        if (stream_ != nullptr && !(*stream_ >> value_)) {
+            stream_ = nullptr;
+        }
+    }
+
+    istream_type* stream_;
+    Type value_;
+};
+
+template<class Type, class Character = char,
+         class Traits = char_traits<Character>>
+class ostream_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+    using char_type = Character;
+    using traits_type = Traits;
+    using ostream_type = basic_ostream<Character, Traits>;
+
+    ostream_iterator(
+        ostream_type& stream, const Character* delimiter = nullptr)
+        : stream_(&stream), delimiter_(delimiter) {}
+
+    ostream_iterator& operator=(const Type& value) {
+        *stream_ << value;
+        if (delimiter_ != nullptr) {
+            *stream_ << delimiter_;
+        }
+        return *this;
+    }
+
+    ostream_iterator& operator*() noexcept {
+        return *this;
+    }
+
+    ostream_iterator& operator++() noexcept {
+        return *this;
+    }
+
+    ostream_iterator& operator++(int) noexcept {
+        return *this;
+    }
+
+private:
+    ostream_type* stream_;
+    const Character* delimiter_;
+};
+
+template<class Character, class Traits = char_traits<Character>>
+class istreambuf_iterator {
+public:
+    using iterator_category = input_iterator_tag;
+    using value_type = Character;
+    using difference_type = ptrdiff_t;
+    using pointer = const Character*;
+    using reference = Character;
+    using char_type = Character;
+    using traits_type = Traits;
+    using int_type = typename Traits::int_type;
+    using streambuf_type = basic_streambuf<Character, Traits>;
+    using istream_type = basic_istream<Character, Traits>;
+
+    constexpr istreambuf_iterator() noexcept : buffer_(nullptr) {}
+
+    istreambuf_iterator(istream_type& stream) noexcept
+        : buffer_(stream.rdbuf()) {
+        normalize();
+    }
+
+    istreambuf_iterator(streambuf_type* buffer) noexcept
+        : buffer_(buffer) {
+        normalize();
+    }
+
+    Character operator*() const {
+        return Traits::to_char_type(buffer_->sgetc());
+    }
+
+    istreambuf_iterator& operator++() {
+        if (buffer_ != nullptr) {
+            (void)buffer_->sbumpc();
+            normalize();
+        }
+        return *this;
+    }
+
+    istreambuf_iterator operator++(int) {
+        istreambuf_iterator previous(*this);
+        ++*this;
+        return previous;
+    }
+
+    friend bool operator==(
+        const istreambuf_iterator& left,
+        const istreambuf_iterator& right) {
+        return left.at_end() == right.at_end();
+    }
+
+private:
+    streambuf_type* buffer_;
+
+    bool at_end() const {
+        return buffer_ == nullptr ||
+               Traits::eq_int_type(
+                   buffer_->sgetc(), Traits::eof());
+    }
+
+    void normalize() {
+        if (at_end()) {
+            buffer_ = nullptr;
+        }
+    }
+};
+
+template<class Character, class Traits>
+class ostreambuf_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+    using char_type = Character;
+    using traits_type = Traits;
+    using streambuf_type = basic_streambuf<Character, Traits>;
+    using ostream_type = basic_ostream<Character, Traits>;
+
+    ostreambuf_iterator(ostream_type& stream) noexcept
+        : buffer_(stream.rdbuf()), failed_(false) {}
+
+    ostreambuf_iterator(streambuf_type* buffer) noexcept
+        : buffer_(buffer), failed_(false) {}
+
+    ostreambuf_iterator& operator=(Character value) {
+        if (buffer_ == nullptr ||
+            Traits::eq_int_type(
+                buffer_->sputc(value), Traits::eof())) {
+            failed_ = true;
+        }
+        return *this;
+    }
+
+    ostreambuf_iterator& operator*() noexcept {
+        return *this;
+    }
+
+    ostreambuf_iterator& operator++() noexcept {
+        return *this;
+    }
+
+    ostreambuf_iterator& operator++(int) noexcept {
+        return *this;
+    }
+
+    bool failed() const noexcept {
+        return failed_;
+    }
+
+private:
+    streambuf_type* buffer_;
+    bool failed_;
+};
+
+template<class Container>
+class back_insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+    using container_type = Container;
+
+    explicit back_insert_iterator(Container& container)
+        : container(addressof(container)) {}
+
+    back_insert_iterator& operator=(
+        const typename Container::value_type& value) {
+        container->push_back(value);
+        return *this;
+    }
+
+    back_insert_iterator& operator=(
+        typename Container::value_type&& value) {
+        container->push_back(std::move(value));
+        return *this;
+    }
+
+    back_insert_iterator& operator*() { return *this; }
+    back_insert_iterator& operator++() { return *this; }
+    back_insert_iterator& operator++(int) { return *this; }
+
+protected:
+    Container* container;
+};
+
+template<class Container>
+back_insert_iterator<Container>
+back_inserter(Container& container) {
+    return back_insert_iterator<Container>(container);
+}
+
+template<class Container>
+class front_insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+
+    explicit front_insert_iterator(Container& container)
+        : container_(addressof(container)) {}
+
+    front_insert_iterator& operator=(
+        const typename Container::value_type& value) {
+        container_->push_front(value);
+        return *this;
+    }
+
+    front_insert_iterator& operator=(
+        typename Container::value_type&& value) {
+        container_->push_front(std::move(value));
+        return *this;
+    }
+
+    front_insert_iterator& operator*() { return *this; }
+    front_insert_iterator& operator++() { return *this; }
+    front_insert_iterator& operator++(int) { return *this; }
+
+private:
+    Container* container_;
+};
+
+template<class Container>
+front_insert_iterator<Container>
+front_inserter(Container& container) {
+    return front_insert_iterator<Container>(container);
+}
+
+template<class Container>
+class insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+
+    using container_type = Container;
+
+    insert_iterator(
+        Container& container, typename Container::iterator iterator)
+        : container_(addressof(container)), iterator_(iterator) {}
+
+    insert_iterator& operator=(
+        const typename Container::value_type& value) {
+        iterator_ = container_->insert(iterator_, value);
+        ++iterator_;
+        return *this;
+    }
+
+    insert_iterator& operator=(
+        typename Container::value_type&& value) {
+        iterator_ = container_->insert(iterator_, std::move(value));
+        ++iterator_;
+        return *this;
+    }
+
+    insert_iterator& operator*() { return *this; }
+    insert_iterator& operator++() { return *this; }
+    insert_iterator& operator++(int) { return *this; }
+
+private:
+    Container* container_;
+    typename Container::iterator iterator_;
+};
+
+template<class Container>
+insert_iterator<Container> inserter(
+    Container& container, typename Container::iterator iterator) {
+    return insert_iterator<Container>(container, iterator);
+}
+
+template<class BidirectionalIterator>
+_ADINKRA_NODISCARD constexpr BidirectionalIterator
+prev(BidirectionalIterator iterator,
+     iter_difference_t<BidirectionalIterator> count = 1) {
+    std::advance(iterator, -count);
+    return iterator;
+}
+
+template<class Iterator>
+class reverse_iterator {
+public:
+    using iterator_type = Iterator;
+    using iterator_category =
+        typename iterator_traits<Iterator>::iterator_category;
+    using value_type = typename iterator_traits<Iterator>::value_type;
+    using difference_type = typename iterator_traits<Iterator>::difference_type;
+    using pointer = typename iterator_traits<Iterator>::pointer;
+    using reference = typename iterator_traits<Iterator>::reference;
+
+    constexpr reverse_iterator() : current_() {}
+    explicit constexpr reverse_iterator(Iterator current) : current_(current) {}
+
+    template<class Other>
+        requires (
+            !is_same_v<Other, Iterator> &&
+            is_convertible_v<const Other&, Iterator>)
+    constexpr reverse_iterator(const reverse_iterator<Other>& other)
+        : current_(other.base()) {}
+
+    template<class Other>
+        requires (
+            !is_same_v<Other, Iterator> &&
+            is_convertible_v<const Other&, Iterator> &&
+            is_assignable_v<Iterator&, const Other&>)
+    constexpr reverse_iterator&
+    operator=(const reverse_iterator<Other>& other) {
+        current_ = other.base();
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr Iterator base() const {
+        return current_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference operator*() const {
+        Iterator temporary = current_;
+        return *--temporary;
+    }
+
+    _ADINKRA_NODISCARD constexpr pointer operator->() const {
+        return std::addressof(operator*());
+    }
+
+    constexpr reverse_iterator& operator++() {
+        --current_;
+        return *this;
+    }
+
+    constexpr reverse_iterator operator++(int) {
+        reverse_iterator result(*this);
+        --current_;
+        return result;
+    }
+
+    constexpr reverse_iterator& operator--() {
+        ++current_;
+        return *this;
+    }
+
+    constexpr reverse_iterator operator--(int) {
+        reverse_iterator result(*this);
+        ++current_;
+        return result;
+    }
+
+    constexpr reverse_iterator& operator+=(difference_type count) {
+        current_ -= count;
+        return *this;
+    }
+
+    constexpr reverse_iterator& operator-=(difference_type count) {
+        current_ += count;
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr reverse_iterator
+    operator+(difference_type count) const {
+        return reverse_iterator(current_ - count);
+    }
+
+    _ADINKRA_NODISCARD constexpr reverse_iterator
+    operator-(difference_type count) const {
+        return reverse_iterator(current_ + count);
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](difference_type index) const {
+        return *(*this + index);
+    }
+
+private:
+    Iterator current_;
+};
+
+template<class Iterator>
+_ADINKRA_NODISCARD constexpr reverse_iterator<Iterator>
+make_reverse_iterator(Iterator iterator) {
+    return reverse_iterator<Iterator>(iterator);
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto rbegin(Container& container)
+    noexcept(noexcept(container.rbegin()))
+    -> decltype(container.rbegin()) {
+    return container.rbegin();
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto rbegin(const Container& container)
+    noexcept(noexcept(container.rbegin()))
+    -> decltype(container.rbegin()) {
+    return container.rbegin();
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto rend(Container& container)
+    noexcept(noexcept(container.rend()))
+    -> decltype(container.rend()) {
+    return container.rend();
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto rend(const Container& container)
+    noexcept(noexcept(container.rend()))
+    -> decltype(container.rend()) {
+    return container.rend();
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr reverse_iterator<Type*>
+rbegin(Type (&array)[Size]) noexcept {
+    return reverse_iterator<Type*>(array + Size);
+}
+
+template<class Type, size_t Size>
+_ADINKRA_NODISCARD constexpr reverse_iterator<Type*>
+rend(Type (&array)[Size]) noexcept {
+    return reverse_iterator<Type*>(array);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr reverse_iterator<const Type*>
+rbegin(initializer_list<Type> values) noexcept {
+    return reverse_iterator<const Type*>(values.end());
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr reverse_iterator<const Type*>
+rend(initializer_list<Type> values) noexcept {
+    return reverse_iterator<const Type*>(values.begin());
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto crbegin(const Container& container)
+    noexcept(noexcept(std::rbegin(container)))
+    -> decltype(std::rbegin(container)) {
+    return std::rbegin(container);
+}
+
+template<class Container>
+_ADINKRA_NODISCARD constexpr auto crend(const Container& container)
+    noexcept(noexcept(std::rend(container)))
+    -> decltype(std::rend(container)) {
+    return std::rend(container);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool
+operator==(const reverse_iterator<Left>& left,
+           const reverse_iterator<Right>& right) {
+    return left.base() == right.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr auto
+operator<=>(const reverse_iterator<Left>& left,
+            const reverse_iterator<Right>& right)
+    -> decltype(right.base() <=> left.base()) {
+    return right.base() <=> left.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool
+operator<(const reverse_iterator<Left>& left,
+          const reverse_iterator<Right>& right) {
+    return right.base() < left.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool
+operator<=(const reverse_iterator<Left>& left,
+           const reverse_iterator<Right>& right) {
+    return !(right < left);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool
+operator>(const reverse_iterator<Left>& left,
+          const reverse_iterator<Right>& right) {
+    return right < left;
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool
+operator>=(const reverse_iterator<Left>& left,
+           const reverse_iterator<Right>& right) {
+    return !(left < right);
+}
+
+template<class Iterator>
+_ADINKRA_NODISCARD constexpr reverse_iterator<Iterator>
+operator+(typename reverse_iterator<Iterator>::difference_type count,
+          const reverse_iterator<Iterator>& iterator) {
+    return iterator + count;
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr auto
+operator-(const reverse_iterator<Left>& left,
+          const reverse_iterator<Right>& right) {
+    return right.base() - left.base();
+}
+
+template<class Iterator>
+class move_iterator {
+public:
+    using iterator_type = Iterator;
+    using iterator_category =
+        typename iterator_traits<Iterator>::iterator_category;
+    using value_type = typename iterator_traits<Iterator>::value_type;
+    using difference_type =
+        typename iterator_traits<Iterator>::difference_type;
+    using pointer = Iterator;
+    using reference = remove_reference_t<
+        typename iterator_traits<Iterator>::reference>&&;
+
+    constexpr move_iterator() : current_() {}
+    explicit constexpr move_iterator(Iterator current)
+        : current_(current) {}
+
+    template<class Other>
+    constexpr move_iterator(const move_iterator<Other>& other)
+        : current_(other.base()) {}
+
+    _ADINKRA_NODISCARD constexpr Iterator base() const {
+        return current_;
+    }
+
+    _ADINKRA_NODISCARD constexpr reference operator*() const {
+        return static_cast<reference>(*current_);
+    }
+
+    _ADINKRA_NODISCARD constexpr auto operator->() const {
+        return current_;
+    }
+
+    constexpr move_iterator& operator++() {
+        ++current_;
+        return *this;
+    }
+
+    constexpr move_iterator operator++(int) {
+        move_iterator result(*this);
+        ++current_;
+        return result;
+    }
+
+    constexpr move_iterator& operator--()
+        requires requires(Iterator iterator) { --iterator; } {
+        --current_;
+        return *this;
+    }
+
+    constexpr move_iterator operator--(int)
+        requires requires(Iterator iterator) { iterator--; } {
+        move_iterator result(*this);
+        --current_;
+        return result;
+    }
+
+    constexpr move_iterator& operator+=(difference_type count)
+        requires requires(Iterator iterator) { iterator += count; } {
+        current_ += count;
+        return *this;
+    }
+
+    constexpr move_iterator& operator-=(difference_type count)
+        requires requires(Iterator iterator) { iterator -= count; } {
+        current_ -= count;
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr move_iterator
+    operator+(difference_type count) const
+        requires requires(Iterator iterator) { iterator + count; } {
+        return move_iterator(current_ + count);
+    }
+
+    _ADINKRA_NODISCARD constexpr move_iterator
+    operator-(difference_type count) const
+        requires requires(Iterator iterator) { iterator - count; } {
+        return move_iterator(current_ - count);
+    }
+
+    _ADINKRA_NODISCARD constexpr reference
+    operator[](difference_type index) const
+        requires requires(Iterator iterator) { iterator[index]; } {
+        return static_cast<reference>(current_[index]);
+    }
+
+private:
+    Iterator current_;
+};
+
+template<class Iterator>
+_ADINKRA_NODISCARD constexpr move_iterator<Iterator>
+make_move_iterator(Iterator iterator) {
+    return move_iterator<Iterator>(iterator);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool
+operator==(const move_iterator<Left>& left,
+           const move_iterator<Right>& right) {
+    return left.base() == right.base();
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr auto
+operator<=>(const move_iterator<Left>& left,
+            const move_iterator<Right>& right)
+    -> decltype(left.base() <=> right.base()) {
+    return left.base() <=> right.base();
+}
+
+template<class Iterator>
+_ADINKRA_NODISCARD constexpr move_iterator<Iterator>
+operator+(typename move_iterator<Iterator>::difference_type count,
+          const move_iterator<Iterator>& iterator) {
+    return iterator + count;
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr auto
+operator-(const move_iterator<Left>& left,
+          const move_iterator<Right>& right) {
+    return left.base() - right.base();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

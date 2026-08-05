@@ -1,0 +1,24 @@
+#ifndef ADINKRA_CCTYPE
+#define ADINKRA_CCTYPE
+
+#include <__adinkra/config>
+#include <ctype.h>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+using ::isalnum;
+using ::isalpha;
+using ::isblank;
+using ::iscntrl;
+using ::isdigit;
+using ::isgraph;
+using ::islower;
+using ::isprint;
+using ::ispunct;
+using ::isspace;
+using ::isupper;
+using ::isxdigit;
+using ::tolower;
+using ::toupper;
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -4,13 +4,9 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
-
-// Forward declarations to avoid circular includes
-class TypeContext;
-struct CType;
-class QualType;
 
 enum class TargetArch {
     AARCH64,
@@ -19,6 +15,12 @@ enum class TargetArch {
     ARM32,
     RISCV64,
     RISCV32,
+    OR1K,
+};
+
+enum class EndiannessKind {
+    Little,
+    Big,
 };
 
 enum class TargetOS {
@@ -26,35 +28,42 @@ enum class TargetOS {
     LINUX,
     WINDOWS,
     FREEBSD,
+    NETBSD,
     NONE,
 };
 
 enum class LongDoubleFormat {
-    IEEE_DOUBLE,    // 64-bit, same as double (Apple ARM64)
-    X87_EXTENDED,   // 80-bit x87 extended precision (x86/x86_64)
-    IEEE_QUAD,      // 128-bit IEEE quad (AArch64 Linux, RISC-V)
+    IEEE_DOUBLE,
+    X87_EXTENDED,
+    IEEE_QUAD,
 };
 
 enum class VaListKind {
-    CHAR_PTR,           // Apple ARM64: va_list is char*
-    AARCH64_VA_LIST,    // AArch64 Linux: __va_list struct
-    X86_64_VA_LIST,     // x86_64 SysV: __va_list_tag[1]
+    CHAR_PTR,
+    AARCH64_VA_LIST,
+    X86_64_VA_LIST,
 };
 
 struct TargetInfo {
     TargetArch arch;
     TargetOS os;
 
-    int pointer_width;       // in bits (64 for ARM64)
-    int long_width;          // in bits (64 for LP64, 32 for LLP64/Windows)
-    int long_double_width;   // in bits (64 Apple ARM64, 80 x87, 128 IEEE quad)
-    int wchar_width = 32;    // in bits
+    int pointer_width;
+    int long_width;
+    int long_double_width;
+    int long_double_storage_bytes = 0;
+    int long_double_align_bytes = 0;
+    bool real_mode_16 = false;
+    int wchar_width = 32;
     bool wchar_is_unsigned = false;
+    bool char_is_unsigned = false;
+    EndiannessKind endianness = EndiannessKind::Little;
     LongDoubleFormat long_double_format;
     VaListKind va_list_kind;
     size_t max_alignment_bytes = 16;
+    size_t default_new_alignment_bytes = 16;
 
-    std::string triple;      // LLVM target triple
+    std::string triple;
     int gnu_major = 4;
     int gnu_minor = 2;
     int gnu_patch = 1;
@@ -62,17 +71,13 @@ struct TargetInfo {
     int clang_minor = 0;
     int clang_patch = 0;
 
-    // Construct the va_list CType appropriate for this target.
-    // Requires a TypeContext to look up builtin types.
-    std::shared_ptr<CType> get_va_list_type(TypeContext& ctx) const;
     std::vector<std::pair<std::string, std::string>> get_builtin_macros() const;
     std::vector<std::pair<std::string, std::string>> get_builtin_type_macros() const;
     std::string wchar_type_spelling() const;
     size_t max_pack_alignment_bytes() const { return max_alignment_bytes; }
-
-    // Create a TargetInfo for the host machine.
-    // Currently returns Apple ARM64 config.
     static std::shared_ptr<TargetInfo> create_host();
+    static std::shared_ptr<TargetInfo> create_apple_aarch64();
+    static std::shared_ptr<TargetInfo> create_for_triple(std::string_view triple);
 };
 
 #endif // ABURI_TARGET_INFO_H

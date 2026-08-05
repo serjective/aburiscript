@@ -1,0 +1,534 @@
+#ifndef ADINKRA_STRING_VIEW
+#define ADINKRA_STRING_VIEW
+
+#include <__adinkra/char_traits>
+#include <algorithm>
+#include <compare>
+#include <cstddef>
+#include <functional>
+#include <iterator>
+#include <limits>
+#include <stdexcept>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits = char_traits<Character>>
+class basic_string_view {
+public:
+    using traits_type = Traits;
+    using value_type = Character;
+    using pointer = Character*;
+    using const_pointer = const Character*;
+    using reference = Character&;
+    using const_reference = const Character&;
+    using const_iterator = const Character*;
+    using iterator = const_iterator;
+    using const_reverse_iterator = reverse_iterator<const_iterator>;
+    using reverse_iterator = const_reverse_iterator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+
+    static constexpr size_type npos = static_cast<size_type>(-1);
+
+    constexpr basic_string_view() noexcept
+        : data_(nullptr), size_(0) {}
+
+    constexpr basic_string_view(
+        const Character* data, size_type size) noexcept
+        : data_(data), size_(size) {}
+
+    constexpr basic_string_view(const Character* value)
+        : data_(value), size_(Traits::length(value)) {}
+
+    constexpr const_iterator begin() const noexcept { return data_; }
+    constexpr const_iterator end() const noexcept { return data_ + size_; }
+    constexpr const_iterator cbegin() const noexcept { return begin(); }
+    constexpr const_iterator cend() const noexcept { return end(); }
+    constexpr const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    constexpr const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    constexpr const_reference operator[](size_type index) const noexcept {
+        return data_[index];
+    }
+
+    constexpr const_reference at(size_type index) const {
+        if (index >= size_) {
+            throw out_of_range("basic_string_view::at");
+        }
+        return data_[index];
+    }
+
+    constexpr const_reference front() const noexcept { return data_[0]; }
+    constexpr const_reference back() const noexcept {
+        return data_[size_ - 1];
+    }
+    constexpr const_pointer data() const noexcept { return data_; }
+    constexpr size_type size() const noexcept { return size_; }
+    constexpr size_type length() const noexcept { return size_; }
+    constexpr size_type max_size() const noexcept {
+        return (numeric_limits<size_type>::max)() / sizeof(Character);
+    }
+    constexpr bool empty() const noexcept { return size_ == 0; }
+
+    constexpr void remove_prefix(size_type count) noexcept {
+        data_ += count;
+        size_ -= count;
+    }
+
+    constexpr void remove_suffix(size_type count) noexcept {
+        size_ -= count;
+    }
+
+    constexpr void swap(basic_string_view& other) noexcept {
+        std::swap(data_, other.data_);
+        std::swap(size_, other.size_);
+    }
+
+    constexpr size_type copy(
+        Character* destination, size_type count,
+        size_type position = 0) const {
+        if (position > size_) {
+            throw out_of_range("basic_string_view::copy");
+        }
+        const size_type copied = std::min(count, size_ - position);
+        Traits::copy(destination, data_ + position, copied);
+        return copied;
+    }
+
+    constexpr basic_string_view substr(
+        size_type position = 0, size_type count = npos) const {
+        if (position > size_) {
+            throw out_of_range("basic_string_view::substr");
+        }
+        return {
+            data_ + position,
+            std::min(count, size_ - position)
+        };
+    }
+
+    constexpr int compare(basic_string_view other) const noexcept {
+        const size_type compared = std::min(size_, other.size_);
+        const int result = Traits::compare(data_, other.data_, compared);
+        if (result != 0) {
+            return result;
+        }
+        return size_ < other.size_ ? -1 : size_ > other.size_ ? 1 : 0;
+    }
+
+    constexpr int compare(
+        size_type position, size_type count,
+        basic_string_view other) const {
+        return substr(position, count).compare(other);
+    }
+
+    constexpr int compare(
+        size_type position, size_type count,
+        basic_string_view other, size_type other_position,
+        size_type other_count) const {
+        return substr(position, count).compare(
+            other.substr(other_position, other_count));
+    }
+
+    constexpr int compare(const Character* other) const {
+        return compare(basic_string_view(other));
+    }
+
+    constexpr int compare(
+        size_type position, size_type count,
+        const Character* other) const {
+        return compare(
+            position, count, basic_string_view(other));
+    }
+
+    constexpr int compare(
+        size_type position, size_type count,
+        const Character* other, size_type other_count) const {
+        return compare(
+            position, count,
+            basic_string_view(other, other_count));
+    }
+
+    constexpr bool starts_with(basic_string_view prefix) const noexcept {
+        return size_ >= prefix.size_ &&
+               Traits::compare(data_, prefix.data_, prefix.size_) == 0;
+    }
+
+    constexpr bool starts_with(Character prefix) const noexcept {
+        return !empty() && Traits::eq(front(), prefix);
+    }
+
+    constexpr bool ends_with(basic_string_view suffix) const noexcept {
+        return size_ >= suffix.size_ &&
+               Traits::compare(
+                   data_ + size_ - suffix.size_,
+                   suffix.data_, suffix.size_) == 0;
+    }
+
+    constexpr bool ends_with(Character suffix) const noexcept {
+        return !empty() && Traits::eq(back(), suffix);
+    }
+
+    constexpr size_type find(
+        basic_string_view sought, size_type position = 0) const noexcept {
+        if (sought.empty()) {
+            return position <= size_ ? position : npos;
+        }
+        if (position > size_ || sought.size_ > size_ - position) {
+            return npos;
+        }
+        for (size_type index = position;
+             index + sought.size_ <= size_; ++index) {
+            if (Traits::compare(
+                    data_ + index, sought.data_, sought.size_) == 0) {
+                return index;
+            }
+        }
+        return npos;
+    }
+
+    constexpr size_type find(
+        const Character* sought, size_type position,
+        size_type count) const noexcept {
+        return find(basic_string_view(sought, count), position);
+    }
+
+    constexpr size_type find(
+        const Character* sought, size_type position = 0) const noexcept {
+        return find(
+            basic_string_view(sought, Traits::length(sought)),
+            position);
+    }
+
+    constexpr size_type find(
+        Character sought, size_type position = 0) const noexcept {
+        if (position >= size_) {
+            return npos;
+        }
+        const Character* result =
+            Traits::find(data_ + position, size_ - position, sought);
+        return result == nullptr
+            ? npos
+            : static_cast<size_type>(result - data_);
+    }
+
+    constexpr size_type find_first_of(
+        Character sought, size_type position = 0) const noexcept {
+        return find(sought, position);
+    }
+
+    constexpr size_type find_first_of(
+        basic_string_view sought,
+        size_type position = 0) const noexcept {
+        if (position >= size_ || sought.empty()) {
+            return npos;
+        }
+        for (size_type index = position; index < size_; ++index) {
+            if (sought.find(data_[index]) != npos) {
+                return index;
+            }
+        }
+        return npos;
+    }
+
+    constexpr size_type find_first_of(
+        const Character* sought, size_type position,
+        size_type count) const noexcept {
+        return find_first_of(
+            basic_string_view(sought, count), position);
+    }
+
+    constexpr size_type find_first_of(
+        const Character* sought,
+        size_type position = 0) const noexcept {
+        return find_first_of(
+            basic_string_view(sought, Traits::length(sought)),
+            position);
+    }
+
+    constexpr size_type find_first_not_of(
+        basic_string_view sought,
+        size_type position = 0) const noexcept {
+        if (position >= size_) {
+            return npos;
+        }
+        for (size_type index = position; index < size_; ++index) {
+            if (sought.find(data_[index]) == npos) {
+                return index;
+            }
+        }
+        return npos;
+    }
+
+    constexpr size_type find_first_not_of(
+        const Character* sought, size_type position,
+        size_type count) const noexcept {
+        return find_first_not_of(
+            basic_string_view(sought, count), position);
+    }
+
+    constexpr size_type find_first_not_of(
+        const Character* sought,
+        size_type position = 0) const noexcept {
+        return find_first_not_of(
+            basic_string_view(sought, Traits::length(sought)),
+            position);
+    }
+
+    constexpr size_type find_first_not_of(
+        Character sought,
+        size_type position = 0) const noexcept {
+        if (position >= size_) {
+            return npos;
+        }
+        for (size_type index = position; index < size_; ++index) {
+            if (!Traits::eq(data_[index], sought)) {
+                return index;
+            }
+        }
+        return npos;
+    }
+
+    constexpr size_type find_last_of(
+        basic_string_view sought,
+        size_type position = npos) const noexcept {
+        if (empty() || sought.empty()) {
+            return npos;
+        }
+        size_type index = std::min(position, size_ - 1);
+        for (;;) {
+            if (sought.find(data_[index]) != npos) {
+                return index;
+            }
+            if (index == 0) {
+                break;
+            }
+            --index;
+        }
+        return npos;
+    }
+
+    constexpr size_type find_last_of(
+        const Character* sought, size_type position,
+        size_type count) const noexcept {
+        return find_last_of(
+            basic_string_view(sought, count), position);
+    }
+
+    constexpr size_type find_last_of(
+        const Character* sought,
+        size_type position = npos) const noexcept {
+        return find_last_of(
+            basic_string_view(sought, Traits::length(sought)),
+            position);
+    }
+
+    constexpr size_type find_last_of(
+        Character sought,
+        size_type position = npos) const noexcept {
+        return rfind(sought, position);
+    }
+
+    constexpr size_type find_last_not_of(
+        basic_string_view sought,
+        size_type position = npos) const noexcept {
+        if (empty()) {
+            return npos;
+        }
+        size_type index = std::min(position, size_ - 1);
+        for (;;) {
+            if (sought.find(data_[index]) == npos) {
+                return index;
+            }
+            if (index == 0) {
+                break;
+            }
+            --index;
+        }
+        return npos;
+    }
+
+    constexpr size_type find_last_not_of(
+        const Character* sought, size_type position,
+        size_type count) const noexcept {
+        return find_last_not_of(
+            basic_string_view(sought, count), position);
+    }
+
+    constexpr size_type find_last_not_of(
+        const Character* sought,
+        size_type position = npos) const noexcept {
+        return find_last_not_of(
+            basic_string_view(sought, Traits::length(sought)),
+            position);
+    }
+
+    constexpr size_type find_last_not_of(
+        Character sought,
+        size_type position = npos) const noexcept {
+        if (empty()) {
+            return npos;
+        }
+        size_type index = std::min(position, size_ - 1);
+        for (;;) {
+            if (!Traits::eq(data_[index], sought)) {
+                return index;
+            }
+            if (index == 0) {
+                break;
+            }
+            --index;
+        }
+        return npos;
+    }
+
+    constexpr size_type rfind(
+        basic_string_view sought, size_type position = npos) const noexcept {
+        if (sought.size_ > size_) {
+            return npos;
+        }
+        size_type index = std::min(position, size_ - sought.size_);
+        for (;;) {
+            if (Traits::compare(
+                    data_ + index, sought.data_, sought.size_) == 0) {
+                return index;
+            }
+            if (index == 0) {
+                break;
+            }
+            --index;
+        }
+        return npos;
+    }
+
+    constexpr size_type rfind(
+        const Character* sought, size_type position,
+        size_type count) const noexcept {
+        return rfind(basic_string_view(sought, count), position);
+    }
+
+    constexpr size_type rfind(
+        const Character* sought,
+        size_type position = npos) const noexcept {
+        return rfind(
+            basic_string_view(sought, Traits::length(sought)),
+            position);
+    }
+
+    constexpr size_type rfind(
+        Character sought, size_type position = npos) const noexcept {
+        if (empty()) {
+            return npos;
+        }
+        size_type index = std::min(position, size_ - 1);
+        for (;;) {
+            if (Traits::eq(data_[index], sought)) {
+                return index;
+            }
+            if (index == 0) {
+                return npos;
+            }
+            --index;
+        }
+    }
+
+private:
+    const Character* data_;
+    size_type size_;
+};
+
+using string_view = basic_string_view<char>;
+using wstring_view = basic_string_view<wchar_t>;
+#if defined(__cpp_char8_t)
+using u8string_view = basic_string_view<char8_t>;
+#endif
+using u16string_view = basic_string_view<char16_t>;
+using u32string_view = basic_string_view<char32_t>;
+
+template<class Character>
+struct hash<basic_string_view<Character, char_traits<Character>>> {
+    using argument_type =
+        basic_string_view<Character, char_traits<Character>>;
+    using result_type = size_t;
+
+    size_t operator()(
+        basic_string_view<Character, char_traits<Character>> value)
+        const noexcept {
+        size_t result =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1469598103934665603ULL)
+                : static_cast<size_t>(2166136261U);
+        const size_t prime =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1099511628211ULL)
+                : static_cast<size_t>(16777619U);
+        const unsigned char* bytes =
+            reinterpret_cast<const unsigned char*>(value.data());
+        for (size_t index = 0;
+             index < value.size() * sizeof(Character); ++index) {
+            result ^= bytes[index];
+            result *= prime;
+        }
+        return result;
+    }
+};
+
+template<class Character, class Traits>
+_ADINKRA_NODISCARD constexpr bool
+operator==(basic_string_view<Character, Traits> left,
+           type_identity_t<
+               basic_string_view<Character, Traits>> right) noexcept {
+    return left.size() == right.size() && left.compare(right) == 0;
+}
+
+template<class Character, class Traits>
+_ADINKRA_NODISCARD constexpr auto
+operator<=>(basic_string_view<Character, Traits> left,
+            type_identity_t<
+                basic_string_view<Character, Traits>> right) noexcept {
+    const int result = left.compare(right);
+    return result < 0 ? strong_ordering::less
+         : result > 0 ? strong_ordering::greater
+                      : strong_ordering::equal;
+}
+
+inline namespace literals {
+inline namespace string_view_literals {
+
+constexpr string_view operator""sv(
+    const char* value, size_t size) noexcept {
+    return string_view(value, size);
+}
+
+constexpr wstring_view operator""sv(
+    const wchar_t* value, size_t size) noexcept {
+    return wstring_view(value, size);
+}
+
+#if defined(__cpp_char8_t)
+constexpr u8string_view operator""sv(
+    const char8_t* value, size_t size) noexcept {
+    return u8string_view(value, size);
+}
+#endif
+
+constexpr u16string_view operator""sv(
+    const char16_t* value, size_t size) noexcept {
+    return u16string_view(value, size);
+}
+
+constexpr u32string_view operator""sv(
+    const char32_t* value, size_t size) noexcept {
+    return u32string_view(value, size);
+}
+
+} // namespace string_view_literals
+} // namespace literals
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

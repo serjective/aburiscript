@@ -1,7 +1,9 @@
 #include "lexer.h"
 #include "diagnostics.h"
+#include "numeric_utils.h"
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -94,6 +96,9 @@ const std::unordered_map<std::string_view, TokenType>& common_keyword_table() {
         {"typeof", TokenType::TYPEOF_KW},
         {"__typeof__", TokenType::TYPEOF_KW},
         {"__typeof", TokenType::TYPEOF_KW},
+        {"__typeof_unqual__", TokenType::TYPEOF_UNQUAL_KW},
+        {"__typeof_unqual", TokenType::TYPEOF_UNQUAL_KW},
+        {"_BitInt", TokenType::BITINT_KW},
         {"__int128", TokenType::INT128},
         {"__int128_t", TokenType::INT128},
         {"__uint128_t", TokenType::UINT128_T},
@@ -122,6 +127,7 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
     static const std::unordered_map<std::string_view, TokenType> keywords = {
         {"bool", TokenType::BOOL},
         {"wchar_t", TokenType::WCHAR_T},
+        {"char8_t", TokenType::CHAR8_T},
         {"char16_t", TokenType::CHAR16_T},
         {"char32_t", TokenType::CHAR32_T},
         {"class", TokenType::CLASS},
@@ -141,6 +147,7 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
         {"false", TokenType::FALSE_KW},
         {"nullptr", TokenType::NULLPTR_KW},
         {"decltype", TokenType::DECLTYPE_KW},
+        {"typeid", TokenType::TYPEID_KW},
         {"alignof", TokenType::ALIGNOF},
         {"alignas", TokenType::ALIGNAS},
         {"static_assert", TokenType::STATIC_ASSERT},
@@ -151,8 +158,13 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
         {"friend", TokenType::FRIEND_KW},
         {"explicit", TokenType::EXPLICIT_KW},
         {"mutable", TokenType::MUTABLE_KW},
+        {"thread_local", TokenType::THREAD_LOCAL},
         {"constexpr", TokenType::CONSTEXPR_KW},
         {"consteval", TokenType::CONSTEVAL_KW},
+        {"constinit", TokenType::CONSTINIT_KW},
+        {"co_await", TokenType::CO_AWAIT_KW},
+        {"co_yield", TokenType::CO_YIELD_KW},
+        {"co_return", TokenType::CO_RETURN_KW},
     };
     return keywords;
 }
@@ -163,7 +175,15 @@ TokenType lookup_keyword(const std::string_view ident, const LangOptions& lang_o
         auto cxx_it = cxx_keywords.find(ident);
         if (cxx_it != cxx_keywords.end()) {
             if ((cxx_it->second == TokenType::CONCEPT_KW ||
-                 cxx_it->second == TokenType::REQUIRES_KW) &&
+                 cxx_it->second == TokenType::REQUIRES_KW ||
+                 cxx_it->second == TokenType::CONSTINIT_KW ||
+                 cxx_it->second == TokenType::CO_AWAIT_KW ||
+                 cxx_it->second == TokenType::CO_YIELD_KW ||
+                 cxx_it->second == TokenType::CO_RETURN_KW) &&
+                !lang_opts.is_cxx20_or_later()) {
+                return TokenType::IDENTIFIER;
+            }
+            if (cxx_it->second == TokenType::CHAR8_T &&
                 !lang_opts.is_cxx20_or_later()) {
                 return TokenType::IDENTIFIER;
             }
@@ -176,6 +196,32 @@ TokenType lookup_keyword(const std::string_view ident, const LangOptions& lang_o
             if (ident == "requires") {
                 return TokenType::REQUIRES_KW;
             }
+            if (ident == "export") {
+                return TokenType::EXPORT_KEYWORD;
+            }
+        }
+    }
+    if (lang_opts.is_c_mode() && lang_opts.enable_c23_constexpr &&
+        (lang_opts.standard.empty() || lang_opts.is_c23_or_later()) &&
+        ident == "constexpr") {
+        return TokenType::CONSTEXPR_KW;
+    }
+    if (lang_opts.is_c23_or_later()) {
+
+        static const std::unordered_map<std::string_view, TokenType> c23_keywords = {
+            {"static_assert", TokenType::STATIC_ASSERT},
+            {"thread_local", TokenType::THREAD_LOCAL},
+            {"alignas", TokenType::ALIGNAS},
+            {"alignof", TokenType::ALIGNOF},
+            {"bool", TokenType::BOOL},
+            {"true", TokenType::TRUE_KW},
+            {"false", TokenType::FALSE_KW},
+            {"nullptr", TokenType::NULLPTR_KW},
+            {"typeof_unqual", TokenType::TYPEOF_UNQUAL_KW},
+        };
+        auto c23_it = c23_keywords.find(ident);
+        if (c23_it != c23_keywords.end()) {
+            return c23_it->second;
         }
     }
     const auto& common_keywords = common_keyword_table();
@@ -187,19 +233,49 @@ TokenType lookup_keyword(const std::string_view ident, const LangOptions& lang_o
 }
 } // namespace
 
+TokenType aburi_lookup_keyword(std::string_view ident, const LangOptions& lang_opts) {
+    return lookup_keyword(ident, lang_opts);
+}
+
 Lexer::Lexer(const std::string_view source, SrcLoc baseLoc, SourceManager* diag_sm, LangOptions options)
         : source(source), position(0), error_happened(false), base_loc(baseLoc), diag_sm(diag_sm),
            lang_opts(std::move(options)),
            pending_start_of_line(false),
            enable_new_line_token(false), enable_whitespace_token(false), emit_comment_whitespace(false),
            pp_number_mode(false) {
-    // Skip UTF-8 BOM if present at the start of the source
+
     if (source.size() >= 3 &&
         static_cast<unsigned char>(source[0]) == 0xEF &&
         static_cast<unsigned char>(source[1]) == 0xBB &&
         static_cast<unsigned char>(source[2]) == 0xBF) {
         position = 3;
     }
+}
+
+void Lexer::reset(std::string_view new_source, SrcLoc new_base) {
+    source = new_source;
+    phase2_original_source = {};
+    phase2_mapping = nullptr;
+    pending_literal_suffix.reset();
+    position = 0;
+    base_loc = new_base;
+    error_happened = false;
+    prev_whitespace.reset();
+    pending_leading_space.reset();
+    pending_start_of_line = false;
+    if (source.size() >= 3 &&
+        static_cast<unsigned char>(source[0]) == 0xEF &&
+        static_cast<unsigned char>(source[1]) == 0xBB &&
+        static_cast<unsigned char>(source[2]) == 0xBF) {
+        position = 3;
+    }
+}
+
+void Lexer::set_phase2_source(
+    std::string_view original_source,
+    const std::vector<MappingStep>* mapping) {
+    phase2_original_source = original_source;
+    phase2_mapping = mapping;
 }
 char Lexer::current_char() const {
     if (position >= source.length()) {
@@ -223,7 +299,7 @@ size_t Lexer::set_char_idx(size_t new_pos) {
     return position;
 }
 char Lexer::peek_char_rev(size_t offset) const {
-    if (offset > position) { // overflow
+    if (offset > position) {
         return '\0';
     }
     size_t peek_pos = position - offset;
@@ -242,7 +318,7 @@ void Lexer::advance() {
     }
 }
 void Lexer::skip_whitespace() {
-    // todo: we may need to handle \n as its own token
+
     while (is_ascii_space(current_char())) {
         advance();
     }
@@ -323,7 +399,7 @@ std::string Lexer::read_escape_sequence() {
                 value = (value << 4) | hex_value(current_char());
                 advance();
             }
-            // In C, \xNN produces a raw byte value, not a Unicode code point
+
             return std::string(1, static_cast<char>(value & 0xFF));
         }
         case 'u': {
@@ -357,7 +433,7 @@ std::string Lexer::read_escape_sequence() {
                     advance();
                     count++;
                 }
-                // In C, \NNN produces a raw byte value, not a Unicode code point
+
                 return std::string(1, static_cast<char>(value & 0xFF));
             }
             return std::string(1, code);
@@ -366,29 +442,49 @@ std::string Lexer::read_escape_sequence() {
 bool Lexer::is_alphabet(char c) {
     return is_ascii_alpha(c);
 }
-// per 6.4.2.1 in C standard, all identifiers must start with a non-digit
-// aka: is letter or underscore
+
 bool Lexer::is_nondigit(char c) {
     return is_ascii_identifier_start(c);
 }
 std::optional<Token> Lexer::read_number() {
     SrcLoc start_loc = get_loc_at_pos();
+    const size_t number_start = position;
+
     std::string number;
+    auto spelling_view = [&](size_t spelling_end) -> std::string_view {
+        std::string_view raw =
+            source.substr(number_start, spelling_end - number_start);
+        if (raw == number) {
+            return raw;
+        }
+        return arena().store(number);
+    };
+
+    const bool allow_digit_separators = lang_opts.is_cxx_mode() ||
+                                        lang_opts.is_c23_or_later() ||
+                                        lang_opts.standard.empty();
     bool isFloat = false;
     bool isHex = false;
     bool isBin = false;
     bool saw_invalid_octal_digit = false;
 
     if (current_char() == '0' && (peek_char() == 'x' || peek_char() == 'X')) {
-        // Hexadecimal
+
         isHex = true;
-        number += current_char(); // '0'
+        number += current_char();
         advance();
-        number += current_char(); // 'x' or 'X'
+        number += current_char();
         advance();
 
         bool saw_hex_digit = false;
-        while (is_hex_digit(current_char())) {
+        while (is_hex_digit(current_char()) ||
+               (allow_digit_separators && current_char() == '\'' &&
+                is_hex_digit(peek_char()))) {
+            if (current_char() == '\'') {
+                number += current_char();
+                advance();
+                continue;
+            }
             saw_hex_digit = true;
             number += current_char();
             advance();
@@ -398,7 +494,14 @@ std::optional<Token> Lexer::read_number() {
             isFloat = true;
             number += current_char();
             advance();
-            while (is_hex_digit(current_char())) {
+            while (is_hex_digit(current_char()) ||
+                   (allow_digit_separators && current_char() == '\'' &&
+                    is_hex_digit(peek_char()))) {
+                if (current_char() == '\'') {
+                    number += current_char();
+                    advance();
+                    continue;
+                }
                 saw_hex_digit = true;
                 number += current_char();
                 advance();
@@ -422,7 +525,14 @@ std::optional<Token> Lexer::read_number() {
                 error_occurred("hexadecimal exponent has no digits", start_loc);
                 return std::nullopt;
             }
-            while (is_digit(current_char())) {
+            while (is_digit(current_char()) ||
+                   (allow_digit_separators && current_char() == '\'' &&
+                    is_digit(peek_char()))) {
+                if (current_char() == '\'') {
+                    number += current_char();
+                    advance();
+                    continue;
+                }
                 number += current_char();
                 advance();
             }
@@ -431,25 +541,39 @@ std::optional<Token> Lexer::read_number() {
             return std::nullopt;
         }
     } else if (current_char() == '0' && (peek_char() == 'b' || peek_char() == 'B')) {
-        // Binary (GCC/C23 extension)
+
         isBin = true;
-        number += current_char(); // '0'
+        number += current_char();
         advance();
-        number += current_char(); // 'b' or 'B'
+        number += current_char();
         advance();
         if (!is_bin_digit(current_char())) {
             error_occurred("binary constant has no digits", start_loc);
             return std::nullopt;
         }
-        while (is_bin_digit(current_char())) {
+        while (is_bin_digit(current_char()) ||
+               (allow_digit_separators && current_char() == '\'' &&
+                is_bin_digit(peek_char()))) {
+            if (current_char() == '\'') {
+                number += current_char();
+                advance();
+                continue;
+            }
             number += current_char();
             advance();
         }
     } else if (current_char() == '0') {
-        // Octal or decimal float (if 0.123 or 0e1)
+
         number += current_char();
         advance();
-        while (is_digit(current_char())) {
+        while (is_digit(current_char()) ||
+               (allow_digit_separators && current_char() == '\'' &&
+                is_digit(peek_char()))) {
+            if (current_char() == '\'') {
+                number += current_char();
+                advance();
+                continue;
+            }
             if (!is_oct_digit(current_char())) {
                 saw_invalid_octal_digit = true;
             }
@@ -460,31 +584,50 @@ std::optional<Token> Lexer::read_number() {
             isFloat = true;
             number += current_char();
             advance();
-            while (is_digit(current_char())) {
+            while (is_digit(current_char()) ||
+                   (allow_digit_separators && current_char() == '\'' &&
+                    is_digit(peek_char()))) {
+                if (current_char() == '\'') {
+                    number += current_char();
+                    advance();
+                    continue;
+                }
                 number += current_char();
                 advance();
             }
         }
     } else {
-        // Decimal
-        while (is_digit(current_char())) {
+
+        while (is_digit(current_char()) ||
+               (allow_digit_separators && current_char() == '\'' &&
+                is_digit(peek_char()))) {
+            if (current_char() == '\'') {
+                number += current_char();
+                advance();
+                continue;
+            }
             number += current_char();
             advance();
         }
 
-        // Check for decimal point
         if (current_char() == '.') {
             isFloat = true;
             number += current_char();
             advance();
-            while (is_digit(current_char())) {
+            while (is_digit(current_char()) ||
+                   (allow_digit_separators && current_char() == '\'' &&
+                    is_digit(peek_char()))) {
+                if (current_char() == '\'') {
+                    number += current_char();
+                    advance();
+                    continue;
+                }
                 number += current_char();
                 advance();
             }
         }
     }
 
-    // Check for exponent part (only for non-hex/binary)
     if (!isHex && !isBin) {
         if (current_char() == 'e' || current_char() == 'E') {
             isFloat = true;
@@ -498,7 +641,14 @@ std::optional<Token> Lexer::read_number() {
                 error_occurred("exponent has no digits", start_loc);
                 return std::nullopt;
             }
-            while (is_digit(current_char())) {
+            while (is_digit(current_char()) ||
+                   (allow_digit_separators && current_char() == '\'' &&
+                    is_digit(peek_char()))) {
+                if (current_char() == '\'') {
+                    number += current_char();
+                    advance();
+                    continue;
+                }
                 number += current_char();
                 advance();
             }
@@ -511,6 +661,37 @@ std::optional<Token> Lexer::read_number() {
     }
 
     if (isFloat) {
+        const size_t spelling_end = position;
+        if (lang_opts.is_cxx_mode()) {
+            const size_t suffix_start = position;
+            if (is_nondigit(current_char())) {
+                advance();
+                while (is_ascii_identifier_continue(current_char())) {
+                    advance();
+                }
+            }
+            const std::string_view suffix =
+                source.substr(suffix_start, position - suffix_start);
+            TokenType type = TokenType::DOUBLE_CONST;
+            const bool standard_suffix =
+                suffix.empty() || suffix == "f" || suffix == "F" ||
+                suffix == "l" || suffix == "L";
+            if (standard_suffix) {
+                if (suffix == "f" || suffix == "F") {
+                    type = TokenType::FLOAT_CONST;
+                } else if (suffix == "l" || suffix == "L") {
+                    type = TokenType::LONG_DOUBLE_CONST;
+                }
+                return Token(type, spelling_view(spelling_end), start_loc);
+            }
+
+            position = suffix_start;
+            Token token(TokenType::DOUBLE_CONST,
+                        spelling_view(spelling_end), start_loc);
+            attach_user_defined_literal_suffix(token);
+            return token;
+        }
+
         bool is_float_suffix = false;
         bool is_long_double_suffix = false;
         bool seen_fp_suffix = false;
@@ -553,13 +734,53 @@ std::optional<Token> Lexer::read_number() {
             error_occurred("invalid suffix on floating constant", start_loc);
             return std::nullopt;
         }
-        return Token(float_tok, number, start_loc);
+        return Token(float_tok, spelling_view(spelling_end), start_loc);
+    }
+
+    const size_t int_spelling_end = position;
+    if (lang_opts.is_cxx_mode()) {
+        const size_t suffix_start = position;
+        if (is_nondigit(current_char())) {
+            advance();
+            while (is_ascii_identifier_continue(current_char())) {
+                advance();
+            }
+        }
+        const std::string_view suffix =
+            source.substr(suffix_start, position - suffix_start);
+        bool is_unsigned = false;
+        int builtin_long_count = 0;
+        bool is_bitint = false;
+        if (parse_integer_literal_suffix(
+                suffix, is_unsigned, builtin_long_count, is_bitint)) {
+            TokenType type = TokenType::INTEGER_CONST;
+            if (is_bitint) {
+                type = is_unsigned ? TokenType::UNSIGNED_BITINT_CONST
+                                   : TokenType::BITINT_CONST;
+            } else if (builtin_long_count == 2) {
+                type = is_unsigned ? TokenType::UNSIGNED_LONG_LONG_CONST
+                                   : TokenType::LONG_LONG_CONST;
+            } else if (builtin_long_count == 1) {
+                type = is_unsigned ? TokenType::UNSIGNED_LONG_CONST
+                                   : TokenType::LONG_CONST;
+            } else if (is_unsigned) {
+                type = TokenType::UNSIGNED_INTEGER_CONST;
+            }
+            return Token(type, spelling_view(int_spelling_end), start_loc);
+        }
+
+        position = suffix_start;
+        Token token(TokenType::INTEGER_CONST,
+                    spelling_view(int_spelling_end), start_loc);
+        attach_user_defined_literal_suffix(token);
+        return token;
     }
 
     bool isUnsigned = false;
     int long_count = 0;
     bool lowercase_long = false;
     bool isImaginary = false;
+    bool isBitInt = false;
     while (is_alphabet(current_char())) {
         char c = current_char();
         if (c == 'u' || c == 'U') {
@@ -590,13 +811,28 @@ std::optional<Token> Lexer::read_number() {
                 return std::nullopt;
             }
             isImaginary = true;
+        } else if ((c == 'w' || c == 'W') && !isBitInt) {
+
+            char expected = c == 'w' ? 'b' : 'B';
+            advance();
+            if (current_char() != expected) {
+                error_occurred("invalid suffix on integer constant", start_loc);
+                return std::nullopt;
+            }
+            isBitInt = true;
         } else {
             break;
         }
         advance();
     }
     TokenType tt;
-    if (long_count == 2) {
+    if (isBitInt) {
+        if (long_count > 0 || isImaginary) {
+            error_occurred("invalid suffix on integer constant", start_loc);
+            return std::nullopt;
+        }
+        tt = isUnsigned ? TokenType::UNSIGNED_BITINT_CONST : TokenType::BITINT_CONST;
+    } else if (long_count == 2) {
         if (isUnsigned) {
             tt = TokenType::UNSIGNED_LONG_LONG_CONST;
         } else {
@@ -631,36 +867,37 @@ std::optional<Token> Lexer::read_number() {
         error_occurred("invalid suffix on integer constant", start_loc);
         return std::nullopt;
     }
-    return Token(tt, number, start_loc);
+    return Token(tt, spelling_view(int_spelling_end), start_loc);
 
 }
 std::optional<Token> Lexer::read_pp_number() {
-    // C standard 6.4.8: pp-number is digit | . digit followed by
-    // (digit | nondigit | e[+-] | E[+-] | p[+-] | P[+-] | .)*
+
     SrcLoc start_loc = get_loc_at_pos();
-    std::string number;
-    number += current_char();
+    const size_t number_start = position;
     advance();
     while (true) {
         char c = current_char();
-        // Check exponent-sign sequences BEFORE is_nondigit, since e/E/p/P
-        // are also nondigits and would be consumed without the +/- sign
+
         if ((c == 'e' || c == 'E' || c == 'p' || c == 'P') &&
             (peek_char() == '+' || peek_char() == '-')) {
-            number += c;
             advance();
-            number += current_char();
             advance();
             continue;
         }
         if (is_digit(c) || is_nondigit(c) || c == '.') {
-            number += c;
+            advance();
+            continue;
+        }
+
+        if (c == '\'' && (is_digit(peek_char()) || is_nondigit(peek_char()))) {
             advance();
             continue;
         }
         break;
     }
-    return Token(TokenType::PP_NUMBER, number, start_loc);
+    return Token(TokenType::PP_NUMBER,
+                 source.substr(number_start, position - number_start),
+                 start_loc);
 }
 std::optional<Token> Lexer::read_identifier() {
     SrcLoc start_loc = get_loc_at_pos();
@@ -675,9 +912,45 @@ std::optional<Token> Lexer::read_identifier() {
     position = end;
 
     std::string_view identifier(data + identifier_start, position - identifier_start);
+    if (ident_table) {
+
+        uint32_t id = ident_table->intern(identifier, [&](std::string_view s) {
+            return lookup_keyword(s, lang_opts);
+        });
+        const IdentTable::Info& info = ident_table->info(id);
+        Token tok(info.keyword, info.spelling, start_loc);
+        tok.ident = id;
+        return tok;
+    }
     TokenType type = lookup_keyword(identifier, lang_opts);
 
-    return Token(type, std::string(identifier), start_loc);
+    return Token(type, identifier, start_loc);
+}
+
+void Lexer::attach_user_defined_literal_suffix(Token& token) {
+    if (!lang_opts.is_cxx_mode() || !is_nondigit(current_char())) {
+        return;
+    }
+    const size_t suffix_start = position;
+    advance();
+    while (is_ascii_identifier_continue(current_char())) {
+        advance();
+    }
+    std::string_view suffix =
+        source.substr(suffix_start, position - suffix_start);
+    SrcLoc suffix_loc{
+        base_loc.offset + static_cast<uint32_t>(suffix_start)
+    };
+    if (ident_table) {
+        token.ident = ident_table->intern(
+            suffix,
+            [&](std::string_view spelling) {
+                return lookup_keyword(spelling, lang_opts);
+            });
+        return;
+    }
+    pending_literal_suffix =
+        Token(TokenType::LITERAL_SUFFIX, suffix, suffix_loc);
 }
 uint32_t Lexer::get_special_char() {
     char code = current_char();
@@ -699,15 +972,15 @@ uint32_t Lexer::get_special_char() {
 }
 std::optional<Token> Lexer::read_char_literal(SrcLoc start_loc, LiteralPrefix prefix) {
     std::string value;
-    advance(); // skip '
+    advance();
+    const size_t content_start = position;
 
     char curr = current_char();
     while (curr != '\'') {
         if (curr == '\0' || curr == '\n') {
-            // this is the actual symbol for null or new line, not the escape
+
             if (pp_number_mode) {
-                // In preprocessing mode, keep invalid pp-tokens recoverable so
-                // directives like '#define A ''' don't hard-stop translation.
+
                 return Token(TokenType::UNKNOWN, "\'", start_loc);
             }
             error_occurred("error in parsing string literal", start_loc);
@@ -719,8 +992,7 @@ std::optional<Token> Lexer::read_char_literal(SrcLoc start_loc, LiteralPrefix pr
             continue;
         }
         if (static_cast<unsigned char>(curr) & 0x80) {
-            // Inside char literals, non-ASCII bytes are stored as-is
-            // (they may not be valid UTF-8, e.g. raw \xff)
+
             value += curr;
             advance();
             curr = current_char();
@@ -730,23 +1002,27 @@ std::optional<Token> Lexer::read_char_literal(SrcLoc start_loc, LiteralPrefix pr
         advance();
         curr = current_char();
     }
+    std::string_view raw = source.substr(content_start, position - content_start);
     advance();
-    Token tok(TokenType::CHAR_LITERAL, value, start_loc);
+
+    Token tok(TokenType::CHAR_LITERAL, raw == value ? raw : arena().store(value),
+              start_loc);
     tok.literal_prefix = prefix;
+    attach_user_defined_literal_suffix(tok);
     return tok;
 }
-// todo: combine with above?
+
 std::optional<Token> Lexer::read_string_literal(SrcLoc start_loc, LiteralPrefix prefix) {
     std::string value;
-    advance(); // skip "
+    advance();
+    const size_t content_start = position;
 
     char curr = current_char();
     while (curr != '"') {
         if (curr == '\0' || curr == '\n') {
-            // this is the actual symbol for null or new line, not the escape
+
             if (pp_number_mode) {
-                // In preprocessing mode, keep invalid pp-tokens recoverable so
-                // directives like '#define A \"' don't hard-stop translation.
+
                 return Token(TokenType::UNKNOWN, "\"", start_loc);
             }
             error_occurred("error in parsing string literal", start_loc);
@@ -758,8 +1034,7 @@ std::optional<Token> Lexer::read_string_literal(SrcLoc start_loc, LiteralPrefix 
             continue;
         }
         if (static_cast<unsigned char>(curr) & 0x80) {
-            // Inside string literals, non-ASCII bytes are stored as-is
-            // (they may not be valid UTF-8, e.g. raw \xff)
+
             value += curr;
             advance();
             curr = current_char();
@@ -769,9 +1044,124 @@ std::optional<Token> Lexer::read_string_literal(SrcLoc start_loc, LiteralPrefix 
         advance();
         curr = current_char();
     }
+    std::string_view raw = source.substr(content_start, position - content_start);
     advance();
-    Token tok(TokenType::STRING_LITERAL, value, start_loc);
+    Token tok(TokenType::STRING_LITERAL, raw == value ? raw : arena().store(value),
+              start_loc);
     tok.literal_prefix = prefix;
+    attach_user_defined_literal_suffix(tok);
+    return tok;
+}
+
+std::optional<Token> Lexer::read_raw_string_literal(
+    SrcLoc start_loc,
+    LiteralPrefix prefix) {
+
+    size_t raw_quote = position;
+    std::string_view raw_source = source;
+
+    auto logical_to_physical = [&](size_t logical_index) {
+        if (!phase2_mapping || phase2_mapping->empty()) {
+            return logical_index;
+        }
+        auto it = std::upper_bound(
+            phase2_mapping->begin(), phase2_mapping->end(), logical_index,
+            [](size_t index, const MappingStep& step) {
+                return index < step.logical_index;
+            });
+        const MappingStep& step = *std::prev(it);
+        return static_cast<size_t>(step.physical_offset) +
+            (logical_index - step.logical_index);
+    };
+
+    auto physical_to_logical = [&](size_t physical_index) {
+        if (!phase2_mapping || phase2_mapping->empty()) {
+            return physical_index;
+        }
+        auto it = std::upper_bound(
+            phase2_mapping->begin(), phase2_mapping->end(), physical_index,
+            [](size_t index, const MappingStep& step) {
+                return index < step.physical_offset;
+            });
+        const MappingStep& step = *std::prev(it);
+        return static_cast<size_t>(step.logical_index) +
+            (physical_index - step.physical_offset);
+    };
+
+    if (!phase2_original_source.empty() && phase2_mapping &&
+        !phase2_mapping->empty()) {
+        raw_source = phase2_original_source;
+        raw_quote = logical_to_physical(position);
+    }
+
+    if (raw_quote >= raw_source.size() || raw_source[raw_quote] != '"') {
+        error_occurred("invalid raw string literal start", start_loc);
+    }
+
+    size_t cursor = raw_quote + 1;
+    const size_t delimiter_start = cursor;
+    while (cursor < raw_source.size() && raw_source[cursor] != '(') {
+        const unsigned char ch =
+            static_cast<unsigned char>(raw_source[cursor]);
+        const bool valid_delimiter_char =
+            ch >= 0x21 && ch <= 0x7e &&
+            ch != '(' && ch != ')' && ch != '\\';
+        if (!valid_delimiter_char) {
+            error_occurred("invalid character in raw string delimiter", start_loc);
+        }
+        if (cursor - delimiter_start == 16) {
+            error_occurred("raw string delimiter exceeds 16 characters", start_loc);
+        }
+        ++cursor;
+    }
+    if (cursor == raw_source.size()) {
+        error_occurred("unterminated raw string literal", start_loc);
+    }
+
+    const std::string_view delimiter =
+        raw_source.substr(delimiter_start, cursor - delimiter_start);
+    const size_t content_start = ++cursor;
+    size_t content_end = std::string_view::npos;
+    size_t literal_end = std::string_view::npos;
+    while (cursor < raw_source.size()) {
+        if (raw_source[cursor] == ')') {
+            const size_t delimiter_pos = cursor + 1;
+            const size_t quote_pos = delimiter_pos + delimiter.size();
+            if (quote_pos < raw_source.size() &&
+                raw_source.substr(delimiter_pos, delimiter.size()) == delimiter &&
+                raw_source[quote_pos] == '"') {
+                content_end = cursor;
+                literal_end = quote_pos + 1;
+                break;
+            }
+        }
+        ++cursor;
+    }
+    if (content_end == std::string_view::npos) {
+        error_occurred("unterminated raw string literal", start_loc);
+    }
+
+    std::string value;
+    value.reserve(content_end - content_start);
+    for (size_t i = content_start; i < content_end; ++i) {
+        if (raw_source[i] == '\r') {
+            if (i + 1 < content_end && raw_source[i + 1] == '\n') {
+                ++i;
+            }
+            value.push_back('\n');
+        } else {
+            value.push_back(raw_source[i]);
+        }
+    }
+
+    position = physical_to_logical(literal_end);
+    if (position > source.size()) {
+        error_occurred("invalid raw string source mapping", start_loc);
+    }
+
+    Token tok(TokenType::STRING_LITERAL, arena().store(value), start_loc);
+    tok.literal_prefix = prefix;
+    attach_user_defined_literal_suffix(tok);
     return tok;
 }
 bool Lexer::is_exhausted() {
@@ -797,7 +1187,7 @@ std::optional<Token> Lexer::next_token() {
         if (prev_whitespace.has_value() || pending_leading_space.has_value()) {
             bef_space = 1;
         } else if (is_ascii_space(prev_ch)) {
-            bef_space = 1; // todo: see if we have situation of \n (whitespace) <char>
+            bef_space = 1;
         }
     }
     tok->flags.start_of_line = bef_newline;
@@ -816,10 +1206,16 @@ std::optional<Token> Lexer::next_token() {
 }
 
 std::optional<Token> Lexer::next_token2() {
+    if (pending_literal_suffix.has_value()) {
+        Token suffix = *pending_literal_suffix;
+        pending_literal_suffix.reset();
+        return suffix;
+    }
     const bool cxx_mode = lang_opts.is_cxx_mode();
+    const bool reflection = cxx_mode && lang_opts.enable_cpp_reflection;
     while (current_char() != '\0') {
         if (current_char() == '/' && peek_char() == '/') {
-            // Line comment: skip to newline but don't consume it.
+
             SrcLoc start_loc = get_loc_at_pos();
             advance();
             advance();
@@ -830,11 +1226,11 @@ std::optional<Token> Lexer::next_token2() {
                 pending_leading_space = ' ';
                 return Token(TokenType::Whitespace, " ", start_loc);
             }
-            prev_whitespace = ' '; // comment replaced with a single space
+            prev_whitespace = ' ';
             continue;
         }
         if (current_char() == '/' && peek_char() == '*') {
-            // Block comment: consume entirely and replace with a single space.
+
             SrcLoc start_loc = get_loc_at_pos();
             advance();
             advance();
@@ -854,7 +1250,7 @@ std::optional<Token> Lexer::next_token2() {
                 pending_leading_space = ' ';
                 return Token(TokenType::Whitespace, " ", start_loc);
             }
-            prev_whitespace = ' '; // comment replaced with a single space
+            prev_whitespace = ' ';
             continue;
         }
         if (is_ascii_space(current_char())) {
@@ -864,7 +1260,8 @@ std::optional<Token> Lexer::next_token2() {
                 advance();
                 return ret;
             } else if (enable_whitespace_token) {
-                auto ret = Token(TokenType::Whitespace, std::to_string(cur), get_loc_at_pos());
+                auto ret = Token(TokenType::Whitespace,
+                                 arena().store(std::to_string(cur)), get_loc_at_pos());
                 advance();
                 return ret;
             }
@@ -880,6 +1277,32 @@ std::optional<Token> Lexer::next_token2() {
             advance();
             advance();
             return Token(TokenType::ELLIPSIS, "...", start_loc);
+        }
+        if (cxx_mode) {
+            LiteralPrefix raw_prefix = LiteralPrefix::None;
+            size_t raw_marker_length = 0;
+            if (c == 'R' && peek_char() == '"') {
+                raw_marker_length = 1;
+            } else if (c == 'L' && peek_char() == 'R' && peek_char(2) == '"') {
+                raw_prefix = LiteralPrefix::L;
+                raw_marker_length = 2;
+            } else if (c == 'u' && peek_char() == '8' &&
+                       peek_char(2) == 'R' && peek_char(3) == '"') {
+                raw_prefix = LiteralPrefix::U8;
+                raw_marker_length = 3;
+            } else if (c == 'u' && peek_char() == 'R' && peek_char(2) == '"') {
+                raw_prefix = LiteralPrefix::u;
+                raw_marker_length = 2;
+            } else if (c == 'U' && peek_char() == 'R' && peek_char(2) == '"') {
+                raw_prefix = LiteralPrefix::U;
+                raw_marker_length = 2;
+            }
+            if (raw_marker_length != 0) {
+                for (size_t i = 0; i < raw_marker_length; ++i) {
+                    advance();
+                }
+                return read_raw_string_literal(start_loc, raw_prefix);
+            }
         }
         if (c == 'L' || c == 'u' || c == 'U') {
             SrcLoc start_loc = get_loc_at_pos();
@@ -1027,13 +1450,26 @@ std::optional<Token> Lexer::next_token2() {
                 }
                 return Token(TokenType::ARROW, "->", start_loc);
             }
-            // Already handled decrement and arrow, so this is just unary/binary minus
+
             return Token(TokenType::NEGATE, "-", start_loc);
         }
         if (cxx_mode && c == ':' && peek_char() == ':') {
             advance();
             advance();
             return Token(TokenType::SCOPE_RESOLUTION, "::", start_loc);
+        }
+        if (reflection && c == ':' && peek_char() == ']') {
+            advance();
+            advance();
+            return Token(TokenType::SPLICE_CLOSE, ":]", start_loc);
+        }
+        if (reflection && c == '[' && peek_char() == ':') {
+
+            if (!(peek_char(2) == ':' && peek_char(3) != ':')) {
+                advance();
+                advance();
+                return Token(TokenType::SPLICE_OPEN, "[:", start_loc);
+            }
         }
         if (c == '*') {
             advance();
@@ -1061,6 +1497,10 @@ std::optional<Token> Lexer::next_token2() {
         }
         if (c == '^') {
             advance();
+            if (reflection && current_char() == '^') {
+                advance();
+                return Token(TokenType::REFLECT, "^^", start_loc);
+            }
             if (current_char() == '=') {
                 advance();
                 return Token(TokenType::ASSIGN_XOR, "^=", start_loc);
@@ -1088,13 +1528,22 @@ std::optional<Token> Lexer::next_token2() {
             case '}': return Token(TokenType::RIGHT_BRACE, "}", start_loc);
             case '[': return Token(TokenType::LEFT_BRACKET, "[", start_loc);
             case ']': return Token(TokenType::RIGHT_BRACKET, "]", start_loc);
+            case '@':
+
+                if (lang_opts.is_objc()) {
+                    return Token(TokenType::AT, "@", start_loc);
+                }
+                return Token(TokenType::UNKNOWN,
+                             arena().store(std::string_view(&c, 1)), start_loc);
             case ';': return Token(TokenType::SEMICOLON, ";", start_loc);
             case '~': return Token(TokenType::BITWISE_NOT, "~", start_loc);
             case ',': return Token(TokenType::COMMA, ",", start_loc);
             case '.': return Token(TokenType::DOT, ".", start_loc);
 
             default:
-                return Token(TokenType::UNKNOWN, std::string(1, c), start_loc);
+
+                return Token(TokenType::UNKNOWN,
+                             arena().store(std::string_view(&c, 1)), start_loc);
         }
     }
     return Token(TokenType::Eof, "", get_loc_at_pos());
@@ -1117,7 +1566,7 @@ std::vector<Token> Lexer::tokenize() {
 
     return tokens;
 }
-// for extract_utf8()
+
 uint8_t Lexer::get_byte_continuation() {
     char byte = current_char();
     if ((byte & 0xC0) != 0x80) {
@@ -1131,11 +1580,10 @@ uint32_t Lexer::extract_utf8_code_point() {
     char first = current_char();
     advance();
 
-    // Single byte (ASCII): 0xxxxxxx
     if ((first & 0x80) == 0) {
         return first;
     }
-    // Two bytes: 110xxxxx 10xxxxxx
+
     if ((first & 0xE0) == 0xC0) {
         uint32_t codePoint = (first & 0x1F) << 6;
         codePoint |= get_byte_continuation();
@@ -1145,7 +1593,7 @@ uint32_t Lexer::extract_utf8_code_point() {
         }
         return codePoint;
     }
-    // Three bytes: 1110xxxx 10xxxxxx 10xxxxxx
+
     if ((first & 0xF0) == 0xE0) {
         uint32_t codePoint = (first & 0x0F) << 12;
         codePoint |= get_byte_continuation() << 6;
@@ -1160,7 +1608,6 @@ uint32_t Lexer::extract_utf8_code_point() {
         return codePoint;
     }
 
-    // Four bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
     if ((first & 0xF8) == 0xF0) {
         uint32_t codePoint = (first & 0x07) << 18;
         codePoint |= get_byte_continuation() << 12;
@@ -1177,7 +1624,7 @@ uint32_t Lexer::extract_utf8_code_point() {
     }
 
     error_occurred("Invalid UTF-8 leading byte");
-    return 0; // should be unreachable
+    return 0;
 }
 
 static const Token kEofToken{TokenType::Eof, "", 0};
@@ -1248,7 +1695,7 @@ void TokenMgnt::check_custom(TokenType type, std::string &message) {
 
 void TokenMgnt::check_and_consume(TokenType type) {
     check(type);
-    // if successful, we will be here
+
     advance();
 }
 
@@ -1257,7 +1704,7 @@ void TokenMgnt::check(TokenType type) {
         Token got = current_token();
         std::string err = "expected " + token_type_to_string(type) + " but got "
             + (got.type == TokenType::Eof ? "end of file"
-               : "'" + got.value + "'");
+               : "'" + std::string(got.value) + "'");
         error(err, got.loc);
     }
 }
@@ -1383,6 +1830,9 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::ASSIGN_AND: return "'&='";
         case TokenType::ASSIGN_XOR: return "'^='";
         case TokenType::ASSIGN_OR: return "'|='";
+        case TokenType::MODULE_KEYWORD: return "'module'";
+        case TokenType::IMPORT_KEYWORD: return "'import'";
+        case TokenType::EXPORT_KEYWORD: return "'export'";
         case TokenType::INT: return "'int'";
         case TokenType::LONG: return "'long'";
         case TokenType::SHORT: return "'short'";
@@ -1394,6 +1844,7 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::UNSIGNED: return "'unsigned'";
         case TokenType::BOOL: return "'_Bool'";
         case TokenType::WCHAR_T: return "'wchar_t'";
+        case TokenType::CHAR8_T: return "'char8_t'";
         case TokenType::CHAR16_T: return "'char16_t'";
         case TokenType::CHAR32_T: return "'char32_t'";
         case TokenType::STRUCT: return "'struct'";
@@ -1439,6 +1890,7 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::FALSE_KW: return "'false'";
         case TokenType::NULLPTR_KW: return "'nullptr'";
         case TokenType::DECLTYPE_KW: return "'decltype'";
+        case TokenType::TYPEID_KW: return "'typeid'";
         case TokenType::PUBLIC_KW: return "'public'";
         case TokenType::PRIVATE_KW: return "'private'";
         case TokenType::PROTECTED_KW: return "'protected'";
@@ -1448,8 +1900,12 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::MUTABLE_KW: return "'mutable'";
         case TokenType::CONSTEXPR_KW: return "'constexpr'";
         case TokenType::CONSTEVAL_KW: return "'consteval'";
+        case TokenType::CONSTINIT_KW: return "'constinit'";
         case TokenType::CONCEPT_KW: return "'concept'";
         case TokenType::REQUIRES_KW: return "'requires'";
+        case TokenType::CO_AWAIT_KW: return "'co_await'";
+        case TokenType::CO_YIELD_KW: return "'co_yield'";
+        case TokenType::CO_RETURN_KW: return "'co_return'";
         case TokenType::NULLABILITY_QUALIFIER: return "nullability qualifier";
         case TokenType::IDENTIFIER: return "identifier";
         case TokenType::INTEGER_CONST: return "integer constant";
@@ -1458,6 +1914,8 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::UNSIGNED_LONG_CONST: return "unsigned long integer constant";
         case TokenType::LONG_LONG_CONST: return "long long integer constant";
         case TokenType::UNSIGNED_LONG_LONG_CONST: return "unsigned long long integer constant";
+        case TokenType::BITINT_CONST: return "bit-precise integer constant";
+        case TokenType::UNSIGNED_BITINT_CONST: return "unsigned bit-precise integer constant";
         case TokenType::FLOAT_CONST: return "float constant";
         case TokenType::DOUBLE_CONST: return "double constant";
         case TokenType::LONG_DOUBLE_CONST: return "long double constant";
@@ -1473,6 +1931,7 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::CHAR_LITERAL: return "character literal";
         case TokenType::STRING_LITERAL: return "string literal";
         case TokenType::PP_NUMBER: return "preprocessing number";
+        case TokenType::LITERAL_SUFFIX: return "literal suffix";
         case TokenType::Eof: return "end of file";
         default: return "token";
     }

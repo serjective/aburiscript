@@ -1,0 +1,77 @@
+#ifndef ADINKRA_STDEXCEPT
+#define ADINKRA_STDEXCEPT
+
+#include <__adinkra/config>
+#include <exception>
+#include <iosfwd>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class _ADINKRA_EXPORT logic_error : public exception {
+public:
+    explicit logic_error(const char* message);
+    explicit logic_error(
+        const basic_string<
+            char, char_traits<char>, allocator<char>>& message);
+    logic_error(const logic_error& other);
+    logic_error& operator=(const logic_error& other);
+    ~logic_error() noexcept override;
+    const char* what() const noexcept override;
+
+protected:
+    char* message_;
+};
+
+class _ADINKRA_EXPORT domain_error : public logic_error {
+public:
+    using logic_error::logic_error;
+};
+
+class _ADINKRA_EXPORT invalid_argument : public logic_error {
+public:
+    using logic_error::logic_error;
+};
+
+class _ADINKRA_EXPORT length_error : public logic_error {
+public:
+    using logic_error::logic_error;
+};
+
+class _ADINKRA_EXPORT out_of_range : public logic_error {
+public:
+    using logic_error::logic_error;
+};
+
+class _ADINKRA_EXPORT runtime_error : public exception {
+public:
+    explicit runtime_error(const char* message);
+    explicit runtime_error(
+        const basic_string<
+            char, char_traits<char>, allocator<char>>& message);
+    runtime_error(const runtime_error& other);
+    runtime_error& operator=(const runtime_error& other);
+    ~runtime_error() noexcept override;
+    const char* what() const noexcept override;
+
+protected:
+    char* message_;
+};
+
+class _ADINKRA_EXPORT range_error : public runtime_error {
+public:
+    using runtime_error::runtime_error;
+};
+
+class _ADINKRA_EXPORT overflow_error : public runtime_error {
+public:
+    using runtime_error::runtime_error;
+};
+
+class _ADINKRA_EXPORT underflow_error : public runtime_error {
+public:
+    using runtime_error::runtime_error;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

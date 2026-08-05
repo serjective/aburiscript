@@ -1,0 +1,1707 @@
+#ifndef ADINKRA_MEMORY
+#define ADINKRA_MEMORY
+
+#include <__adinkra/config>
+#include <__adinkra/memory_order>
+#include <cstddef>
+#include <cstdint>
+#include <new>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#ifndef __cpp_lib_constexpr_dynamic_alloc
+#define __cpp_lib_constexpr_dynamic_alloc 201907L
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Pointer, class = void>
+struct __pointer_difference {
+    using type = ptrdiff_t;
+};
+
+template<class Pointer>
+struct __pointer_difference<
+    Pointer, void_t<typename Pointer::difference_type>> {
+    using type = typename Pointer::difference_type;
+};
+
+template<class Pointer, class = void>
+struct __pointer_element_from_template;
+
+template<template<class, class...> class Pointer,
+         class Type, class... Arguments>
+struct __pointer_element_from_template<
+    Pointer<Type, Arguments...>, void> {
+    using type = Type;
+};
+
+template<class Pointer, class = void>
+struct __pointer_element
+    : __pointer_element_from_template<Pointer> {};
+
+template<class Pointer>
+struct __pointer_element<
+    Pointer, void_t<typename Pointer::element_type>> {
+    using type = typename Pointer::element_type;
+};
+
+template<class Pointer, class Other, class = void>
+struct __pointer_rebind_from_template;
+
+template<class Other, template<class, class...> class Pointer,
+         class Type, class... Arguments>
+struct __pointer_rebind_from_template<
+    Pointer<Type, Arguments...>, Other, void> {
+    using type = Pointer<Other, Arguments...>;
+};
+
+template<class Pointer, class Other, class = void>
+struct __pointer_rebind
+    : __pointer_rebind_from_template<Pointer, Other> {};
+
+template<class Pointer, class Other>
+struct __pointer_rebind<
+    Pointer, Other,
+    void_t<typename Pointer::template rebind<Other>>> {
+    using type = typename Pointer::template rebind<Other>;
+};
+
+inline void* align(
+    size_t alignment, size_t size, void*& pointer, size_t& space) noexcept {
+    if (alignment == 0 ||
+        (alignment & (alignment - 1)) != 0 ||
+        pointer == nullptr) {
+        return nullptr;
+    }
+    const uintptr_t address =
+        reinterpret_cast<uintptr_t>(pointer);
+    const uintptr_t aligned =
+        (address + alignment - 1) & ~(alignment - 1);
+    const size_t padding =
+        static_cast<size_t>(aligned - address);
+    if (padding > space || size > space - padding) {
+        return nullptr;
+    }
+    pointer = reinterpret_cast<void*>(aligned);
+    space -= padding;
+    return pointer;
+}
+
+template<class Pointer>
+struct pointer_traits {
+    using pointer = Pointer;
+    using element_type =
+        typename __pointer_element<Pointer>::type;
+    using difference_type =
+        typename __pointer_difference<Pointer>::type;
+
+    template<class Other>
+    using rebind =
+        typename __pointer_rebind<Pointer, Other>::type;
+
+    template<class Element = element_type>
+        requires (!is_void_v<Element>)
+    static pointer pointer_to(Element& value) {
+        return Pointer::pointer_to(value);
+    }
+};
+
+template<class Type>
+struct pointer_traits<Type*> {
+    using pointer = Type*;
+    using element_type = Type;
+    using difference_type = ptrdiff_t;
+
+    template<class Other>
+    using rebind = Other*;
+
+    template<class Element = element_type>
+        requires (!is_void_v<Element>)
+    static constexpr pointer pointer_to(Element& value) noexcept {
+        return std::addressof(value);
+    }
+};
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type* to_address(Type* pointer) noexcept {
+    static_assert(!is_function_v<Type>);
+    return pointer;
+}
+
+template<class Pointer>
+    requires requires(const Pointer& value) {
+        value.operator->();
+    }
+_ADINKRA_NODISCARD constexpr auto to_address(const Pointer& pointer) noexcept {
+    return std::to_address(pointer.operator->());
+}
+
+template<class Type>
+struct allocator {
+    using value_type = Type;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using propagate_on_container_move_assignment = true_type;
+    using is_always_equal = true_type;
+
+    template<class Other>
+    struct rebind {
+        using other = allocator<Other>;
+    };
+
+    constexpr allocator() noexcept = default;
+
+    template<class Other>
+    constexpr allocator(const allocator<Other>&) noexcept {}
+
+    _ADINKRA_NODISCARD constexpr Type* allocate(size_t count) {
+        if (count > static_cast<size_t>(-1) / sizeof(Type)) {
+            throw bad_array_new_length();
+        }
+        if constexpr (alignof(Type) > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+            return static_cast<Type*>(
+                ::operator new(count * sizeof(Type),
+                               align_val_t{alignof(Type)}));
+        } else {
+            return static_cast<Type*>(::operator new(count * sizeof(Type)));
+        }
+    }
+
+    constexpr void deallocate(Type* pointer, size_t) noexcept {
+        if constexpr (alignof(Type) > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+            ::operator delete(pointer, align_val_t{alignof(Type)});
+        } else {
+            ::operator delete(pointer);
+        }
+    }
+};
+
+template<class Left, class Right>
+constexpr bool operator==(const allocator<Left>&,
+                          const allocator<Right>&) noexcept {
+    return true;
+}
+
+template<class Allocator, class Type, class = void>
+struct __allocator_has_rebind : false_type {};
+
+template<class Allocator, class Type>
+struct __allocator_has_rebind<
+    Allocator, Type,
+    void_t<typename Allocator::template rebind<Type>::other>>
+    : true_type {};
+
+template<class Allocator, class Type,
+         bool = __allocator_has_rebind<Allocator, Type>::value>
+struct __allocator_rebind;
+
+template<class Allocator, class Type>
+struct __allocator_rebind<Allocator, Type, true> {
+    using type =
+        typename Allocator::template rebind<Type>::other;
+};
+
+template<template<class, class...> class AllocatorTemplate,
+         class Original, class... Arguments, class Type>
+struct __allocator_rebind<
+    AllocatorTemplate<Original, Arguments...>, Type, false> {
+    using type = AllocatorTemplate<Type, Arguments...>;
+};
+
+template<class Type, class... Arguments>
+constexpr Type* construct_at(Type* location, Arguments&&... arguments);
+
+template<class Type>
+constexpr void destroy_at(Type* location);
+
+template<class Allocator, class = void>
+struct __allocator_pointer {
+    using type = typename Allocator::value_type*;
+};
+
+template<class Allocator>
+struct __allocator_pointer<
+    Allocator, void_t<typename Allocator::pointer>> {
+    using type = typename Allocator::pointer;
+};
+
+template<class Allocator, class = void>
+struct __allocator_const_pointer {
+    using type = const typename Allocator::value_type*;
+};
+
+template<class Allocator>
+struct __allocator_const_pointer<
+    Allocator, void_t<typename Allocator::const_pointer>> {
+    using type = typename Allocator::const_pointer;
+};
+
+template<class Allocator, class = void>
+struct __allocator_difference_type {
+    using type = ptrdiff_t;
+};
+
+template<class Allocator>
+struct __allocator_difference_type<
+    Allocator, void_t<typename Allocator::difference_type>> {
+    using type = typename Allocator::difference_type;
+};
+
+template<class Allocator, class = void>
+struct __allocator_size_type {
+    using type = size_t;
+};
+
+template<class Allocator>
+struct __allocator_size_type<
+    Allocator, void_t<typename Allocator::size_type>> {
+    using type = typename Allocator::size_type;
+};
+
+#define _ADINKRA_ALLOCATOR_TRAIT(Name, Default)                       \
+    template<class Allocator, class = void>                             \
+    struct __allocator_##Name {                                        \
+        using type = Default;                                          \
+    };                                                                 \
+    template<class Allocator>                                          \
+    struct __allocator_##Name<                                         \
+        Allocator, void_t<typename Allocator::Name>> {                  \
+        using type = typename Allocator::Name;                          \
+    }
+
+_ADINKRA_ALLOCATOR_TRAIT(
+    propagate_on_container_copy_assignment, false_type);
+_ADINKRA_ALLOCATOR_TRAIT(
+    propagate_on_container_move_assignment, false_type);
+_ADINKRA_ALLOCATOR_TRAIT(
+    propagate_on_container_swap, false_type);
+_ADINKRA_ALLOCATOR_TRAIT(is_always_equal, is_empty<Allocator>);
+
+#undef _ADINKRA_ALLOCATOR_TRAIT
+
+template<class Allocator>
+struct allocator_traits {
+    using allocator_type = Allocator;
+    using value_type = typename Allocator::value_type;
+    using pointer = typename __allocator_pointer<Allocator>::type;
+    using const_pointer =
+        typename __allocator_const_pointer<Allocator>::type;
+    using void_pointer = void*;
+    using const_void_pointer = const void*;
+    using difference_type =
+        typename __allocator_difference_type<Allocator>::type;
+    using size_type = typename __allocator_size_type<Allocator>::type;
+
+    template<class Type>
+    using rebind_alloc =
+        typename __allocator_rebind<Allocator, Type>::type;
+
+    template<class Type>
+    using rebind_traits = allocator_traits<rebind_alloc<Type>>;
+
+    static constexpr pointer allocate(
+        Allocator& allocator, size_type count) {
+        return allocator.allocate(count);
+    }
+
+    static constexpr pointer allocate(
+        Allocator& allocator, size_type count,
+        const_void_pointer hint) {
+        if constexpr (requires {
+            allocator.allocate(count, hint);
+        }) {
+            return allocator.allocate(count, hint);
+        } else {
+            (void)hint;
+            return allocator.allocate(count);
+        }
+    }
+
+    static constexpr void deallocate(
+        Allocator& allocator, pointer value, size_type count) {
+        allocator.deallocate(value, count);
+    }
+
+    template<class Type, class... Arguments>
+    static constexpr void construct(
+        Allocator& allocator, Type* pointer, Arguments&&... arguments) {
+        if constexpr (requires {
+            allocator.construct(
+                pointer, std::forward<Arguments>(arguments)...);
+        }) {
+            allocator.construct(
+                pointer, std::forward<Arguments>(arguments)...);
+        } else {
+            std::construct_at(
+                pointer, std::forward<Arguments>(arguments)...);
+        }
+    }
+
+    template<class Type>
+    static constexpr void destroy(
+        Allocator& allocator, Type* pointer) {
+        if constexpr (requires { allocator.destroy(pointer); }) {
+            allocator.destroy(pointer);
+        } else {
+            std::destroy_at(pointer);
+        }
+    }
+
+    static constexpr size_type max_size(
+        const Allocator& allocator) noexcept {
+        if constexpr (requires { allocator.max_size(); }) {
+            return allocator.max_size();
+        } else {
+            return static_cast<size_type>(-1) / sizeof(value_type);
+        }
+    }
+
+    static constexpr Allocator
+    select_on_container_copy_construction(const Allocator& allocator) {
+        if constexpr (requires {
+            allocator.select_on_container_copy_construction();
+        }) {
+            return allocator.select_on_container_copy_construction();
+        } else {
+            return allocator;
+        }
+    }
+
+    using propagate_on_container_copy_assignment =
+        typename __allocator_propagate_on_container_copy_assignment<
+            Allocator>::type;
+    using propagate_on_container_move_assignment =
+        typename __allocator_propagate_on_container_move_assignment<
+            Allocator>::type;
+    using propagate_on_container_swap =
+        typename __allocator_propagate_on_container_swap<
+            Allocator>::type;
+    using is_always_equal =
+        typename __allocator_is_always_equal<Allocator>::type;
+};
+
+template<class Type, class Allocator, class = void>
+struct uses_allocator : false_type {};
+
+template<class Type, class Allocator>
+struct uses_allocator<
+    Type, Allocator, void_t<typename Type::allocator_type>>
+    : bool_constant<
+          is_convertible_v<
+              Allocator, typename Type::allocator_type>> {};
+
+template<class... Types, class Allocator>
+struct uses_allocator<tuple<Types...>, Allocator, void>
+    : true_type {};
+
+template<class Type, class Allocator>
+inline constexpr bool uses_allocator_v =
+    uses_allocator<Type, Allocator>::value;
+
+template<class Type, class... Arguments>
+constexpr Type* construct_at(Type* location, Arguments&&... arguments) {
+    return ::new (
+        const_cast<void*>(
+            static_cast<const volatile void*>(location)))
+        Type(std::forward<Arguments>(arguments)...);
+}
+
+template<class Type>
+constexpr void destroy_at(Type* location) {
+    if constexpr (is_array_v<Type>) {
+        for (auto& element : *location) {
+            std::destroy_at(std::addressof(element));
+        }
+    } else {
+        location->~Type();
+    }
+}
+
+template<class ForwardIterator>
+constexpr void destroy(ForwardIterator first, ForwardIterator last) {
+    while (first != last) {
+        std::destroy_at(std::addressof(*first++));
+    }
+}
+
+template<class ForwardIterator, class Size>
+constexpr ForwardIterator destroy_n(ForwardIterator first, Size count) {
+    while (count-- > 0) {
+        std::destroy_at(std::addressof(*first++));
+    }
+    return first;
+}
+
+template<class ForwardIterator>
+constexpr void uninitialized_default_construct(
+    ForwardIterator first, ForwardIterator last) {
+    ForwardIterator current = first;
+    try {
+        while (current != last) {
+            using Type = remove_reference_t<decltype(*current)>;
+            ::new (static_cast<void*>(std::addressof(*current))) Type;
+            ++current;
+        }
+    } catch (...) {
+        std::destroy(first, current);
+        throw;
+    }
+}
+
+template<class ForwardIterator, class Size>
+constexpr ForwardIterator uninitialized_default_construct_n(
+    ForwardIterator first, Size count) {
+    ForwardIterator current = first;
+    try {
+        while (count-- > 0) {
+            using Type = remove_reference_t<decltype(*current)>;
+            ::new (static_cast<void*>(std::addressof(*current))) Type;
+            ++current;
+        }
+        return current;
+    } catch (...) {
+        std::destroy(first, current);
+        throw;
+    }
+}
+
+template<class ForwardIterator>
+constexpr void uninitialized_value_construct(
+    ForwardIterator first, ForwardIterator last) {
+    ForwardIterator current = first;
+    try {
+        while (current != last) {
+            std::construct_at(std::addressof(*current));
+            ++current;
+        }
+    } catch (...) {
+        std::destroy(first, current);
+        throw;
+    }
+}
+
+template<class ForwardIterator, class Size>
+constexpr ForwardIterator uninitialized_value_construct_n(
+    ForwardIterator first, Size count) {
+    ForwardIterator current = first;
+    try {
+        while (count-- > 0) {
+            std::construct_at(std::addressof(*current));
+            ++current;
+        }
+        return current;
+    } catch (...) {
+        std::destroy(first, current);
+        throw;
+    }
+}
+
+template<class InputIterator, class ForwardIterator>
+ForwardIterator uninitialized_copy(
+    InputIterator first, InputIterator last, ForwardIterator output) {
+    ForwardIterator current = output;
+    try {
+        while (first != last) {
+            std::construct_at(std::addressof(*current), *first);
+            ++first;
+            ++current;
+        }
+        return current;
+    } catch (...) {
+        std::destroy(output, current);
+        throw;
+    }
+}
+
+template<class InputIterator, class Size, class ForwardIterator>
+ForwardIterator uninitialized_copy_n(
+    InputIterator first, Size count, ForwardIterator output) {
+    ForwardIterator current = output;
+    try {
+        while (count-- > 0) {
+            std::construct_at(std::addressof(*current), *first++);
+            ++current;
+        }
+        return current;
+    } catch (...) {
+        std::destroy(output, current);
+        throw;
+    }
+}
+
+template<class InputIterator, class ForwardIterator>
+ForwardIterator uninitialized_move(
+    InputIterator first, InputIterator last, ForwardIterator output) {
+    ForwardIterator current = output;
+    try {
+        while (first != last) {
+            std::construct_at(
+                std::addressof(*current), std::move(*first));
+            ++first;
+            ++current;
+        }
+        return current;
+    } catch (...) {
+        std::destroy(output, current);
+        throw;
+    }
+}
+
+template<class ForwardIterator, class Type>
+void uninitialized_fill(
+    ForwardIterator first, ForwardIterator last, const Type& value) {
+    ForwardIterator current = first;
+    try {
+        while (current != last) {
+            std::construct_at(std::addressof(*current), value);
+            ++current;
+        }
+    } catch (...) {
+        std::destroy(first, current);
+        throw;
+    }
+}
+
+template<class ForwardIterator, class Size, class Type>
+ForwardIterator uninitialized_fill_n(
+    ForwardIterator first, Size count, const Type& value) {
+    ForwardIterator current = first;
+    try {
+        while (count-- > 0) {
+            std::construct_at(std::addressof(*current), value);
+            ++current;
+        }
+        return current;
+    } catch (...) {
+        std::destroy(first, current);
+        throw;
+    }
+}
+
+template<class Type>
+struct default_delete {
+    constexpr default_delete() noexcept = default;
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    constexpr default_delete(const default_delete<Other>&) noexcept {}
+
+    constexpr void operator()(Type* pointer) const {
+        static_assert(sizeof(Type) > 0);
+        delete pointer;
+    }
+};
+
+template<class Type>
+struct default_delete<Type[]> {
+    constexpr default_delete() noexcept = default;
+
+    template<class Other>
+        requires is_convertible_v<Other(*)[], Type(*)[]>
+    constexpr default_delete(const default_delete<Other[]>&) noexcept {}
+
+    template<class Other>
+    constexpr void operator()(Other* pointer) const {
+        static_assert(sizeof(Other) > 0);
+        delete[] pointer;
+    }
+};
+
+template<class Type, class Deleter = default_delete<Type>>
+class unique_ptr {
+public:
+    using pointer = Type*;
+    using element_type = Type;
+    using deleter_type = Deleter;
+
+    constexpr unique_ptr() noexcept : pointer_(nullptr), deleter_() {}
+    constexpr unique_ptr(nullptr_t) noexcept : unique_ptr() {}
+    explicit unique_ptr(pointer value) noexcept
+        : pointer_(value), deleter_() {}
+    unique_ptr(pointer value, const Deleter& deleter) noexcept
+        : pointer_(value), deleter_(deleter) {}
+    unique_ptr(pointer value, Deleter&& deleter) noexcept
+        : pointer_(value), deleter_(std::move(deleter)) {}
+
+    unique_ptr(unique_ptr&& other) noexcept
+        : pointer_(other.release()), deleter_(std::move(other.deleter_)) {}
+
+    template<class Other, class OtherDeleter>
+        requires is_convertible_v<Other*, Type*> &&
+                 is_constructible_v<Deleter, OtherDeleter&&>
+    unique_ptr(unique_ptr<Other, OtherDeleter>&& other) noexcept
+        : pointer_(other.release()),
+          deleter_(std::forward<OtherDeleter>(other.get_deleter())) {}
+
+    unique_ptr(const unique_ptr&) = delete;
+
+    ~unique_ptr() {
+        if (pointer_ != nullptr) {
+            deleter_(pointer_);
+        }
+    }
+
+    unique_ptr& operator=(unique_ptr&& other) noexcept {
+        reset(other.release());
+        deleter_ = std::move(other.deleter_);
+        return *this;
+    }
+
+    template<class Other, class OtherDeleter>
+        requires is_convertible_v<Other*, Type*> &&
+                 is_assignable_v<Deleter&, OtherDeleter&&>
+    unique_ptr& operator=(
+        unique_ptr<Other, OtherDeleter>&& other) noexcept {
+        reset(other.release());
+        deleter_ =
+            std::forward<OtherDeleter>(other.get_deleter());
+        return *this;
+    }
+
+    unique_ptr& operator=(nullptr_t) noexcept {
+        reset();
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD add_lvalue_reference_t<Type>
+    operator*() const
+        requires (!is_void_v<Type>) {
+        return *pointer_;
+    }
+
+    _ADINKRA_NODISCARD pointer operator->() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD pointer get() const noexcept {
+        return pointer_;
+    }
+
+    _ADINKRA_NODISCARD Deleter& get_deleter() noexcept {
+        return deleter_;
+    }
+
+    _ADINKRA_NODISCARD const Deleter& get_deleter() const noexcept {
+        return deleter_;
+    }
+
+    explicit operator bool() const noexcept {
+        return pointer_ != nullptr;
+    }
+
+    pointer release() noexcept {
+        return std::exchange(pointer_, nullptr);
+    }
+
+    void reset(pointer replacement = pointer()) noexcept {
+        pointer old = std::exchange(pointer_, replacement);
+        if (old != nullptr) {
+            deleter_(old);
+        }
+    }
+
+    void swap(unique_ptr& other) noexcept {
+        std::swap(pointer_, other.pointer_);
+        std::swap(deleter_, other.deleter_);
+    }
+
+private:
+    template<class, class>
+    friend class unique_ptr;
+
+    pointer pointer_;
+    [[no_unique_address]] Deleter deleter_;
+};
+
+template<class Type, class Deleter>
+class unique_ptr<Type[], Deleter> {
+public:
+    using pointer = Type*;
+    using element_type = Type;
+    using deleter_type = Deleter;
+
+    constexpr unique_ptr() noexcept : pointer_(nullptr), deleter_() {}
+    constexpr unique_ptr(nullptr_t) noexcept : unique_ptr() {}
+    explicit unique_ptr(pointer value) noexcept
+        : pointer_(value), deleter_() {}
+    unique_ptr(pointer value, const Deleter& deleter) noexcept
+        : pointer_(value), deleter_(deleter) {}
+    unique_ptr(pointer value, Deleter&& deleter) noexcept
+        : pointer_(value), deleter_(std::move(deleter)) {}
+
+    unique_ptr(unique_ptr&& other) noexcept
+        : pointer_(other.release()), deleter_(std::move(other.deleter_)) {}
+
+    template<class Other, class OtherDeleter>
+        requires is_convertible_v<Other(*)[], Type(*)[]> &&
+                 is_constructible_v<Deleter, OtherDeleter&&>
+    unique_ptr(unique_ptr<Other[], OtherDeleter>&& other) noexcept
+        : pointer_(other.release()),
+          deleter_(std::forward<OtherDeleter>(other.get_deleter())) {}
+
+    unique_ptr(const unique_ptr&) = delete;
+
+    ~unique_ptr() {
+        if (pointer_ != nullptr) {
+            deleter_(pointer_);
+        }
+    }
+
+    unique_ptr& operator=(unique_ptr&& other) noexcept {
+        reset(other.release());
+        deleter_ = std::move(other.deleter_);
+        return *this;
+    }
+
+    template<class Other, class OtherDeleter>
+        requires is_convertible_v<Other(*)[], Type(*)[]> &&
+                 is_assignable_v<Deleter&, OtherDeleter&&>
+    unique_ptr& operator=(
+        unique_ptr<Other[], OtherDeleter>&& other) noexcept {
+        reset(other.release());
+        deleter_ =
+            std::forward<OtherDeleter>(other.get_deleter());
+        return *this;
+    }
+
+    unique_ptr& operator=(nullptr_t) noexcept {
+        reset();
+        return *this;
+    }
+
+    Type& operator[](size_t index) const {
+        return pointer_[index];
+    }
+
+    pointer get() const noexcept { return pointer_; }
+    Deleter& get_deleter() noexcept { return deleter_; }
+    const Deleter& get_deleter() const noexcept { return deleter_; }
+    explicit operator bool() const noexcept { return pointer_ != nullptr; }
+
+    pointer release() noexcept {
+        return std::exchange(pointer_, nullptr);
+    }
+
+    void reset(pointer replacement = pointer()) noexcept {
+        pointer old = std::exchange(pointer_, replacement);
+        if (old != nullptr) {
+            deleter_(old);
+        }
+    }
+
+    void swap(unique_ptr& other) noexcept {
+        std::swap(pointer_, other.pointer_);
+        std::swap(deleter_, other.deleter_);
+    }
+
+private:
+    pointer pointer_;
+    [[no_unique_address]] Deleter deleter_;
+};
+
+template<class Left, class LeftDeleter,
+         class Right, class RightDeleter>
+_ADINKRA_NODISCARD bool operator==(
+    const unique_ptr<Left, LeftDeleter>& left,
+    const unique_ptr<Right, RightDeleter>& right) noexcept {
+    return left.get() == right.get();
+}
+
+template<class Left, class LeftDeleter,
+         class Right, class RightDeleter>
+_ADINKRA_NODISCARD bool operator<(
+    const unique_ptr<Left, LeftDeleter>& left,
+    const unique_ptr<Right, RightDeleter>& right) {
+    using Pointer = common_type_t<
+        typename unique_ptr<Left, LeftDeleter>::pointer,
+        typename unique_ptr<Right, RightDeleter>::pointer>;
+    return less<Pointer>()(left.get(), right.get());
+}
+
+template<class Left, class LeftDeleter,
+         class Right, class RightDeleter>
+_ADINKRA_NODISCARD bool operator>(
+    const unique_ptr<Left, LeftDeleter>& left,
+    const unique_ptr<Right, RightDeleter>& right) {
+    return right < left;
+}
+
+template<class Left, class LeftDeleter,
+         class Right, class RightDeleter>
+_ADINKRA_NODISCARD bool operator<=(
+    const unique_ptr<Left, LeftDeleter>& left,
+    const unique_ptr<Right, RightDeleter>& right) {
+    return !(right < left);
+}
+
+template<class Left, class LeftDeleter,
+         class Right, class RightDeleter>
+_ADINKRA_NODISCARD bool operator>=(
+    const unique_ptr<Left, LeftDeleter>& left,
+    const unique_ptr<Right, RightDeleter>& right) {
+    return !(left < right);
+}
+
+template<class Type, class Deleter>
+_ADINKRA_NODISCARD bool operator==(
+    const unique_ptr<Type, Deleter>& pointer,
+    nullptr_t) noexcept {
+    return pointer.get() == nullptr;
+}
+
+template<class Type, class Deleter>
+_ADINKRA_NODISCARD bool operator<(
+    const unique_ptr<Type, Deleter>& pointer, nullptr_t) {
+    return less<typename unique_ptr<Type, Deleter>::pointer>()(
+        pointer.get(), nullptr);
+}
+
+template<class Type, class Deleter>
+_ADINKRA_NODISCARD bool operator<(
+    nullptr_t, const unique_ptr<Type, Deleter>& pointer) {
+    return less<typename unique_ptr<Type, Deleter>::pointer>()(
+        nullptr, pointer.get());
+}
+
+template<class Type, class Deleter>
+_ADINKRA_NODISCARD bool operator==(
+    nullptr_t,
+    const unique_ptr<Type, Deleter>& pointer) noexcept {
+    return pointer.get() == nullptr;
+}
+
+template<class Type, class... Arguments,
+         enable_if_t<!is_array_v<Type>, int> = 0>
+_ADINKRA_NODISCARD unique_ptr<Type>
+make_unique(Arguments&&... arguments) {
+    return unique_ptr<Type>(new Type(std::forward<Arguments>(arguments)...));
+}
+
+template<class Type,
+         enable_if_t<is_unbounded_array_v<Type>, int> = 0>
+_ADINKRA_NODISCARD unique_ptr<Type>
+make_unique(size_t size) {
+    using Element = remove_extent_t<Type>;
+    return unique_ptr<Type>(new Element[size]());
+}
+
+template<class Type, class... Arguments,
+         enable_if_t<is_bounded_array_v<Type>, int> = 0>
+void make_unique(Arguments&&...) = delete;
+
+template<class Type,
+         enable_if_t<!is_array_v<Type>, int> = 0>
+_ADINKRA_NODISCARD unique_ptr<Type>
+make_unique_for_overwrite() {
+    return unique_ptr<Type>(new Type);
+}
+
+template<class Type,
+         enable_if_t<is_unbounded_array_v<Type>, int> = 0>
+_ADINKRA_NODISCARD unique_ptr<Type>
+make_unique_for_overwrite(size_t size) {
+    using Element = remove_extent_t<Type>;
+    return unique_ptr<Type>(new Element[size]);
+}
+
+template<class Type, class... Arguments,
+         enable_if_t<is_bounded_array_v<Type>, int> = 0>
+void make_unique_for_overwrite(Arguments&&...) = delete;
+
+namespace __memory_detail {
+
+template<class Type>
+inline constexpr unsigned char deleter_type_tag = 0;
+
+class shared_control {
+public:
+    shared_control() noexcept : strong_(1), weak_(1) {}
+    virtual ~shared_control() = default;
+
+    void add_strong() noexcept {
+        __atomic_add_fetch(&strong_, 1L, __ATOMIC_RELAXED);
+    }
+
+    bool try_add_strong() noexcept {
+        long value = __atomic_load_n(&strong_, __ATOMIC_ACQUIRE);
+        while (value != 0) {
+            if (__atomic_compare_exchange_n(
+                    &strong_, &value, value + 1, true,
+                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void release_strong() noexcept {
+        if (__atomic_sub_fetch(&strong_, 1L, __ATOMIC_ACQ_REL) == 0) {
+            destroy_object();
+            release_weak();
+        }
+    }
+
+    void add_weak() noexcept {
+        __atomic_add_fetch(&weak_, 1L, __ATOMIC_RELAXED);
+    }
+
+    void release_weak() noexcept {
+        if (__atomic_sub_fetch(&weak_, 1L, __ATOMIC_ACQ_REL) == 0) {
+            delete this;
+        }
+    }
+
+    long use_count() const noexcept {
+        return __atomic_load_n(&strong_, __ATOMIC_ACQUIRE);
+    }
+
+    virtual void* get_deleter(const void*) noexcept {
+        return nullptr;
+    }
+
+private:
+    virtual void destroy_object() noexcept = 0;
+
+    long strong_;
+    long weak_;
+};
+
+template<class Type, class Deleter>
+class pointer_control final : public shared_control {
+public:
+    pointer_control(Type* pointer, Deleter deleter)
+        : pointer_(pointer), deleter_(std::move(deleter)) {}
+
+    void* get_deleter(const void* tag) noexcept override {
+        using stored_deleter = remove_cv_t<Deleter>;
+        return tag == std::addressof(
+                          deleter_type_tag<stored_deleter>)
+            ? std::addressof(deleter_)
+            : nullptr;
+    }
+
+private:
+    void destroy_object() noexcept override {
+        deleter_(pointer_);
+    }
+
+    Type* pointer_;
+    [[no_unique_address]] Deleter deleter_;
+};
+
+template<class Type>
+class inplace_control final : public shared_control {
+public:
+    template<class... Arguments>
+    explicit inplace_control(Arguments&&... arguments)
+        : object_(std::forward<Arguments>(arguments)...) {}
+
+    Type* pointer() noexcept {
+        return std::addressof(object_);
+    }
+
+private:
+    void destroy_object() noexcept override {
+        object_.~Type();
+        object_destroyed_ = true;
+    }
+
+    ~inplace_control() override {
+        if (!object_destroyed_) {
+            object_.~Type();
+        }
+    }
+
+    union {
+        Type object_;
+    };
+    bool object_destroyed_ = false;
+};
+
+} // namespace __memory_detail
+
+template<class Type>
+class weak_ptr;
+
+template<class Type>
+class enable_shared_from_this;
+
+class bad_weak_ptr : public exception {
+public:
+    const char* what() const noexcept override {
+        return "std::bad_weak_ptr";
+    }
+};
+
+template<class Type>
+class shared_ptr {
+public:
+    using element_type = Type;
+
+    constexpr shared_ptr() noexcept : pointer_(nullptr), control_(nullptr) {}
+    constexpr shared_ptr(nullptr_t) noexcept : shared_ptr() {}
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    explicit shared_ptr(Other* pointer)
+        : pointer_(pointer),
+          control_(pointer == nullptr
+              ? nullptr
+              : new __memory_detail::pointer_control<
+                    Other, default_delete<Other>>(
+                    pointer, default_delete<Other>{})) {
+        initialize_enable_shared(pointer);
+    }
+
+    template<class Other, class Deleter>
+        requires is_convertible_v<Other*, Type*>
+    shared_ptr(Other* pointer, Deleter deleter)
+        : pointer_(pointer),
+          control_(new __memory_detail::pointer_control<Other, Deleter>(
+              pointer, std::move(deleter))) {
+        initialize_enable_shared(pointer);
+    }
+
+    shared_ptr(const shared_ptr& other) noexcept
+        : pointer_(other.pointer_), control_(other.control_) {
+        add_reference();
+    }
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    shared_ptr(const shared_ptr<Other>& other) noexcept
+        : pointer_(other.pointer_), control_(other.control_) {
+        add_reference();
+    }
+
+    shared_ptr(shared_ptr&& other) noexcept
+        : pointer_(std::exchange(other.pointer_, nullptr)),
+          control_(std::exchange(other.control_, nullptr)) {}
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    shared_ptr(shared_ptr<Other>&& other) noexcept
+        : pointer_(std::exchange(other.pointer_, nullptr)),
+          control_(std::exchange(other.control_, nullptr)) {}
+
+    template<class Other, class Deleter>
+        requires is_convertible_v<Other*, Type*>
+    shared_ptr(unique_ptr<Other, Deleter>&& other)
+        : pointer_(other.get()),
+          control_(pointer_ == nullptr
+              ? nullptr
+              : new __memory_detail::pointer_control<
+                    Other, remove_reference_t<Deleter>>(
+                    other.get(),
+                    std::forward<Deleter>(other.get_deleter()))) {
+        other.release();
+        initialize_enable_shared(pointer_);
+    }
+
+    template<class Other>
+    shared_ptr(const shared_ptr<Other>& owner, Type* pointer) noexcept
+        : pointer_(pointer), control_(owner.control_) {
+        add_reference();
+    }
+
+    explicit shared_ptr(const weak_ptr<Type>& weak)
+        : pointer_(weak.pointer_), control_(weak.control_) {
+        if (control_ == nullptr || !control_->try_add_strong()) {
+            pointer_ = nullptr;
+            control_ = nullptr;
+            throw bad_weak_ptr();
+        }
+    }
+
+    ~shared_ptr() {
+        if (control_ != nullptr) {
+            control_->release_strong();
+        }
+    }
+
+    shared_ptr& operator=(const shared_ptr& other) noexcept {
+        shared_ptr replacement(other);
+        swap(replacement);
+        return *this;
+    }
+
+    shared_ptr& operator=(shared_ptr&& other) noexcept {
+        shared_ptr replacement(std::move(other));
+        swap(replacement);
+        return *this;
+    }
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    shared_ptr& operator=(const shared_ptr<Other>& other) noexcept {
+        shared_ptr replacement(other);
+        swap(replacement);
+        return *this;
+    }
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    shared_ptr& operator=(shared_ptr<Other>&& other) noexcept {
+        shared_ptr replacement(std::move(other));
+        swap(replacement);
+        return *this;
+    }
+
+    void reset() noexcept {
+        shared_ptr().swap(*this);
+    }
+
+    template<class Other>
+    void reset(Other* pointer) {
+        shared_ptr(pointer).swap(*this);
+    }
+
+    template<class Other, class Deleter>
+    void reset(Other* pointer, Deleter deleter) {
+        shared_ptr(pointer, std::move(deleter)).swap(*this);
+    }
+
+    void swap(shared_ptr& other) noexcept {
+        std::swap(pointer_, other.pointer_);
+        std::swap(control_, other.control_);
+    }
+
+    Type* get() const noexcept { return pointer_; }
+
+    template<class Value = Type>
+        requires (!is_void_v<Value>)
+    Value& operator*() const noexcept {
+        return *pointer_;
+    }
+
+    Type* operator->() const noexcept { return pointer_; }
+    explicit operator bool() const noexcept { return pointer_ != nullptr; }
+
+    long use_count() const noexcept {
+        return control_ == nullptr ? 0 : control_->use_count();
+    }
+
+    bool unique() const noexcept {
+        return use_count() == 1;
+    }
+
+    template<class Other>
+    bool owner_before(const shared_ptr<Other>& other) const noexcept {
+        return reinterpret_cast<uintptr_t>(control_) <
+               reinterpret_cast<uintptr_t>(other.control_);
+    }
+
+    template<class Other>
+    bool owner_before(const weak_ptr<Other>& other) const noexcept {
+        return reinterpret_cast<uintptr_t>(control_) <
+               reinterpret_cast<uintptr_t>(other.control_);
+    }
+
+private:
+    template<class>
+    friend class shared_ptr;
+    template<class>
+    friend class weak_ptr;
+    template<class>
+    friend class enable_shared_from_this;
+    template<class Other, class... Arguments>
+    friend shared_ptr<Other> make_shared(Arguments&&...);
+    template<class Deleter, class Other>
+    friend Deleter* get_deleter(
+        const shared_ptr<Other>&) noexcept;
+
+    shared_ptr(Type* pointer, __memory_detail::shared_control* control) noexcept
+        : pointer_(pointer), control_(control) {}
+
+    void add_reference() noexcept {
+        if (control_ != nullptr) {
+            control_->add_strong();
+        }
+    }
+
+    template<class Other>
+    void initialize_enable_shared(Other* pointer) noexcept {
+        if constexpr (requires {
+                          __adinkra_enable_shared_base(pointer);
+                      }) {
+            auto* base = __adinkra_enable_shared_base(pointer);
+            using Enabled =
+                typename remove_pointer_t<decltype(base)>::__element_type;
+            if (base != nullptr && base->weak_this_.expired()) {
+                shared_ptr<Enabled> owner(
+                    *this, static_cast<Enabled*>(pointer));
+                base->weak_this_ = weak_ptr<Enabled>(owner);
+            }
+        }
+    }
+
+    Type* pointer_;
+    __memory_detail::shared_control* control_;
+};
+
+_ADINKRA_EXPORT void
+__adinkra_shared_ptr_atomic_lock() noexcept;
+_ADINKRA_EXPORT void
+__adinkra_shared_ptr_atomic_unlock() noexcept;
+
+template<class Type>
+bool atomic_is_lock_free(
+    const shared_ptr<Type>*) noexcept {
+    return false;
+}
+
+template<class Type>
+shared_ptr<Type> atomic_load_explicit(
+    const shared_ptr<Type>* pointer,
+    memory_order) noexcept {
+    __adinkra_shared_ptr_atomic_lock();
+    shared_ptr<Type> result(*pointer);
+    __adinkra_shared_ptr_atomic_unlock();
+    return result;
+}
+
+template<class Type>
+shared_ptr<Type> atomic_load(
+    const shared_ptr<Type>* pointer) noexcept {
+    return std::atomic_load_explicit(
+        pointer, memory_order_seq_cst);
+}
+
+template<class Type>
+void atomic_store_explicit(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type> desired,
+    memory_order) noexcept {
+    __adinkra_shared_ptr_atomic_lock();
+    pointer->swap(desired);
+    __adinkra_shared_ptr_atomic_unlock();
+}
+
+template<class Type>
+void atomic_store(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type> desired) noexcept {
+    std::atomic_store_explicit(
+        pointer, std::move(desired), memory_order_seq_cst);
+}
+
+template<class Type>
+shared_ptr<Type> atomic_exchange_explicit(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type> desired,
+    memory_order) noexcept {
+    __adinkra_shared_ptr_atomic_lock();
+    pointer->swap(desired);
+    __adinkra_shared_ptr_atomic_unlock();
+    return desired;
+}
+
+template<class Type>
+shared_ptr<Type> atomic_exchange(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type> desired) noexcept {
+    return std::atomic_exchange_explicit(
+        pointer, std::move(desired), memory_order_seq_cst);
+}
+
+template<class Type>
+bool __shared_ptr_atomic_equivalent(
+    const shared_ptr<Type>& left,
+    const shared_ptr<Type>& right) noexcept {
+    return left.get() == right.get() &&
+           !left.owner_before(right) &&
+           !right.owner_before(left);
+}
+
+template<class Type>
+bool atomic_compare_exchange_strong_explicit(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type>* expected,
+    shared_ptr<Type> desired,
+    memory_order,
+    memory_order) noexcept {
+    __adinkra_shared_ptr_atomic_lock();
+    const bool equal =
+        std::__shared_ptr_atomic_equivalent(*pointer, *expected);
+    if (equal) {
+        pointer->swap(desired);
+    } else {
+        *expected = *pointer;
+    }
+    __adinkra_shared_ptr_atomic_unlock();
+    return equal;
+}
+
+template<class Type>
+bool atomic_compare_exchange_weak_explicit(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type>* expected,
+    shared_ptr<Type> desired,
+    memory_order success,
+    memory_order failure) noexcept {
+    return std::atomic_compare_exchange_strong_explicit(
+        pointer, expected, std::move(desired), success, failure);
+}
+
+template<class Type>
+bool atomic_compare_exchange_strong(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type>* expected,
+    shared_ptr<Type> desired) noexcept {
+    return std::atomic_compare_exchange_strong_explicit(
+        pointer,
+        expected,
+        std::move(desired),
+        memory_order_seq_cst,
+        memory_order_seq_cst);
+}
+
+template<class Type>
+bool atomic_compare_exchange_weak(
+    shared_ptr<Type>* pointer,
+    shared_ptr<Type>* expected,
+    shared_ptr<Type> desired) noexcept {
+    return std::atomic_compare_exchange_weak_explicit(
+        pointer,
+        expected,
+        std::move(desired),
+        memory_order_seq_cst,
+        memory_order_seq_cst);
+}
+
+template<class Deleter, class Type>
+_ADINKRA_NODISCARD Deleter*
+get_deleter(const shared_ptr<Type>& pointer) noexcept {
+    if (pointer.control_ == nullptr) {
+        return nullptr;
+    }
+    using queried_deleter = remove_cv_t<Deleter>;
+    return static_cast<Deleter*>(
+        pointer.control_->get_deleter(std::addressof(
+            __memory_detail::deleter_type_tag<queried_deleter>)));
+}
+
+template<class Type>
+class weak_ptr {
+public:
+    using element_type = remove_extent_t<Type>;
+
+    constexpr weak_ptr() noexcept : pointer_(nullptr), control_(nullptr) {}
+
+    weak_ptr(const weak_ptr& other) noexcept
+        : pointer_(other.pointer_), control_(other.control_) {
+        add_reference();
+    }
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    weak_ptr(const weak_ptr<Other>& other) noexcept
+        : pointer_(other.pointer_), control_(other.control_) {
+        add_reference();
+    }
+
+    template<class Other>
+        requires is_convertible_v<Other*, Type*>
+    weak_ptr(const shared_ptr<Other>& other) noexcept
+        : pointer_(other.pointer_), control_(other.control_) {
+        add_reference();
+    }
+
+    weak_ptr(weak_ptr&& other) noexcept
+        : pointer_(std::exchange(other.pointer_, nullptr)),
+          control_(std::exchange(other.control_, nullptr)) {}
+
+    ~weak_ptr() {
+        if (control_ != nullptr) {
+            control_->release_weak();
+        }
+    }
+
+    weak_ptr& operator=(const weak_ptr& other) noexcept {
+        weak_ptr replacement(other);
+        swap(replacement);
+        return *this;
+    }
+
+    void reset() noexcept {
+        weak_ptr().swap(*this);
+    }
+
+    void swap(weak_ptr& other) noexcept {
+        std::swap(pointer_, other.pointer_);
+        std::swap(control_, other.control_);
+    }
+
+    long use_count() const noexcept {
+        return control_ == nullptr ? 0 : control_->use_count();
+    }
+
+    bool expired() const noexcept {
+        return use_count() == 0;
+    }
+
+    shared_ptr<Type> lock() const noexcept {
+        if (control_ != nullptr && control_->try_add_strong()) {
+            return shared_ptr<Type>(pointer_, control_);
+        }
+        return shared_ptr<Type>();
+    }
+
+    template<class Other>
+    bool owner_before(const shared_ptr<Other>& other) const noexcept {
+        return reinterpret_cast<uintptr_t>(control_) <
+               reinterpret_cast<uintptr_t>(other.control_);
+    }
+
+    template<class Other>
+    bool owner_before(const weak_ptr<Other>& other) const noexcept {
+        return reinterpret_cast<uintptr_t>(control_) <
+               reinterpret_cast<uintptr_t>(other.control_);
+    }
+
+private:
+    template<class>
+    friend class weak_ptr;
+    template<class>
+    friend class shared_ptr;
+
+    void add_reference() noexcept {
+        if (control_ != nullptr) {
+            control_->add_weak();
+        }
+    }
+
+    Type* pointer_;
+    __memory_detail::shared_control* control_;
+};
+
+template<class Type = void>
+struct owner_less;
+
+template<class Type>
+struct owner_less<shared_ptr<Type>> {
+    bool operator()(
+        const shared_ptr<Type>& left,
+        const shared_ptr<Type>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    bool operator()(
+        const shared_ptr<Type>& left,
+        const weak_ptr<Type>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    bool operator()(
+        const weak_ptr<Type>& left,
+        const shared_ptr<Type>& right) const noexcept {
+        return left.owner_before(right);
+    }
+};
+
+template<class Type>
+struct owner_less<weak_ptr<Type>> {
+    bool operator()(
+        const weak_ptr<Type>& left,
+        const weak_ptr<Type>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    bool operator()(
+        const shared_ptr<Type>& left,
+        const weak_ptr<Type>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    bool operator()(
+        const weak_ptr<Type>& left,
+        const shared_ptr<Type>& right) const noexcept {
+        return left.owner_before(right);
+    }
+};
+
+template<>
+struct owner_less<void> {
+    using is_transparent = void;
+
+    template<class Left, class Right>
+    bool operator()(
+        const shared_ptr<Left>& left,
+        const shared_ptr<Right>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    template<class Left, class Right>
+    bool operator()(
+        const shared_ptr<Left>& left,
+        const weak_ptr<Right>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    template<class Left, class Right>
+    bool operator()(
+        const weak_ptr<Left>& left,
+        const shared_ptr<Right>& right) const noexcept {
+        return left.owner_before(right);
+    }
+
+    template<class Left, class Right>
+    bool operator()(
+        const weak_ptr<Left>& left,
+        const weak_ptr<Right>& right) const noexcept {
+        return left.owner_before(right);
+    }
+};
+
+template<class Type>
+class enable_shared_from_this {
+public:
+    shared_ptr<Type> shared_from_this() {
+        return shared_ptr<Type>(weak_this_);
+    }
+
+    shared_ptr<const Type> shared_from_this() const {
+        return shared_ptr<Type>(weak_this_);
+    }
+
+    weak_ptr<Type> weak_from_this() noexcept {
+        return weak_this_;
+    }
+
+    weak_ptr<const Type> weak_from_this() const noexcept {
+        return weak_this_;
+    }
+
+protected:
+    constexpr enable_shared_from_this() noexcept = default;
+    enable_shared_from_this(
+        const enable_shared_from_this&) noexcept {}
+    enable_shared_from_this& operator=(
+        const enable_shared_from_this&) noexcept {
+        return *this;
+    }
+    ~enable_shared_from_this() = default;
+
+private:
+    using __element_type = Type;
+
+    template<class>
+    friend class shared_ptr;
+
+    friend enable_shared_from_this*
+    __adinkra_enable_shared_base(
+        enable_shared_from_this* base) noexcept {
+        return base;
+    }
+
+    mutable weak_ptr<Type> weak_this_;
+};
+
+template<class Type, class... Arguments>
+_ADINKRA_NODISCARD shared_ptr<Type>
+make_shared(Arguments&&... arguments) {
+    auto* control = new __memory_detail::inplace_control<Type>(
+        std::forward<Arguments>(arguments)...);
+    shared_ptr<Type> result(
+        control->pointer(),
+        static_cast<__memory_detail::shared_control*>(control));
+    result.initialize_enable_shared(control->pointer());
+    return result;
+}
+
+template<class Type, class Allocator, class... Arguments>
+_ADINKRA_NODISCARD shared_ptr<Type>
+allocate_shared(
+    const Allocator& allocator_value, Arguments&&... arguments) {
+    (void)allocator_value;
+    return std::make_shared<Type>(
+        std::forward<Arguments>(arguments)...);
+}
+
+template<class To, class From>
+shared_ptr<To> static_pointer_cast(
+    const shared_ptr<From>& pointer) noexcept {
+    return shared_ptr<To>(
+        pointer, static_cast<To*>(pointer.get()));
+}
+
+template<class To, class From>
+shared_ptr<To> const_pointer_cast(
+    const shared_ptr<From>& pointer) noexcept {
+    return shared_ptr<To>(
+        pointer, const_cast<To*>(pointer.get()));
+}
+
+template<class To, class From>
+shared_ptr<To> reinterpret_pointer_cast(
+    const shared_ptr<From>& pointer) noexcept {
+    return shared_ptr<To>(
+        pointer, reinterpret_cast<To*>(pointer.get()));
+}
+
+template<class To, class From>
+shared_ptr<To> dynamic_pointer_cast(
+    const shared_ptr<From>& pointer) noexcept {
+    To* converted = dynamic_cast<To*>(pointer.get());
+    return converted == nullptr
+               ? shared_ptr<To>()
+               : shared_ptr<To>(pointer, converted);
+}
+
+template<class Type, class Deleter>
+void swap(unique_ptr<Type, Deleter>& left,
+          unique_ptr<Type, Deleter>& right) noexcept {
+    left.swap(right);
+}
+
+template<class Type>
+void swap(shared_ptr<Type>& left, shared_ptr<Type>& right) noexcept {
+    left.swap(right);
+}
+
+template<class Type>
+void swap(weak_ptr<Type>& left, weak_ptr<Type>& right) noexcept {
+    left.swap(right);
+}
+
+template<class Left, class Right>
+bool operator==(const shared_ptr<Left>& left,
+                const shared_ptr<Right>& right) noexcept {
+    return left.get() == right.get();
+}
+
+template<class Left, class Right>
+bool operator<(const shared_ptr<Left>& left,
+               const shared_ptr<Right>& right) noexcept {
+    return reinterpret_cast<uintptr_t>(left.get()) <
+           reinterpret_cast<uintptr_t>(right.get());
+}
+
+template<class Left, class Right>
+bool operator>(const shared_ptr<Left>& left,
+               const shared_ptr<Right>& right) noexcept {
+    return right < left;
+}
+
+template<class Left, class Right>
+bool operator<=(const shared_ptr<Left>& left,
+                const shared_ptr<Right>& right) noexcept {
+    return !(right < left);
+}
+
+template<class Left, class Right>
+bool operator>=(const shared_ptr<Left>& left,
+                const shared_ptr<Right>& right) noexcept {
+    return !(left < right);
+}
+
+template<class Type>
+bool operator==(const shared_ptr<Type>& pointer, nullptr_t) noexcept {
+    return pointer.get() == nullptr;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

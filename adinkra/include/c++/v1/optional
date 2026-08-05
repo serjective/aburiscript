@@ -1,0 +1,1015 @@
+#ifndef ADINKRA_OPTIONAL
+#define ADINKRA_OPTIONAL
+
+#include <__adinkra/config>
+#include <compare>
+#include <concepts>
+#include <exception>
+#include <initializer_list>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+#if __cplusplus >= 202302L
+#include <functional>
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct nullopt_t {
+    struct tag {};
+    explicit constexpr nullopt_t(tag) noexcept {}
+};
+
+inline constexpr nullopt_t nullopt{nullopt_t::tag{}};
+
+class bad_optional_access : public exception {
+public:
+    const char* what() const noexcept override {
+        return "bad optional access";
+    }
+};
+
+template<class Type>
+class optional;
+
+template<class Type>
+inline constexpr bool __is_optional_specialization_v = false;
+
+template<class Type>
+inline constexpr bool
+__is_optional_specialization_v<optional<Type>> = true;
+
+#if __cplusplus >= 202302L
+struct __optional_construct_from_invoke_t {};
+#endif
+
+template<class Type, class Other>
+inline constexpr bool __optional_constructs_from_optional_v =
+    is_constructible_v<Type, optional<Other>&> ||
+    is_constructible_v<Type, const optional<Other>&> ||
+    is_constructible_v<Type, optional<Other>&&> ||
+    is_constructible_v<Type, const optional<Other>&&> ||
+    is_convertible_v<optional<Other>&, Type> ||
+    is_convertible_v<const optional<Other>&, Type> ||
+    is_convertible_v<optional<Other>&&, Type> ||
+    is_convertible_v<const optional<Other>&&, Type>;
+
+template<class Type, bool = is_trivially_destructible_v<Type>>
+class __optional_storage;
+
+template<class Type>
+class __optional_storage<Type, true> {
+protected:
+    constexpr __optional_storage() noexcept
+        : empty_(), engaged_(false) {}
+
+    template<class... Arguments>
+    constexpr explicit __optional_storage(
+        in_place_t, Arguments&&... arguments)
+        : value_(std::forward<Arguments>(arguments)...),
+          engaged_(true) {}
+
+#if __cplusplus >= 202302L
+    template<class Function, class Value>
+    constexpr __optional_storage(
+        __optional_construct_from_invoke_t,
+        Function&& function, Value&& value)
+        : value_(std::invoke(
+              std::forward<Function>(function),
+              std::forward<Value>(value))),
+          engaged_(true) {}
+#endif
+
+    constexpr __optional_storage(
+        const __optional_storage&) = default;
+    constexpr __optional_storage(
+        __optional_storage&&) = default;
+    constexpr __optional_storage& operator=(
+        const __optional_storage&) = default;
+    constexpr __optional_storage& operator=(
+        __optional_storage&&) = default;
+    constexpr ~__optional_storage() = default;
+
+    union {
+        unsigned char empty_;
+        Type value_;
+    };
+    bool engaged_;
+};
+
+template<class Type>
+class __optional_storage<Type, false> {
+protected:
+    constexpr __optional_storage() noexcept
+        : empty_(), engaged_(false) {}
+
+    template<class... Arguments>
+    constexpr explicit __optional_storage(
+        in_place_t, Arguments&&... arguments)
+        : value_(std::forward<Arguments>(arguments)...),
+          engaged_(true) {}
+
+#if __cplusplus >= 202302L
+    template<class Function, class Value>
+    constexpr __optional_storage(
+        __optional_construct_from_invoke_t,
+        Function&& function, Value&& value)
+        : value_(std::invoke(
+              std::forward<Function>(function),
+              std::forward<Value>(value))),
+          engaged_(true) {}
+#endif
+
+    constexpr __optional_storage(
+        const __optional_storage&) = default;
+    constexpr __optional_storage(
+        __optional_storage&&) = default;
+    constexpr __optional_storage& operator=(
+        const __optional_storage&) = default;
+    constexpr __optional_storage& operator=(
+        __optional_storage&&) = default;
+    constexpr ~__optional_storage() {
+        if (engaged_)
+            std::destroy_at(std::addressof(value_));
+    }
+
+    union {
+        unsigned char empty_;
+        Type value_;
+    };
+    bool engaged_;
+};
+
+template<class Type,
+         bool = is_copy_constructible_v<Type>,
+         bool = is_trivially_copy_constructible_v<Type>>
+class __optional_copy_base;
+
+template<class Type>
+class __optional_copy_base<Type, true, true>
+    : public __optional_storage<Type> {
+protected:
+    using __optional_storage<Type>::__optional_storage;
+
+    constexpr __optional_copy_base() = default;
+    constexpr __optional_copy_base(
+        const __optional_copy_base&) = default;
+    constexpr __optional_copy_base(
+        __optional_copy_base&&) = default;
+    constexpr __optional_copy_base& operator=(
+        const __optional_copy_base&) = default;
+    constexpr __optional_copy_base& operator=(
+        __optional_copy_base&&) = default;
+};
+
+template<class Type>
+class __optional_copy_base<Type, true, false>
+    : public __optional_storage<Type> {
+protected:
+    using __base = __optional_storage<Type>;
+    using __base::__base;
+
+    constexpr __optional_copy_base() = default;
+
+    constexpr __optional_copy_base(
+        const __optional_copy_base& other)
+        : __base() {
+        if (other.engaged_) {
+            std::construct_at(
+                std::addressof(this->value_), other.value_);
+            this->engaged_ = true;
+        }
+    }
+
+    constexpr __optional_copy_base(
+        __optional_copy_base&&) = default;
+    constexpr __optional_copy_base& operator=(
+        const __optional_copy_base&) = default;
+    constexpr __optional_copy_base& operator=(
+        __optional_copy_base&&) = default;
+};
+
+template<class Type, bool Trivial>
+class __optional_copy_base<Type, false, Trivial>
+    : public __optional_storage<Type> {
+protected:
+    using __optional_storage<Type>::__optional_storage;
+
+    constexpr __optional_copy_base() = default;
+    __optional_copy_base(const __optional_copy_base&) = delete;
+    constexpr __optional_copy_base(
+        __optional_copy_base&&) = default;
+    __optional_copy_base& operator=(
+        const __optional_copy_base&) = delete;
+    constexpr __optional_copy_base& operator=(
+        __optional_copy_base&&) = default;
+};
+
+template<class Type,
+         bool = is_move_constructible_v<Type>,
+         bool = is_trivially_move_constructible_v<Type>>
+class __optional_move_base;
+
+template<class Type>
+class __optional_move_base<Type, true, true>
+    : public __optional_copy_base<Type> {
+protected:
+    using __optional_copy_base<Type>::__optional_copy_base;
+
+    constexpr __optional_move_base() = default;
+    constexpr __optional_move_base(
+        const __optional_move_base&) = default;
+    constexpr __optional_move_base(
+        __optional_move_base&&) = default;
+    constexpr __optional_move_base& operator=(
+        const __optional_move_base&) = default;
+    constexpr __optional_move_base& operator=(
+        __optional_move_base&&) = default;
+};
+
+template<class Type>
+class __optional_move_base<Type, true, false>
+    : public __optional_copy_base<Type> {
+protected:
+    using __base = __optional_copy_base<Type>;
+    using __base::__base;
+
+    constexpr __optional_move_base() = default;
+    constexpr __optional_move_base(
+        const __optional_move_base&) = default;
+
+    constexpr __optional_move_base(
+        __optional_move_base&& other)
+        noexcept(is_nothrow_move_constructible_v<Type>)
+        : __base() {
+        if (other.engaged_) {
+            std::construct_at(
+                std::addressof(this->value_),
+                std::move(other.value_));
+            this->engaged_ = true;
+        }
+    }
+
+    constexpr __optional_move_base& operator=(
+        const __optional_move_base&) = default;
+    constexpr __optional_move_base& operator=(
+        __optional_move_base&&) = default;
+};
+
+template<class Type, bool Trivial>
+class __optional_move_base<Type, false, Trivial>
+    : public __optional_copy_base<Type> {
+protected:
+    using __optional_copy_base<Type>::__optional_copy_base;
+
+    constexpr __optional_move_base() = default;
+    constexpr __optional_move_base(
+        const __optional_move_base&) = default;
+    __optional_move_base(__optional_move_base&&) = delete;
+    constexpr __optional_move_base& operator=(
+        const __optional_move_base&) = default;
+    __optional_move_base& operator=(
+        __optional_move_base&&) = delete;
+};
+
+template<class Type>
+class optional : private __optional_move_base<Type> {
+    static_assert(!is_reference_v<Type>);
+    static_assert(!is_same_v<remove_cv_t<Type>, nullopt_t>);
+    static_assert(!is_same_v<remove_cv_t<Type>, in_place_t>);
+
+    using __base = __optional_move_base<Type>;
+    using __base::engaged_;
+    using __base::value_;
+
+public:
+    using value_type = Type;
+
+    constexpr optional() noexcept = default;
+    constexpr optional(nullopt_t) noexcept : optional() {}
+
+    constexpr optional(const optional&) = default;
+    constexpr optional(optional&&)
+        noexcept(is_nothrow_move_constructible_v<Type>) = default;
+
+    template<class Other>
+        requires (!is_same_v<Type, Other>) &&
+                 is_constructible_v<Type, const Other&> &&
+                 (is_same_v<remove_cv_t<Type>, bool> ||
+                  !__optional_constructs_from_optional_v<Type, Other>)
+    constexpr explicit(!is_convertible_v<const Other&, Type>)
+    optional(const optional<Other>& other)
+        : __base() {
+        if (other.has_value()) {
+            std::construct_at(
+                std::addressof(this->value_), *other);
+            this->engaged_ = true;
+        }
+    }
+
+    template<class Other>
+        requires (!is_same_v<Type, Other>) &&
+                 is_constructible_v<Type, Other> &&
+                 (is_same_v<remove_cv_t<Type>, bool> ||
+                  !__optional_constructs_from_optional_v<Type, Other>)
+    constexpr explicit(!is_convertible_v<Other, Type>)
+    optional(optional<Other>&& other)
+        : __base() {
+        if (other.has_value()) {
+            std::construct_at(
+                std::addressof(this->value_), std::move(*other));
+            this->engaged_ = true;
+        }
+    }
+
+    template<class Value = Type>
+        requires (!is_same_v<remove_cvref_t<Value>, optional>) &&
+                 (!is_same_v<remove_cvref_t<Value>, in_place_t>) &&
+                 is_constructible_v<Type, Value>
+    constexpr explicit(!is_convertible_v<Value, Type>)
+    optional(Value&& value)
+        : __base(in_place, std::forward<Value>(value)) {}
+
+    template<class... Arguments>
+        requires is_constructible_v<Type, Arguments...>
+    constexpr explicit optional(in_place_t, Arguments&&... arguments)
+        : __base(
+              in_place, std::forward<Arguments>(arguments)...) {}
+
+    template<class Element, class... Arguments>
+        requires is_constructible_v<
+            Type, initializer_list<Element>&, Arguments...>
+    constexpr explicit optional(
+        in_place_t, initializer_list<Element> values,
+        Arguments&&... arguments)
+        : __base(
+              in_place, values,
+              std::forward<Arguments>(arguments)...) {}
+
+    constexpr ~optional() = default;
+
+    constexpr optional& operator=(nullopt_t) noexcept {
+        reset();
+        return *this;
+    }
+
+    constexpr optional& operator=(const optional&)
+        requires is_trivially_copy_constructible_v<Type> &&
+                 is_trivially_copy_assignable_v<Type> &&
+                 is_trivially_destructible_v<Type> = default;
+
+    constexpr optional& operator=(const optional& other)
+        requires is_copy_constructible_v<Type> &&
+                 is_copy_assignable_v<Type> &&
+                 (!(is_trivially_copy_constructible_v<Type> &&
+                    is_trivially_copy_assignable_v<Type> &&
+                    is_trivially_destructible_v<Type>)) {
+        if (engaged_ && other.engaged_) {
+            value_ = other.value_;
+        } else if (other.engaged_) {
+            std::construct_at(std::addressof(value_), other.value_);
+            engaged_ = true;
+        } else {
+            reset();
+        }
+        return *this;
+    }
+
+    constexpr optional& operator=(optional&&)
+        noexcept(is_nothrow_move_constructible_v<Type> &&
+                 is_nothrow_move_assignable_v<Type>)
+        requires is_trivially_move_constructible_v<Type> &&
+                 is_trivially_move_assignable_v<Type> &&
+                 is_trivially_destructible_v<Type> = default;
+
+    constexpr optional& operator=(optional&& other)
+        noexcept(is_nothrow_move_constructible_v<Type> &&
+                 is_nothrow_move_assignable_v<Type>)
+        requires is_move_constructible_v<Type> &&
+                 is_move_assignable_v<Type> &&
+                 (!(is_trivially_move_constructible_v<Type> &&
+                    is_trivially_move_assignable_v<Type> &&
+                    is_trivially_destructible_v<Type>)) {
+        if (engaged_ && other.engaged_) {
+            value_ = std::move(other.value_);
+        } else if (other.engaged_) {
+            std::construct_at(
+                std::addressof(value_), std::move(other.value_));
+            engaged_ = true;
+        } else {
+            reset();
+        }
+        return *this;
+    }
+
+    template<class Other>
+        requires (!is_same_v<Type, Other>) &&
+                 is_constructible_v<Type, const Other&> &&
+                 is_assignable_v<Type&, const Other&> &&
+                 (!__optional_constructs_from_optional_v<Type, Other>) &&
+                 (!is_assignable_v<Type&, optional<Other>&>) &&
+                 (!is_assignable_v<Type&, optional<Other>&&>) &&
+                 (!is_assignable_v<Type&, const optional<Other>&>) &&
+                 (!is_assignable_v<Type&, const optional<Other>&&>)
+    constexpr optional& operator=(const optional<Other>& other) {
+        if (engaged_ && other.has_value()) {
+            value_ = *other;
+        } else if (other.has_value()) {
+            std::construct_at(std::addressof(value_), *other);
+            engaged_ = true;
+        } else {
+            reset();
+        }
+        return *this;
+    }
+
+    template<class Other>
+        requires (!is_same_v<Type, Other>) &&
+                 is_constructible_v<Type, Other> &&
+                 is_assignable_v<Type&, Other> &&
+                 (!__optional_constructs_from_optional_v<Type, Other>) &&
+                 (!is_assignable_v<Type&, optional<Other>&>) &&
+                 (!is_assignable_v<Type&, optional<Other>&&>) &&
+                 (!is_assignable_v<Type&, const optional<Other>&>) &&
+                 (!is_assignable_v<Type&, const optional<Other>&&>)
+    constexpr optional& operator=(optional<Other>&& other) {
+        if (engaged_ && other.has_value()) {
+            value_ = std::move(*other);
+        } else if (other.has_value()) {
+            std::construct_at(
+                std::addressof(value_), std::move(*other));
+            engaged_ = true;
+        } else {
+            reset();
+        }
+        return *this;
+    }
+
+    template<class Value = Type>
+        requires (!is_same_v<remove_cvref_t<Value>, optional>) &&
+                 is_constructible_v<Type, Value> &&
+                 is_assignable_v<Type&, Value>
+    constexpr optional& operator=(Value&& value) {
+        if (engaged_) {
+            value_ = std::forward<Value>(value);
+        } else {
+            std::construct_at(
+                std::addressof(value_), std::forward<Value>(value));
+            engaged_ = true;
+        }
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD constexpr const Type* operator->() const noexcept {
+        return std::addressof(value_);
+    }
+
+    _ADINKRA_NODISCARD constexpr Type* operator->() noexcept {
+        return std::addressof(value_);
+    }
+
+    _ADINKRA_NODISCARD constexpr const Type& operator*() const& noexcept {
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD constexpr Type& operator*() & noexcept {
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD constexpr const Type&& operator*() const&& noexcept {
+        return std::move(value_);
+    }
+
+    _ADINKRA_NODISCARD constexpr Type&& operator*() && noexcept {
+        return std::move(value_);
+    }
+
+    _ADINKRA_NODISCARD constexpr explicit operator bool() const noexcept {
+        return engaged_;
+    }
+
+    _ADINKRA_NODISCARD constexpr bool has_value() const noexcept {
+        return engaged_;
+    }
+
+    _ADINKRA_NODISCARD constexpr const Type& value() const& {
+        if (!engaged_) {
+            throw bad_optional_access();
+        }
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD constexpr Type& value() & {
+        if (!engaged_) {
+            throw bad_optional_access();
+        }
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD constexpr Type&& value() && {
+        if (!engaged_) {
+            throw bad_optional_access();
+        }
+        return std::move(value_);
+    }
+
+    template<class Value>
+    _ADINKRA_NODISCARD constexpr Type value_or(Value&& fallback) const& {
+        return engaged_ ? value_
+                        : static_cast<Type>(std::forward<Value>(fallback));
+    }
+
+    template<class Value>
+    _ADINKRA_NODISCARD constexpr Type value_or(Value&& fallback) && {
+        return engaged_ ? std::move(value_)
+                        : static_cast<Type>(std::forward<Value>(fallback));
+    }
+
+#if __cplusplus >= 202302L
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto and_then(Function&& function) & {
+        using result =
+            remove_cvref_t<invoke_result_t<Function, Type&>>;
+        static_assert(__is_optional_specialization_v<result>);
+        if (engaged_) {
+            return std::invoke(
+                std::forward<Function>(function), value_);
+        }
+        return result();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto and_then(
+        Function&& function) const& {
+        using result =
+            remove_cvref_t<invoke_result_t<Function, const Type&>>;
+        static_assert(__is_optional_specialization_v<result>);
+        if (engaged_) {
+            return std::invoke(
+                std::forward<Function>(function), value_);
+        }
+        return result();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto and_then(Function&& function) && {
+        using result =
+            remove_cvref_t<invoke_result_t<Function, Type&&>>;
+        static_assert(__is_optional_specialization_v<result>);
+        if (engaged_) {
+            return std::invoke(
+                std::forward<Function>(function), std::move(value_));
+        }
+        return result();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto and_then(
+        Function&& function) const&& {
+        using result =
+            remove_cvref_t<invoke_result_t<Function, const Type&&>>;
+        static_assert(__is_optional_specialization_v<result>);
+        if (engaged_) {
+            return std::invoke(
+                std::forward<Function>(function), std::move(value_));
+        }
+        return result();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto transform(Function&& function) & {
+        using result = remove_cv_t<invoke_result_t<Function, Type&>>;
+        static_assert(is_object_v<result>);
+        static_assert(!is_array_v<result>);
+        static_assert(!is_same_v<result, in_place_t>);
+        static_assert(!is_same_v<result, nullopt_t>);
+        if (engaged_) {
+            return optional<result>(
+                __optional_construct_from_invoke_t{},
+                std::forward<Function>(function), value_);
+        }
+        return optional<result>();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto transform(
+        Function&& function) const& {
+        using result =
+            remove_cv_t<invoke_result_t<Function, const Type&>>;
+        static_assert(is_object_v<result>);
+        static_assert(!is_array_v<result>);
+        static_assert(!is_same_v<result, in_place_t>);
+        static_assert(!is_same_v<result, nullopt_t>);
+        if (engaged_) {
+            return optional<result>(
+                __optional_construct_from_invoke_t{},
+                std::forward<Function>(function), value_);
+        }
+        return optional<result>();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto transform(Function&& function) && {
+        using result = remove_cv_t<invoke_result_t<Function, Type&&>>;
+        static_assert(is_object_v<result>);
+        static_assert(!is_array_v<result>);
+        static_assert(!is_same_v<result, in_place_t>);
+        static_assert(!is_same_v<result, nullopt_t>);
+        if (engaged_) {
+            return optional<result>(
+                __optional_construct_from_invoke_t{},
+                std::forward<Function>(function), std::move(value_));
+        }
+        return optional<result>();
+    }
+
+    template<class Function>
+    _ADINKRA_NODISCARD constexpr auto transform(
+        Function&& function) const&& {
+        using result =
+            remove_cv_t<invoke_result_t<Function, const Type&&>>;
+        static_assert(is_object_v<result>);
+        static_assert(!is_array_v<result>);
+        static_assert(!is_same_v<result, in_place_t>);
+        static_assert(!is_same_v<result, nullopt_t>);
+        if (engaged_) {
+            return optional<result>(
+                __optional_construct_from_invoke_t{},
+                std::forward<Function>(function), std::move(value_));
+        }
+        return optional<result>();
+    }
+
+    template<class Function>
+        requires invocable<Function> && copy_constructible<Type>
+    _ADINKRA_NODISCARD constexpr optional or_else(
+        Function&& function) const& {
+        using result = invoke_result_t<Function>;
+        static_assert(is_same_v<remove_cvref_t<result>, optional>);
+        if (engaged_) {
+            return *this;
+        }
+        return std::invoke(std::forward<Function>(function));
+    }
+
+    template<class Function>
+        requires invocable<Function> && move_constructible<Type>
+    _ADINKRA_NODISCARD constexpr optional or_else(
+        Function&& function) && {
+        using result = invoke_result_t<Function>;
+        static_assert(is_same_v<remove_cvref_t<result>, optional>);
+        if (engaged_) {
+            return std::move(*this);
+        }
+        return std::invoke(std::forward<Function>(function));
+    }
+#endif
+
+    template<class... Arguments>
+    constexpr Type& emplace(Arguments&&... arguments) {
+        reset();
+        std::construct_at(
+            std::addressof(value_), std::forward<Arguments>(arguments)...);
+        engaged_ = true;
+        return value_;
+    }
+
+    template<class Element, class... Arguments>
+    constexpr Type& emplace(
+        initializer_list<Element> values,
+        Arguments&&... arguments) {
+        reset();
+        std::construct_at(
+            std::addressof(value_), values,
+            std::forward<Arguments>(arguments)...);
+        engaged_ = true;
+        return value_;
+    }
+
+    constexpr void reset() noexcept {
+        if (engaged_) {
+            std::destroy_at(std::addressof(value_));
+            engaged_ = false;
+        }
+    }
+
+    constexpr void swap(optional& other)
+        noexcept(is_nothrow_move_constructible_v<Type> &&
+                 noexcept(std::swap(declval<Type&>(), declval<Type&>()))) {
+        if (engaged_ && other.engaged_) {
+            std::swap(value_, other.value_);
+        } else if (engaged_) {
+            other.emplace(std::move(value_));
+            reset();
+        } else if (other.engaged_) {
+            emplace(std::move(other.value_));
+            other.reset();
+        }
+    }
+
+private:
+#if __cplusplus >= 202302L
+    template<class>
+    friend class optional;
+
+    template<class Function, class Value>
+    constexpr optional(
+        __optional_construct_from_invoke_t,
+        Function&& function, Value&& value)
+        : __base(
+              __optional_construct_from_invoke_t{},
+              std::forward<Function>(function),
+              std::forward<Value>(value)) {}
+#endif
+};
+
+template<class Type>
+optional(Type) -> optional<Type>;
+
+template<class Type, class... Arguments>
+_ADINKRA_NODISCARD constexpr optional<Type>
+make_optional(Arguments&&... arguments) {
+    return optional<Type>(
+        in_place, std::forward<Arguments>(arguments)...);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr optional<decay_t<Type>>
+make_optional(Type&& value) {
+    return optional<decay_t<Type>>(std::forward<Type>(value));
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        { left == right } -> convertible_to<bool>;
+    }
+_ADINKRA_NODISCARD constexpr bool
+operator==(const optional<Type>& left,
+           const optional<Other>& right) {
+    if (left.has_value() != right.has_value()) {
+        return false;
+    }
+    return !left.has_value() || *left == *right;
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        { left != right } -> convertible_to<bool>;
+    }
+_ADINKRA_NODISCARD constexpr bool
+operator!=(const optional<Type>& left,
+           const optional<Other>& right) {
+    if (left.has_value() != right.has_value()) {
+        return true;
+    }
+    return left.has_value() && *left != *right;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr bool
+operator==(const optional<Type>& value, nullopt_t) noexcept {
+    return !value.has_value();
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 { left == right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator==(const optional<Type>& optional_value,
+           const Value& value) {
+    return optional_value.has_value() && *optional_value == value;
+}
+
+template<class Value, class Type>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Value& left, const Type& right) {
+                 { left == right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator==(const Value& value,
+           const optional<Type>& optional_value) {
+    return optional_value.has_value() && value == *optional_value;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 { left != right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator!=(const optional<Type>& optional_value,
+           const Value& value) {
+    return !optional_value.has_value() || *optional_value != value;
+}
+
+template<class Value, class Type>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Value& left, const Type& right) {
+                 { left != right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator!=(const Value& value,
+           const optional<Type>& optional_value) {
+    return !optional_value.has_value() || value != *optional_value;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 left <=> right;
+             }
+_ADINKRA_NODISCARD constexpr
+compare_three_way_result_t<Type, Value>
+operator<=>(const optional<Type>& optional_value,
+            const Value& value) {
+    if (!optional_value.has_value()) {
+        return strong_ordering::less;
+    }
+    return *optional_value <=> value;
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        left <=> right;
+    }
+_ADINKRA_NODISCARD constexpr
+compare_three_way_result_t<Type, Other>
+operator<=>(const optional<Type>& left,
+            const optional<Other>& right) {
+    if (left.has_value() && right.has_value()) {
+        return *left <=> *right;
+    }
+    if (left.has_value()) {
+        return strong_ordering::greater;
+    }
+    if (right.has_value()) {
+        return strong_ordering::less;
+    }
+    return strong_ordering::equal;
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        { left < right } -> convertible_to<bool>;
+    }
+_ADINKRA_NODISCARD constexpr bool
+operator<(const optional<Type>& left,
+          const optional<Other>& right) {
+    return right.has_value() &&
+           (!left.has_value() || *left < *right);
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        { left <= right } -> convertible_to<bool>;
+    }
+_ADINKRA_NODISCARD constexpr bool
+operator<=(const optional<Type>& left,
+           const optional<Other>& right) {
+    return !left.has_value() ||
+           (right.has_value() && *left <= *right);
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        { left > right } -> convertible_to<bool>;
+    }
+_ADINKRA_NODISCARD constexpr bool
+operator>(const optional<Type>& left,
+          const optional<Other>& right) {
+    return left.has_value() &&
+           (!right.has_value() || *left > *right);
+}
+
+template<class Type, class Other>
+    requires requires(
+        const Type& left, const Other& right) {
+        { left >= right } -> convertible_to<bool>;
+    }
+_ADINKRA_NODISCARD constexpr bool
+operator>=(const optional<Type>& left,
+           const optional<Other>& right) {
+    return right.has_value()
+        ? left.has_value() && *left >= *right
+        : true;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 { left < right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator<(const optional<Type>& left, const Value& right) {
+    return !left.has_value() || *left < right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Value& left, const Type& right) {
+                 { left < right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator<(const Value& left, const optional<Type>& right) {
+    return right.has_value() && left < *right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 { left <= right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator<=(const optional<Type>& left, const Value& right) {
+    return !left.has_value() || *left <= right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Value& left, const Type& right) {
+                 { left <= right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator<=(const Value& left, const optional<Type>& right) {
+    return right.has_value() && left <= *right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 { left > right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator>(const optional<Type>& left, const Value& right) {
+    return left.has_value() && *left > right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Value& left, const Type& right) {
+                 { left > right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator>(const Value& left, const optional<Type>& right) {
+    return !right.has_value() || left > *right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Type& left, const Value& right) {
+                 { left >= right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator>=(const optional<Type>& left, const Value& right) {
+    return left.has_value() && *left >= right;
+}
+
+template<class Type, class Value>
+    requires (!__is_optional_specialization_v<remove_cv_t<Value>>) &&
+             requires(
+                 const Value& left, const Type& right) {
+                 { left >= right } -> convertible_to<bool>;
+             }
+_ADINKRA_NODISCARD constexpr bool
+operator>=(const Value& left, const optional<Type>& right) {
+    return !right.has_value() || left >= *right;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr strong_ordering
+operator<=>(const optional<Type>& value, nullopt_t) noexcept {
+    return value.has_value()
+        ? strong_ordering::greater
+        : strong_ordering::equal;
+}
+
+template<class Type>
+constexpr void swap(optional<Type>& left, optional<Type>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

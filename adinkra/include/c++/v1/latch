@@ -1,0 +1,63 @@
+#ifndef ADINKRA_LATCH
+#define ADINKRA_LATCH
+
+#include <__adinkra/config>
+#include <condition_variable>
+#include <cstddef>
+#include <mutex>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class latch {
+public:
+    static constexpr ptrdiff_t max() noexcept {
+        return __PTRDIFF_MAX__;
+    }
+
+    explicit latch(ptrdiff_t expected)
+        : count_(expected) {}
+
+    latch(const latch&) = delete;
+    latch& operator=(const latch&) = delete;
+
+    void count_down(ptrdiff_t update = 1) {
+        lock_guard<mutex> lock(mutex_);
+        count_ -= update;
+        if (count_ == 0) {
+            condition_.notify_all();
+        }
+    }
+
+    bool try_wait() const noexcept {
+        lock_guard<mutex> lock(mutex_);
+        return count_ == 0;
+    }
+
+    void wait() const {
+        unique_lock<mutex> lock(mutex_);
+        condition_.wait(lock, [this] {
+            return count_ == 0;
+        });
+    }
+
+    void arrive_and_wait(ptrdiff_t update = 1) {
+        unique_lock<mutex> lock(mutex_);
+        count_ -= update;
+        if (count_ == 0) {
+            condition_.notify_all();
+            return;
+        }
+        condition_.wait(lock, [this] {
+            return count_ == 0;
+        });
+    }
+
+private:
+    mutable mutex mutex_;
+    mutable condition_variable condition_;
+    ptrdiff_t count_;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

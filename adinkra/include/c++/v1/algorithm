@@ -1,0 +1,2050 @@
+#ifndef ADINKRA_ALGORITHM
+#define ADINKRA_ALGORITHM
+
+#include <__adinkra/config>
+#include <initializer_list>
+#include <iterator>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type>
+struct less;
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr const Type&
+min(const Type& left, const Type& right) {
+    return right < left ? right : left;
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr const Type&
+min(const Type& left, const Type& right, Compare compare) {
+    return compare(right, left) ? right : left;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr const Type&
+max(const Type& left, const Type& right) {
+    return left < right ? right : left;
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr const Type&
+max(const Type& left, const Type& right, Compare compare) {
+    return compare(left, right) ? right : left;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type
+min(initializer_list<Type> values) {
+    auto best = values.begin();
+    for (auto current = best + 1; current != values.end(); ++current) {
+        if (*current < *best) {
+            best = current;
+        }
+    }
+    return *best;
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr Type
+min(initializer_list<Type> values, Compare compare) {
+    auto best = values.begin();
+    for (auto current = best + 1; current != values.end(); ++current) {
+        if (compare(*current, *best)) {
+            best = current;
+        }
+    }
+    return *best;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type
+max(initializer_list<Type> values) {
+    auto best = values.begin();
+    for (auto current = best + 1; current != values.end(); ++current) {
+        if (*best < *current) {
+            best = current;
+        }
+    }
+    return *best;
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr Type
+max(initializer_list<Type> values, Compare compare) {
+    auto best = values.begin();
+    for (auto current = best + 1; current != values.end(); ++current) {
+        if (compare(*best, *current)) {
+            best = current;
+        }
+    }
+    return *best;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr pair<const Type&, const Type&>
+minmax(const Type& left, const Type& right) {
+    return right < left ? pair<const Type&, const Type&>(right, left)
+                        : pair<const Type&, const Type&>(left, right);
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr pair<const Type&, const Type&>
+minmax(const Type& left, const Type& right, Compare compare) {
+    return compare(right, left)
+        ? pair<const Type&, const Type&>(right, left)
+        : pair<const Type&, const Type&>(left, right);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr pair<Type, Type>
+minmax(initializer_list<Type> values) {
+    auto minimum = values.begin();
+    auto maximum = values.begin();
+    for (auto current = values.begin() + 1;
+         current != values.end(); ++current) {
+        if (*current < *minimum) {
+            minimum = current;
+        }
+        if (!(*current < *maximum)) {
+            maximum = current;
+        }
+    }
+    return {*minimum, *maximum};
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr pair<Type, Type>
+minmax(initializer_list<Type> values, Compare compare) {
+    auto minimum = values.begin();
+    auto maximum = values.begin();
+    for (auto current = values.begin() + 1;
+         current != values.end(); ++current) {
+        if (compare(*current, *minimum)) {
+            minimum = current;
+        }
+        if (!compare(*current, *maximum)) {
+            maximum = current;
+        }
+    }
+    return {*minimum, *maximum};
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr const Type&
+clamp(const Type& value, const Type& low, const Type& high) {
+    return value < low ? low : high < value ? high : value;
+}
+
+template<class Type, class Compare>
+_ADINKRA_NODISCARD constexpr const Type&
+clamp(const Type& value, const Type& low, const Type& high, Compare compare) {
+    return compare(value, low) ? low
+         : compare(high, value) ? high
+                                : value;
+}
+
+template<class InputIterator, class OutputIterator>
+constexpr OutputIterator copy(
+    InputIterator first, InputIterator last, OutputIterator output) {
+    while (first != last) {
+        *output = *first;
+        ++first;
+        ++output;
+    }
+    return output;
+}
+
+template<class BidirectionalIterator, class OutputIterator>
+constexpr OutputIterator reverse_copy(
+    BidirectionalIterator first, BidirectionalIterator last,
+    OutputIterator output) {
+    while (first != last) {
+        *output++ = *--last;
+    }
+    return output;
+}
+
+template<class InputIterator, class Size, class OutputIterator>
+constexpr OutputIterator copy_n(
+    InputIterator first, Size count, OutputIterator output) {
+    while (count-- > 0) {
+        *output++ = *first++;
+    }
+    return output;
+}
+
+template<class BidirectionalIterator, class OutputIterator>
+constexpr OutputIterator copy_backward(
+    BidirectionalIterator first, BidirectionalIterator last,
+    OutputIterator output_last) {
+    while (first != last) {
+        *--output_last = *--last;
+    }
+    return output_last;
+}
+
+template<class InputIterator, class OutputIterator>
+constexpr OutputIterator move(
+    InputIterator first, InputIterator last, OutputIterator output) {
+    while (first != last) {
+        *output = std::move(*first);
+        ++first;
+        ++output;
+    }
+    return output;
+}
+
+template<class BidirectionalIterator, class OutputIterator>
+constexpr OutputIterator move_backward(
+    BidirectionalIterator first, BidirectionalIterator last,
+    OutputIterator output_last) {
+    while (first != last) {
+        *--output_last = std::move(*--last);
+    }
+    return output_last;
+}
+
+template<class FirstIterator, class SecondIterator>
+constexpr void iter_swap(FirstIterator first, SecondIterator second) {
+    using std::swap;
+    if constexpr (requires { swap(*first, *second); }) {
+        swap(*first, *second);
+    } else {
+        using Value =
+            typename iterator_traits<FirstIterator>::value_type;
+        Value temporary = std::move(*first);
+        *first = std::move(*second);
+        *second = std::move(temporary);
+    }
+}
+
+template<class ForwardIterator, class Type>
+constexpr void fill(ForwardIterator first, ForwardIterator last,
+                    const Type& value) {
+    while (first != last) {
+        *first++ = value;
+    }
+}
+
+template<class OutputIterator, class Size, class Type>
+constexpr OutputIterator fill_n(
+    OutputIterator first, Size count, const Type& value) {
+    auto remaining = +count;
+    while (remaining > 0) {
+        *first++ = value;
+        --remaining;
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Generator>
+constexpr void generate(
+    ForwardIterator first, ForwardIterator last,
+    Generator generator) {
+    while (first != last) {
+        *first++ = generator();
+    }
+}
+
+template<class OutputIterator, class Size, class Generator>
+constexpr OutputIterator generate_n(
+    OutputIterator first, Size count, Generator generator) {
+    auto remaining = +count;
+    while (remaining > 0) {
+        *first++ = generator();
+        --remaining;
+    }
+    return first;
+}
+
+template<class InputIterator, class Function>
+constexpr Function for_each(
+    InputIterator first, InputIterator last, Function function) {
+    while (first != last) {
+        function(*first++);
+    }
+    return function;
+}
+
+template<class ForwardIterator, class Type>
+constexpr void replace(
+    ForwardIterator first, ForwardIterator last,
+    const Type& old_value, const Type& new_value) {
+    while (first != last) {
+        if (*first == old_value) {
+            *first = new_value;
+        }
+        ++first;
+    }
+}
+
+template<class ForwardIterator, class Predicate, class Type>
+constexpr void replace_if(
+    ForwardIterator first, ForwardIterator last,
+    Predicate predicate, const Type& new_value) {
+    while (first != last) {
+        if (predicate(*first)) {
+            *first = new_value;
+        }
+        ++first;
+    }
+}
+
+template<class InputIterator, class OutputIterator, class Type>
+constexpr OutputIterator replace_copy(
+    InputIterator first, InputIterator last, OutputIterator output,
+    const Type& old_value, const Type& new_value) {
+    while (first != last) {
+        *output++ = *first == old_value ? new_value : *first;
+        ++first;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator, class Predicate,
+         class Type>
+constexpr OutputIterator replace_copy_if(
+    InputIterator first, InputIterator last, OutputIterator output,
+    Predicate predicate, const Type& new_value) {
+    while (first != last) {
+        *output++ = predicate(*first) ? new_value : *first;
+        ++first;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator, class UnaryOperation>
+constexpr OutputIterator transform(
+    InputIterator first, InputIterator last, OutputIterator output,
+    UnaryOperation operation) {
+    while (first != last) {
+        *output++ = operation(*first++);
+    }
+    return output;
+}
+
+template<class FirstIterator, class SecondIterator, class OutputIterator,
+         class BinaryOperation>
+constexpr OutputIterator transform(
+    FirstIterator first, FirstIterator last, SecondIterator second,
+    OutputIterator output, BinaryOperation operation) {
+    while (first != last) {
+        *output++ = operation(*first++, *second++);
+    }
+    return output;
+}
+
+template<class InputIterator, class Type>
+_ADINKRA_NODISCARD constexpr InputIterator find(
+    InputIterator first, InputIterator last, const Type& value) {
+    while (first != last && !(*first == value)) {
+        ++first;
+    }
+    return first;
+}
+
+template<class FirstIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr FirstIterator find_first_of(
+    FirstIterator first, FirstIterator last,
+    SecondIterator search_first, SecondIterator search_last) {
+    for (; first != last; ++first) {
+        for (SecondIterator current = search_first;
+             current != search_last; ++current) {
+            if (*first == *current) {
+                return first;
+            }
+        }
+    }
+    return last;
+}
+
+template<class FirstIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr FirstIterator find_first_of(
+    FirstIterator first, FirstIterator last,
+    SecondIterator search_first, SecondIterator search_last,
+    Predicate predicate) {
+    for (; first != last; ++first) {
+        for (SecondIterator current = search_first;
+             current != search_last; ++current) {
+            if (predicate(*first, *current)) {
+                return first;
+            }
+        }
+    }
+    return last;
+}
+
+template<class InputIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr InputIterator find_if(
+    InputIterator first, InputIterator last, Predicate predicate) {
+    while (first != last && !predicate(*first)) {
+        ++first;
+    }
+    return first;
+}
+
+template<class InputIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr InputIterator find_if_not(
+    InputIterator first, InputIterator last, Predicate predicate) {
+    while (first != last && predicate(*first)) {
+        ++first;
+    }
+    return first;
+}
+
+template<class InputIterator, class Type>
+_ADINKRA_NODISCARD constexpr
+typename iterator_traits<InputIterator>::difference_type
+count(InputIterator first, InputIterator last, const Type& value) {
+    typename iterator_traits<InputIterator>::difference_type result = 0;
+    while (first != last) {
+        if (*first == value) {
+            ++result;
+        }
+        ++first;
+    }
+    return result;
+}
+
+template<class InputIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr
+typename iterator_traits<InputIterator>::difference_type
+count_if(InputIterator first, InputIterator last, Predicate predicate) {
+    typename iterator_traits<InputIterator>::difference_type result = 0;
+    while (first != last) {
+        if (predicate(*first)) {
+            ++result;
+        }
+        ++first;
+    }
+    return result;
+}
+
+template<class InputIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool all_of(
+    InputIterator first, InputIterator last, Predicate predicate) {
+    return std::find_if_not(first, last, predicate) == last;
+}
+
+template<class InputIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool any_of(
+    InputIterator first, InputIterator last, Predicate predicate) {
+    return std::find_if(first, last, predicate) != last;
+}
+
+template<class InputIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool none_of(
+    InputIterator first, InputIterator last, Predicate predicate) {
+    return std::find_if(first, last, predicate) == last;
+}
+
+template<class FirstIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr bool equal(
+    FirstIterator first, FirstIterator last, SecondIterator second) {
+    while (first != last) {
+        if (!(*first == *second)) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return true;
+}
+
+template<class FirstIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool equal(
+    FirstIterator first, FirstIterator last, SecondIterator second,
+    Predicate predicate) {
+    while (first != last) {
+        if (!predicate(*first, *second)) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return true;
+}
+
+template<class FirstIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr bool equal(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last) {
+    while (first != last && second != second_last) {
+        if (!(*first == *second)) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return first == last && second == second_last;
+}
+
+template<class FirstIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool equal(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    Predicate predicate) {
+    while (first != last && second != second_last) {
+        if (!predicate(*first, *second)) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return first == last && second == second_last;
+}
+
+template<class ForwardIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool is_permutation(
+    ForwardIterator first, ForwardIterator last,
+    SecondIterator second, Predicate predicate) {
+    for (; first != last; ++first, ++second) {
+        if (!predicate(*first, *second)) {
+            break;
+        }
+    }
+
+    for (ForwardIterator current = first;
+         current != last; ++current) {
+        bool already_counted = false;
+        for (ForwardIterator previous = first;
+             previous != current; ++previous) {
+            if (predicate(*previous, *current)) {
+                already_counted = true;
+                break;
+            }
+        }
+        if (already_counted) {
+            continue;
+        }
+
+        size_t left_count = 0;
+        size_t right_count = 0;
+        SecondIterator right = second;
+        for (ForwardIterator probe = first;
+             probe != last; ++probe, ++right) {
+            if (predicate(*probe, *current)) {
+                ++left_count;
+            }
+            if (predicate(*right, *current)) {
+                ++right_count;
+            }
+        }
+        if (left_count != right_count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template<class ForwardIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr bool is_permutation(
+    ForwardIterator first, ForwardIterator last,
+    SecondIterator second) {
+    return std::is_permutation(
+        first, last, second,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class ForwardIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool is_permutation(
+    ForwardIterator first, ForwardIterator last,
+    SecondIterator second, SecondIterator second_last,
+    Predicate predicate) {
+    if (std::distance(first, last) !=
+        std::distance(second, second_last)) {
+        return false;
+    }
+    return std::is_permutation(
+        first, last, second, predicate);
+}
+
+template<class ForwardIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr bool is_permutation(
+    ForwardIterator first, ForwardIterator last,
+    SecondIterator second, SecondIterator second_last) {
+    return std::is_permutation(
+        first, last, second, second_last,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr bool lexicographical_compare(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last) {
+    while (first != last && second != second_last) {
+        if (*first < *second) {
+            return true;
+        }
+        if (*second < *first) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return first == last && second != second_last;
+}
+
+template<class FirstIterator, class SecondIterator, class Compare>
+_ADINKRA_NODISCARD constexpr bool lexicographical_compare(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last, Compare compare) {
+    while (first != last && second != second_last) {
+        if (compare(*first, *second)) {
+            return true;
+        }
+        if (compare(*second, *first)) {
+            return false;
+        }
+        ++first;
+        ++second;
+    }
+    return first == last && second != second_last;
+}
+
+template<class ForwardIterator, class Type>
+constexpr ForwardIterator remove(
+    ForwardIterator first, ForwardIterator last, const Type& value) {
+    first = std::find(first, last, value);
+    if (first == last) {
+        return first;
+    }
+    for (ForwardIterator iterator = std::next(first);
+         iterator != last; ++iterator) {
+        if (!(*iterator == value)) {
+            *first++ = std::move(*iterator);
+        }
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Predicate>
+constexpr ForwardIterator remove_if(
+    ForwardIterator first, ForwardIterator last, Predicate predicate) {
+    first = std::find_if(first, last, predicate);
+    if (first == last) {
+        return first;
+    }
+    for (ForwardIterator iterator = std::next(first);
+         iterator != last; ++iterator) {
+        if (!predicate(*iterator)) {
+            *first++ = std::move(*iterator);
+        }
+    }
+    return first;
+}
+
+template<class InputIterator, class OutputIterator, class Type>
+constexpr OutputIterator remove_copy(
+    InputIterator first, InputIterator last,
+    OutputIterator output, const Type& value) {
+    while (first != last) {
+        if (!(*first == value)) {
+            *output++ = *first;
+        }
+        ++first;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator, class Predicate>
+constexpr OutputIterator remove_copy_if(
+    InputIterator first, InputIterator last,
+    OutputIterator output, Predicate predicate) {
+    while (first != last) {
+        if (!predicate(*first)) {
+            *output++ = *first;
+        }
+        ++first;
+    }
+    return output;
+}
+
+template<class ForwardIterator, class BinaryPredicate>
+constexpr ForwardIterator unique(
+    ForwardIterator first, ForwardIterator last,
+    BinaryPredicate equivalent) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator result = first;
+    while (++first != last) {
+        if (!equivalent(*result, *first)) {
+            ++result;
+            if (result != first) {
+                *result = std::move(*first);
+            }
+        }
+    }
+    return ++result;
+}
+
+template<class ForwardIterator>
+constexpr ForwardIterator unique(
+    ForwardIterator first, ForwardIterator last) {
+    return std::unique(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryPredicate>
+constexpr OutputIterator unique_copy(
+    InputIterator first, InputIterator last, OutputIterator output,
+    BinaryPredicate equivalent) {
+    if (first == last) {
+        return output;
+    }
+
+    using Value =
+        typename iterator_traits<InputIterator>::value_type;
+    Value previous = *first;
+    *output = previous;
+    ++output;
+    while (++first != last) {
+        if (!equivalent(previous, *first)) {
+            previous = *first;
+            *output = previous;
+            ++output;
+        }
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator>
+constexpr OutputIterator unique_copy(
+    InputIterator first, InputIterator last, OutputIterator output) {
+    return std::unique_copy(
+        first, last, output,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class BidirectionalIterator>
+constexpr void reverse(BidirectionalIterator first, BidirectionalIterator last) {
+    while (first != last && first != --last) {
+        std::iter_swap(first++, last);
+    }
+}
+
+template<class BidirectionalIterator, class Compare>
+constexpr bool next_permutation(
+    BidirectionalIterator first, BidirectionalIterator last,
+    Compare compare) {
+    if (first == last) {
+        return false;
+    }
+
+    BidirectionalIterator current = last;
+    if (first == --current) {
+        return false;
+    }
+
+    for (;;) {
+        BidirectionalIterator previous = current;
+        if (compare(*--current, *previous)) {
+            BidirectionalIterator replacement = last;
+            while (!compare(*current, *--replacement)) {}
+            std::iter_swap(current, replacement);
+            std::reverse(previous, last);
+            return true;
+        }
+        if (current == first) {
+            std::reverse(first, last);
+            return false;
+        }
+    }
+}
+
+template<class BidirectionalIterator>
+constexpr bool next_permutation(
+    BidirectionalIterator first, BidirectionalIterator last) {
+    return std::next_permutation(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class BidirectionalIterator, class Compare>
+constexpr bool prev_permutation(
+    BidirectionalIterator first, BidirectionalIterator last,
+    Compare compare) {
+    if (first == last) {
+        return false;
+    }
+
+    BidirectionalIterator current = last;
+    if (first == --current) {
+        return false;
+    }
+
+    for (;;) {
+        BidirectionalIterator following = current;
+        if (compare(*following, *--current)) {
+            BidirectionalIterator replacement = last;
+            while (!compare(*--replacement, *current)) {}
+            std::iter_swap(current, replacement);
+            std::reverse(following, last);
+            return true;
+        }
+        if (current == first) {
+            std::reverse(first, last);
+            return false;
+        }
+    }
+}
+
+template<class BidirectionalIterator>
+constexpr bool prev_permutation(
+    BidirectionalIterator first, BidirectionalIterator last) {
+    return std::prev_permutation(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class ForwardIterator>
+constexpr ForwardIterator rotate(
+    ForwardIterator first, ForwardIterator middle, ForwardIterator last) {
+    if (first == middle) {
+        return last;
+    }
+    if (middle == last) {
+        return first;
+    }
+
+    ForwardIterator write = first;
+    ForwardIterator read = middle;
+    ForwardIterator result = first;
+    while (read != last) {
+        std::iter_swap(write++, read++);
+        if (write == middle) {
+            middle = read;
+        } else if (read == last) {
+            read = middle;
+        }
+    }
+    result = write;
+    return result;
+}
+
+template<class ForwardIterator, class OutputIterator>
+constexpr OutputIterator rotate_copy(
+    ForwardIterator first, ForwardIterator middle,
+    ForwardIterator last, OutputIterator output) {
+    output = std::copy(middle, last, output);
+    return std::copy(first, middle, output);
+}
+
+template<class ForwardIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr bool is_partitioned(
+    ForwardIterator first, ForwardIterator last, Predicate predicate) {
+    while (first != last && predicate(*first)) {
+        ++first;
+    }
+    while (first != last) {
+        if (predicate(*first)) {
+            return false;
+        }
+        ++first;
+    }
+    return true;
+}
+
+template<class ForwardIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr ForwardIterator partition_point(
+    ForwardIterator first, ForwardIterator last, Predicate predicate) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        ForwardIterator middle = first;
+        std::advance(middle, step);
+        if (predicate(*middle)) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Type>
+_ADINKRA_NODISCARD constexpr ForwardIterator lower_bound(
+    ForwardIterator first, ForwardIterator last, const Type& value) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        ForwardIterator middle = first;
+        std::advance(middle, step);
+        if (*middle < value) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Type, class Compare>
+_ADINKRA_NODISCARD constexpr ForwardIterator lower_bound(
+    ForwardIterator first, ForwardIterator last, const Type& value,
+    Compare compare) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        ForwardIterator middle = first;
+        std::advance(middle, step);
+        if (compare(*middle, value)) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Type>
+_ADINKRA_NODISCARD constexpr ForwardIterator upper_bound(
+    ForwardIterator first, ForwardIterator last, const Type& value) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        ForwardIterator middle = first;
+        std::advance(middle, step);
+        if (!(value < *middle)) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Type, class Compare>
+_ADINKRA_NODISCARD constexpr ForwardIterator upper_bound(
+    ForwardIterator first, ForwardIterator last, const Type& value,
+    Compare compare) {
+    auto count_value = std::distance(first, last);
+    while (count_value > 0) {
+        auto step = count_value / 2;
+        ForwardIterator middle = first;
+        std::advance(middle, step);
+        if (!compare(value, *middle)) {
+            first = ++middle;
+            count_value -= step + 1;
+        } else {
+            count_value = step;
+        }
+    }
+    return first;
+}
+
+template<class ForwardIterator, class Type>
+_ADINKRA_NODISCARD constexpr pair<ForwardIterator, ForwardIterator>
+equal_range(
+    ForwardIterator first, ForwardIterator last, const Type& value) {
+    return {
+        std::lower_bound(first, last, value),
+        std::upper_bound(first, last, value)};
+}
+
+template<class ForwardIterator, class Type, class Compare>
+_ADINKRA_NODISCARD constexpr pair<ForwardIterator, ForwardIterator>
+equal_range(
+    ForwardIterator first, ForwardIterator last, const Type& value,
+    Compare compare) {
+    return {
+        std::lower_bound(first, last, value, compare),
+        std::upper_bound(first, last, value, compare)};
+}
+
+template<class ForwardIterator, class Type>
+_ADINKRA_NODISCARD constexpr bool binary_search(
+    ForwardIterator first, ForwardIterator last, const Type& value) {
+    first = std::lower_bound(first, last, value);
+    return first != last && !(value < *first);
+}
+
+template<class ForwardIterator, class Type, class Compare>
+_ADINKRA_NODISCARD constexpr bool binary_search(
+    ForwardIterator first, ForwardIterator last, const Type& value,
+    Compare compare) {
+    first = std::lower_bound(first, last, value, compare);
+    return first != last && !compare(value, *first);
+}
+
+template<class ForwardIterator, class PatternIterator,
+         class BinaryPredicate>
+_ADINKRA_NODISCARD constexpr ForwardIterator search(
+    ForwardIterator first, ForwardIterator last,
+    PatternIterator pattern_first, PatternIterator pattern_last,
+    BinaryPredicate equivalent) {
+    if (pattern_first == pattern_last) {
+        return first;
+    }
+    for (; first != last; ++first) {
+        ForwardIterator current = first;
+        PatternIterator pattern = pattern_first;
+        while (current != last && pattern != pattern_last &&
+               equivalent(*current, *pattern)) {
+            ++current;
+            ++pattern;
+        }
+        if (pattern == pattern_last) {
+            return first;
+        }
+        if (current == last) {
+            return last;
+        }
+    }
+    return last;
+}
+
+template<class ForwardIterator, class PatternIterator>
+_ADINKRA_NODISCARD constexpr ForwardIterator search(
+    ForwardIterator first, ForwardIterator last,
+    PatternIterator pattern_first, PatternIterator pattern_last) {
+    return std::search(
+        first, last, pattern_first, pattern_last,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class ForwardIterator, class Size, class Type,
+         class BinaryPredicate>
+_ADINKRA_NODISCARD constexpr ForwardIterator search_n(
+    ForwardIterator first, ForwardIterator last,
+    Size count_value, const Type& value,
+    BinaryPredicate equivalent) {
+    if (count_value <= 0) {
+        return first;
+    }
+    for (; first != last; ++first) {
+        ForwardIterator current = first;
+        Size matched = 0;
+        while (current != last &&
+               matched < count_value &&
+               equivalent(*current, value)) {
+            ++current;
+            ++matched;
+        }
+        if (matched == count_value) {
+            return first;
+        }
+        if (current == last) {
+            return last;
+        }
+    }
+    return last;
+}
+
+template<class ForwardIterator, class Size, class Type>
+_ADINKRA_NODISCARD constexpr ForwardIterator search_n(
+    ForwardIterator first, ForwardIterator last,
+    Size count_value, const Type& value) {
+    return std::search_n(
+        first, last, count_value, value,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class ForwardIterator, class PatternIterator,
+         class BinaryPredicate>
+_ADINKRA_NODISCARD constexpr ForwardIterator find_end(
+    ForwardIterator first, ForwardIterator last,
+    PatternIterator pattern_first, PatternIterator pattern_last,
+    BinaryPredicate equivalent) {
+    if (pattern_first == pattern_last) {
+        return last;
+    }
+    ForwardIterator result = last;
+    while (first != last) {
+        ForwardIterator found = std::search(
+            first, last, pattern_first, pattern_last, equivalent);
+        if (found == last) {
+            break;
+        }
+        result = found;
+        first = found;
+        ++first;
+    }
+    return result;
+}
+
+template<class ForwardIterator, class PatternIterator>
+_ADINKRA_NODISCARD constexpr ForwardIterator find_end(
+    ForwardIterator first, ForwardIterator last,
+    PatternIterator pattern_first, PatternIterator pattern_last) {
+    return std::find_end(
+        first, last, pattern_first, pattern_last,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class ForwardIterator>
+_ADINKRA_NODISCARD constexpr ForwardIterator
+min_element(ForwardIterator first, ForwardIterator last) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator result = first;
+    while (++first != last) {
+        if (*first < *result) {
+            result = first;
+        }
+    }
+    return result;
+}
+
+template<class ForwardIterator>
+_ADINKRA_NODISCARD constexpr ForwardIterator
+max_element(ForwardIterator first, ForwardIterator last) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator result = first;
+    while (++first != last) {
+        if (*result < *first) {
+            result = first;
+        }
+    }
+    return result;
+}
+
+template<class ForwardIterator, class Compare>
+_ADINKRA_NODISCARD constexpr ForwardIterator
+min_element(ForwardIterator first, ForwardIterator last, Compare compare) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator result = first;
+    while (++first != last) {
+        if (compare(*first, *result)) {
+            result = first;
+        }
+    }
+    return result;
+}
+
+template<class ForwardIterator, class Compare>
+_ADINKRA_NODISCARD constexpr ForwardIterator
+max_element(ForwardIterator first, ForwardIterator last, Compare compare) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator result = first;
+    while (++first != last) {
+        if (compare(*result, *first)) {
+            result = first;
+        }
+    }
+    return result;
+}
+
+template<class ForwardIterator, class Compare>
+_ADINKRA_NODISCARD constexpr
+pair<ForwardIterator, ForwardIterator>
+minmax_element(
+    ForwardIterator first, ForwardIterator last, Compare compare) {
+    if (first == last) {
+        return {last, last};
+    }
+    ForwardIterator minimum = first;
+    ForwardIterator maximum = first;
+    while (++first != last) {
+        if (compare(*first, *minimum)) {
+            minimum = first;
+        }
+        if (!compare(*first, *maximum)) {
+            maximum = first;
+        }
+    }
+    return {minimum, maximum};
+}
+
+template<class ForwardIterator>
+_ADINKRA_NODISCARD constexpr
+pair<ForwardIterator, ForwardIterator>
+minmax_element(ForwardIterator first, ForwardIterator last) {
+    return std::minmax_element(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void make_heap(
+    RandomAccessIterator first, RandomAccessIterator last, Compare compare) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    const Difference count_value = last - first;
+    if (count_value < 2) {
+        return;
+    }
+
+    auto sift_down = [&](Difference root, Difference count) {
+        for (;;) {
+            const Difference left = root * 2 + 1;
+            if (left >= count) {
+                return;
+            }
+            Difference selected = left;
+            const Difference right = left + 1;
+            if (right < count &&
+                compare(*(first + selected), *(first + right))) {
+                selected = right;
+            }
+            if (!compare(*(first + root), *(first + selected))) {
+                return;
+            }
+            std::iter_swap(first + root, first + selected);
+            root = selected;
+        }
+    };
+
+    for (Difference start = count_value / 2; start > 0; --start) {
+        sift_down(start - 1, count_value);
+    }
+}
+
+template<class RandomAccessIterator>
+constexpr void make_heap(
+    RandomAccessIterator first, RandomAccessIterator last) {
+    std::make_heap(first, last, [](const auto& left, const auto& right) {
+        return left < right;
+    });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void push_heap(
+    RandomAccessIterator first, RandomAccessIterator last,
+    Compare compare) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    Difference child = last - first - 1;
+    while (child > 0) {
+        const Difference parent = (child - 1) / 2;
+        if (!compare(*(first + parent), *(first + child))) {
+            break;
+        }
+        std::iter_swap(first + parent, first + child);
+        child = parent;
+    }
+}
+
+template<class RandomAccessIterator>
+constexpr void push_heap(
+    RandomAccessIterator first, RandomAccessIterator last) {
+    std::push_heap(first, last, [](const auto& left, const auto& right) {
+        return left < right;
+    });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void pop_heap(
+    RandomAccessIterator first, RandomAccessIterator last,
+    Compare compare) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    const Difference count_value = last - first;
+    if (count_value < 2) {
+        return;
+    }
+    std::iter_swap(first, last - 1);
+    const Difference heap_count = count_value - 1;
+    Difference root = 0;
+    for (;;) {
+        const Difference left = root * 2 + 1;
+        if (left >= heap_count) {
+            break;
+        }
+        Difference selected = left;
+        const Difference right = left + 1;
+        if (right < heap_count &&
+            compare(*(first + selected), *(first + right))) {
+            selected = right;
+        }
+        if (!compare(*(first + root), *(first + selected))) {
+            break;
+        }
+        std::iter_swap(first + root, first + selected);
+        root = selected;
+    }
+}
+
+template<class RandomAccessIterator>
+constexpr void pop_heap(
+    RandomAccessIterator first, RandomAccessIterator last) {
+    std::pop_heap(first, last, [](const auto& left, const auto& right) {
+        return left < right;
+    });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void sort_heap(
+    RandomAccessIterator first, RandomAccessIterator last,
+    Compare compare) {
+    while (last - first > 1) {
+        std::pop_heap(first, last, compare);
+        --last;
+    }
+}
+
+template<class RandomAccessIterator>
+constexpr void sort_heap(
+    RandomAccessIterator first, RandomAccessIterator last) {
+    std::sort_heap(first, last, [](const auto& left, const auto& right) {
+        return left < right;
+    });
+}
+
+template<class RandomAccessIterator, class Compare>
+_ADINKRA_NODISCARD constexpr bool is_heap(
+    RandomAccessIterator first, RandomAccessIterator last,
+    Compare compare) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    const Difference count_value = last - first;
+    for (Difference child = 1; child < count_value; ++child) {
+        if (compare(*(first + (child - 1) / 2), *(first + child))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template<class RandomAccessIterator>
+_ADINKRA_NODISCARD constexpr bool is_heap(
+    RandomAccessIterator first, RandomAccessIterator last) {
+    return std::is_heap(first, last, [](const auto& left, const auto& right) {
+        return left < right;
+    });
+}
+
+template<class RandomAccessIterator, class Compare>
+_ADINKRA_NODISCARD constexpr RandomAccessIterator
+is_heap_until(
+    RandomAccessIterator first, RandomAccessIterator last,
+    Compare compare) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    const Difference count_value = last - first;
+    for (Difference child = 1; child < count_value; ++child) {
+        if (compare(
+                *(first + (child - 1) / 2),
+                *(first + child))) {
+            return first + child;
+        }
+    }
+    return last;
+}
+
+template<class RandomAccessIterator>
+_ADINKRA_NODISCARD constexpr RandomAccessIterator
+is_heap_until(
+    RandomAccessIterator first, RandomAccessIterator last) {
+    return std::is_heap_until(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void sort(
+    RandomAccessIterator first, RandomAccessIterator last, Compare compare) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    using Value =
+        typename iterator_traits<RandomAccessIterator>::value_type;
+    const Difference count_value = last - first;
+    if (count_value < 2) {
+        return;
+    }
+    if (count_value <= 32) {
+        for (RandomAccessIterator current = first + 1;
+             current != last; ++current) {
+            Value value = std::move(*current);
+            RandomAccessIterator position = current;
+            while (position != first) {
+                RandomAccessIterator previous = position - 1;
+                if (!compare(value, *previous)) {
+                    break;
+                }
+                *position = std::move(*previous);
+                position = previous;
+            }
+            *position = std::move(value);
+        }
+        return;
+    }
+    std::make_heap(first, last, compare);
+    std::sort_heap(first, last, compare);
+}
+
+template<class RandomAccessIterator>
+constexpr void sort(RandomAccessIterator first, RandomAccessIterator last) {
+    std::sort(first, last, [](const auto& left, const auto& right) {
+        return left < right;
+    });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void stable_sort(
+    RandomAccessIterator first,
+    RandomAccessIterator last,
+    Compare compare) {
+    using Value =
+        typename iterator_traits<RandomAccessIterator>::value_type;
+    if (first == last) {
+        return;
+    }
+    for (RandomAccessIterator current = first + 1;
+         current != last; ++current) {
+        Value value = std::move(*current);
+        RandomAccessIterator position = current;
+        while (position != first) {
+            RandomAccessIterator previous = position - 1;
+            if (!compare(value, *previous)) {
+                break;
+            }
+            *position = std::move(*previous);
+            position = previous;
+        }
+        *position = std::move(value);
+    }
+}
+
+template<class RandomAccessIterator>
+constexpr void stable_sort(
+    RandomAccessIterator first,
+    RandomAccessIterator last) {
+    std::stable_sort(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class RandomAccessIterator, class UniformRandomGenerator>
+void shuffle(
+    RandomAccessIterator first,
+    RandomAccessIterator last,
+    UniformRandomGenerator&& generator) {
+    using Difference =
+        typename iterator_traits<RandomAccessIterator>::difference_type;
+    const Difference count_value = last - first;
+    for (Difference current = count_value; current > 1; --current) {
+        const auto random_value =
+            generator() - remove_reference_t<
+                              UniformRandomGenerator>::min();
+        const Difference selected = static_cast<Difference>(
+            random_value % static_cast<decltype(random_value)>(current));
+        std::iter_swap(first + current - 1, first + selected);
+    }
+}
+
+template<class PopulationIterator, class SampleIterator,
+         class Distance, class UniformRandomGenerator>
+SampleIterator sample(
+    PopulationIterator first, PopulationIterator last,
+    SampleIterator output, Distance count_value,
+    UniformRandomGenerator&& generator) {
+    if (count_value <= 0) {
+        return output;
+    }
+
+    using Generator =
+        remove_reference_t<UniformRandomGenerator>;
+    using Category =
+        typename iterator_traits<PopulationIterator>::iterator_category;
+
+    if constexpr (is_base_of_v<forward_iterator_tag, Category>) {
+        Distance remaining =
+            static_cast<Distance>(std::distance(first, last));
+        Distance needed =
+            count_value < remaining ? count_value : remaining;
+        while (needed > 0) {
+            const auto random_value =
+                generator() - Generator::min();
+            const Distance selected =
+                static_cast<Distance>(
+                    random_value %
+                    static_cast<decltype(random_value)>(remaining));
+            if (selected < needed) {
+                *output++ = *first;
+                --needed;
+            }
+            --remaining;
+            ++first;
+        }
+    } else {
+        SampleIterator output_first = output;
+        Distance selected = 0;
+        while (first != last && selected < count_value) {
+            *output++ = *first++;
+            ++selected;
+        }
+
+        Distance visited = selected;
+        while (first != last) {
+            ++visited;
+            const auto random_value =
+                generator() - Generator::min();
+            const Distance replacement =
+                static_cast<Distance>(
+                    random_value %
+                    static_cast<decltype(random_value)>(visited));
+            if (replacement < selected) {
+                *(output_first + replacement) = *first;
+            }
+            ++first;
+        }
+    }
+    return output;
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void nth_element(
+    RandomAccessIterator first,
+    RandomAccessIterator nth,
+    RandomAccessIterator last,
+    Compare compare) {
+    if (nth != last) {
+        std::sort(first, last, compare);
+    }
+}
+
+template<class RandomAccessIterator>
+constexpr void nth_element(
+    RandomAccessIterator first,
+    RandomAccessIterator nth,
+    RandomAccessIterator last) {
+    std::nth_element(
+        first, nth, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class ForwardIterator, class Compare>
+_ADINKRA_NODISCARD constexpr ForwardIterator is_sorted_until(
+    ForwardIterator first, ForwardIterator last, Compare compare) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator following = first;
+    while (++following != last) {
+        if (compare(*following, *first)) {
+            return following;
+        }
+        first = following;
+    }
+    return last;
+}
+
+template<class ForwardIterator>
+_ADINKRA_NODISCARD constexpr ForwardIterator is_sorted_until(
+    ForwardIterator first, ForwardIterator last) {
+    return std::is_sorted_until(
+        first, last, [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class ForwardIterator, class Compare>
+_ADINKRA_NODISCARD constexpr bool is_sorted(
+    ForwardIterator first, ForwardIterator last, Compare compare) {
+    return std::is_sorted_until(first, last, compare) == last;
+}
+
+template<class ForwardIterator>
+_ADINKRA_NODISCARD constexpr bool is_sorted(
+    ForwardIterator first, ForwardIterator last) {
+    return std::is_sorted_until(first, last) == last;
+}
+
+template<class FirstIterator, class SecondIterator>
+constexpr SecondIterator swap_ranges(
+    FirstIterator first, FirstIterator last, SecondIterator second) {
+    while (first != last) {
+        std::iter_swap(first++, second++);
+    }
+    return second;
+}
+
+template<class ForwardIterator, class Predicate>
+constexpr ForwardIterator partition(
+    ForwardIterator first, ForwardIterator last,
+    Predicate predicate) {
+    while (first != last && predicate(*first)) {
+        ++first;
+    }
+    if (first == last) {
+        return first;
+    }
+    ForwardIterator current = first;
+    while (++current != last) {
+        if (predicate(*current)) {
+            std::iter_swap(first, current);
+            ++first;
+        }
+    }
+    return first;
+}
+
+template<class InputIterator, class FirstOutputIterator,
+         class SecondOutputIterator, class Predicate>
+constexpr pair<FirstOutputIterator, SecondOutputIterator>
+partition_copy(
+    InputIterator first, InputIterator last,
+    FirstOutputIterator true_output,
+    SecondOutputIterator false_output,
+    Predicate predicate) {
+    while (first != last) {
+        if (predicate(*first)) {
+            *true_output++ = *first;
+        } else {
+            *false_output++ = *first;
+        }
+        ++first;
+    }
+    return {true_output, false_output};
+}
+
+template<class ForwardIterator, class Predicate>
+constexpr ForwardIterator stable_partition(
+    ForwardIterator first, ForwardIterator last,
+    Predicate predicate) {
+    while (first != last && predicate(*first)) {
+        ++first;
+    }
+    if (first == last) {
+        return first;
+    }
+
+    ForwardIterator current = first;
+    while (++current != last) {
+        if (predicate(*current)) {
+            ForwardIterator following = current;
+            ++following;
+            std::rotate(first, current, following);
+            ++first;
+        }
+    }
+    return first;
+}
+
+template<class InputIterator, class OutputIterator, class Predicate>
+constexpr OutputIterator copy_if(
+    InputIterator first, InputIterator last, OutputIterator output,
+    Predicate predicate) {
+    while (first != last) {
+        if (predicate(*first)) {
+            *output = *first;
+            ++output;
+        }
+        ++first;
+    }
+    return output;
+}
+
+template<class FirstIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr pair<FirstIterator, SecondIterator> mismatch(
+    FirstIterator first, FirstIterator last, SecondIterator second,
+    Predicate predicate) {
+    while (first != last && predicate(*first, *second)) {
+        ++first;
+        ++second;
+    }
+    return {first, second};
+}
+
+template<class FirstIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr pair<FirstIterator, SecondIterator> mismatch(
+    FirstIterator first, FirstIterator last, SecondIterator second) {
+    return std::mismatch(
+        first, last, second,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr pair<FirstIterator, SecondIterator> mismatch(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    Predicate predicate) {
+    while (first != last && second != second_last &&
+           predicate(*first, *second)) {
+        ++first;
+        ++second;
+    }
+    return {first, second};
+}
+
+template<class FirstIterator, class SecondIterator>
+_ADINKRA_NODISCARD constexpr pair<FirstIterator, SecondIterator> mismatch(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last) {
+    return std::mismatch(
+        first, last, second, second_last,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class ForwardIterator, class Predicate>
+_ADINKRA_NODISCARD constexpr ForwardIterator adjacent_find(
+    ForwardIterator first, ForwardIterator last, Predicate predicate) {
+    if (first == last) {
+        return last;
+    }
+    ForwardIterator following = first;
+    while (++following != last) {
+        if (predicate(*first, *following)) {
+            return first;
+        }
+        first = following;
+    }
+    return last;
+}
+
+template<class ForwardIterator>
+_ADINKRA_NODISCARD constexpr ForwardIterator adjacent_find(
+    ForwardIterator first, ForwardIterator last) {
+    return std::adjacent_find(
+        first, last,
+        [](const auto& left, const auto& right) {
+            return left == right;
+        });
+}
+
+template<class RandomAccessIterator, class Compare>
+constexpr void partial_sort(
+    RandomAccessIterator first, RandomAccessIterator middle,
+    RandomAccessIterator last, Compare compare) {
+    if (first == middle) {
+        return;
+    }
+    std::make_heap(first, middle, compare);
+    for (RandomAccessIterator current = middle; current != last; ++current) {
+        if (compare(*current, *first)) {
+            std::iter_swap(current, first);
+
+            using Difference =
+                typename iterator_traits<RandomAccessIterator>::difference_type;
+            const Difference count_value = middle - first;
+            Difference root = 0;
+            for (;;) {
+                const Difference left = root * 2 + 1;
+                if (left >= count_value) {
+                    break;
+                }
+                Difference selected = left;
+                const Difference right = left + 1;
+                if (right < count_value &&
+                    compare(*(first + selected), *(first + right))) {
+                    selected = right;
+                }
+                if (!compare(*(first + root), *(first + selected))) {
+                    break;
+                }
+                std::iter_swap(first + root, first + selected);
+                root = selected;
+            }
+        }
+    }
+    std::sort_heap(first, middle, compare);
+}
+
+template<class RandomAccessIterator>
+constexpr void partial_sort(
+    RandomAccessIterator first, RandomAccessIterator middle,
+    RandomAccessIterator last) {
+    std::partial_sort(
+        first, middle, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class InputIterator, class RandomAccessIterator,
+         class Compare>
+constexpr RandomAccessIterator partial_sort_copy(
+    InputIterator first, InputIterator last,
+    RandomAccessIterator output_first,
+    RandomAccessIterator output_last,
+    Compare compare) {
+    RandomAccessIterator output = output_first;
+    while (first != last && output != output_last) {
+        *output++ = *first++;
+    }
+    std::sort(output_first, output, compare);
+    while (first != last) {
+        if (output != output_first &&
+            compare(*first, *(output - 1))) {
+            *(output - 1) = *first;
+            std::sort(output_first, output, compare);
+        }
+        ++first;
+    }
+    return output;
+}
+
+template<class InputIterator, class RandomAccessIterator>
+constexpr RandomAccessIterator partial_sort_copy(
+    InputIterator first, InputIterator last,
+    RandomAccessIterator output_first,
+    RandomAccessIterator output_last) {
+    return std::partial_sort_copy(
+        first, last, output_first, output_last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator,
+         class OutputIterator, class Compare>
+constexpr OutputIterator merge(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output, Compare compare) {
+    while (first != last && second != second_last) {
+        if (compare(*second, *first)) {
+            *output++ = *second++;
+        } else {
+            *output++ = *first++;
+        }
+    }
+    output = std::copy(first, last, output);
+    return std::copy(second, second_last, output);
+}
+
+template<class FirstIterator, class SecondIterator, class OutputIterator>
+constexpr OutputIterator merge(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output) {
+    return std::merge(
+        first, last, second, second_last, output,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator,
+         class OutputIterator, class Compare>
+constexpr OutputIterator set_difference(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output, Compare compare) {
+    while (first != last && second != second_last) {
+        if (compare(*first, *second)) {
+            *output++ = *first++;
+        } else if (compare(*second, *first)) {
+            ++second;
+        } else {
+            ++first;
+            ++second;
+        }
+    }
+    return std::copy(first, last, output);
+}
+
+template<class FirstIterator, class SecondIterator, class Compare>
+constexpr bool includes(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    Compare compare) {
+    while (second != second_last) {
+        if (first == last || compare(*second, *first)) {
+            return false;
+        }
+        if (!compare(*first, *second)) {
+            ++second;
+        }
+        ++first;
+    }
+    return true;
+}
+
+template<class FirstIterator, class SecondIterator>
+constexpr bool includes(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last) {
+    return std::includes(
+        first, last, second, second_last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator, class OutputIterator>
+constexpr OutputIterator set_difference(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output) {
+    return std::set_difference(
+        first, last, second, second_last, output,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator,
+         class OutputIterator, class Compare>
+constexpr OutputIterator set_intersection(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output, Compare compare) {
+    while (first != last && second != second_last) {
+        if (compare(*first, *second)) {
+            ++first;
+        } else if (compare(*second, *first)) {
+            ++second;
+        } else {
+            *output++ = *first++;
+            ++second;
+        }
+    }
+    return output;
+}
+
+template<class FirstIterator, class SecondIterator, class OutputIterator>
+constexpr OutputIterator set_intersection(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output) {
+    return std::set_intersection(
+        first, last, second, second_last, output,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator,
+         class OutputIterator, class Compare>
+constexpr OutputIterator set_union(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output, Compare compare) {
+    while (first != last && second != second_last) {
+        if (compare(*first, *second)) {
+            *output++ = *first++;
+        } else if (compare(*second, *first)) {
+            *output++ = *second++;
+        } else {
+            *output++ = *first++;
+            ++second;
+        }
+    }
+    output = std::copy(first, last, output);
+    return std::copy(second, second_last, output);
+}
+
+template<class FirstIterator, class SecondIterator, class OutputIterator>
+constexpr OutputIterator set_union(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output) {
+    return std::set_union(
+        first, last, second, second_last, output,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class FirstIterator, class SecondIterator,
+         class OutputIterator, class Compare>
+constexpr OutputIterator set_symmetric_difference(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output, Compare compare) {
+    while (first != last && second != second_last) {
+        if (compare(*first, *second)) {
+            *output++ = *first++;
+        } else if (compare(*second, *first)) {
+            *output++ = *second++;
+        } else {
+            ++first;
+            ++second;
+        }
+    }
+    output = std::copy(first, last, output);
+    return std::copy(second, second_last, output);
+}
+
+template<class FirstIterator, class SecondIterator, class OutputIterator>
+constexpr OutputIterator set_symmetric_difference(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, SecondIterator second_last,
+    OutputIterator output) {
+    return std::set_symmetric_difference(
+        first, last, second, second_last, output,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+template<class BidirectionalIterator, class Compare>
+constexpr void inplace_merge(
+    BidirectionalIterator first,
+    BidirectionalIterator middle,
+    BidirectionalIterator last,
+    Compare compare) {
+    while (first != middle && middle != last) {
+        if (!compare(*middle, *first)) {
+            ++first;
+            continue;
+        }
+
+        using Value =
+            typename iterator_traits<BidirectionalIterator>::value_type;
+        Value value = std::move(*middle);
+        BidirectionalIterator after_middle = middle;
+        ++after_middle;
+        std::move_backward(first, middle, after_middle);
+        *first = std::move(value);
+        ++first;
+        ++middle;
+    }
+}
+
+template<class BidirectionalIterator>
+constexpr void inplace_merge(
+    BidirectionalIterator first,
+    BidirectionalIterator middle,
+    BidirectionalIterator last) {
+    std::inplace_merge(
+        first, middle, last,
+        [](const auto& left, const auto& right) {
+            return left < right;
+        });
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#include <ranges>
+
+#endif

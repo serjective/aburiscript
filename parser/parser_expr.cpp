@@ -1,3927 +1,9204 @@
 #include "parser.h"
-#include "../abi/darwin_blocks.h"
-#include "../helpers/auto_type_utils.h"
-#include "../collect/collect_templates_internal.h"
-#include "../collect/lookup_engine.h"
-#include "../perf_stats.h"
 
+#include "../builtin_registry.h"
+#include "../numeric_utils.h"
+#include "../token_spelling.h"
+
+#include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <iterator>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-// Parser expression helpers are defined in parser/parser.cpp.
-std::vector<uint32_t> decode_utf8_codepoints(const std::string& text);
-bool token_can_start_cast_operand(TokenType tok);
-bool is_integer_literal(TokenType tok);
-bool is_imaginary_integer_literal(TokenType tok);
-TokenType imaginary_integer_to_real_token(TokenType tok);
-bool is_floating_literal(TokenType tok);
-bool is_assignment_token(TokenType tok);
-bool is_unary_operator_token(TokenType tok);
-std::shared_ptr<CType> getNumericTypeConstant(Token tok, TypeContext* type_ctx);
+namespace aburi::syntax {
 
 namespace {
-struct TemplateArgumentGroupGuard {
-    Parser& parser;
+
+TextPayload text_payload(std::string_view text) {
+    return TextPayload{std::string(text)};
+}
+
+FloatingLiteralKind floating_literal_kind_for(TokenType type) {
+    switch (type) {
+        case TokenType::FLOAT_CONST:
+            return FloatingLiteralKind::Float;
+        case TokenType::LONG_DOUBLE_CONST:
+            return FloatingLiteralKind::LongDouble;
+        default:
+            return FloatingLiteralKind::Double;
+    }
+}
+
+int64_t character_literal_value(std::string_view decoded) {
+    int64_t value = 0;
+    for (unsigned char byte : decoded) {
+        value <<= 8;
+        value |= static_cast<int64_t>(byte);
+    }
+    return value;
+}
+
+PrecLevel next_prec_level(PrecLevel level) {
+    return static_cast<PrecLevel>(static_cast<uint8_t>(level) + 1);
+}
+
+bool is_assignment_token(TokenType type) {
+    switch (type) {
+        case TokenType::ASSIGN:
+        case TokenType::ASSIGN_ADD:
+        case TokenType::ASSIGN_SUB:
+        case TokenType::ASSIGN_MUL:
+        case TokenType::ASSIGN_DIV:
+        case TokenType::ASSIGN_MOD:
+        case TokenType::ASSIGN_LSHIFT:
+        case TokenType::ASSIGN_RSHIFT:
+        case TokenType::ASSIGN_AND:
+        case TokenType::ASSIGN_XOR:
+        case TokenType::ASSIGN_OR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_fold_operator(BinaryOperator op) {
+    switch (op) {
+        case BinaryOperator::Add:
+        case BinaryOperator::Sub:
+        case BinaryOperator::Mul:
+        case BinaryOperator::Div:
+        case BinaryOperator::Mod:
+        case BinaryOperator::Less:
+        case BinaryOperator::LessEqual:
+        case BinaryOperator::Greater:
+        case BinaryOperator::GreaterEqual:
+        case BinaryOperator::Equal:
+        case BinaryOperator::NotEqual:
+        case BinaryOperator::Assign:
+        case BinaryOperator::AssignAdd:
+        case BinaryOperator::AssignSub:
+        case BinaryOperator::AssignMul:
+        case BinaryOperator::AssignDiv:
+        case BinaryOperator::AssignMod:
+        case BinaryOperator::AssignShl:
+        case BinaryOperator::AssignShr:
+        case BinaryOperator::AssignAnd:
+        case BinaryOperator::AssignXor:
+        case BinaryOperator::AssignOr:
+        case BinaryOperator::BitAnd:
+        case BinaryOperator::BitOr:
+        case BinaryOperator::BitXor:
+        case BinaryOperator::Shl:
+        case BinaryOperator::Shr:
+        case BinaryOperator::PtrMemDot:
+        case BinaryOperator::PtrMemArrow:
+        case BinaryOperator::LogicalAnd:
+        case BinaryOperator::LogicalOr:
+        case BinaryOperator::Comma:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool should_retain_dependent_fold_pattern(
+    const collect::Session& session,
+    bool retaining_constraint_normal_form) {
+    return session.collecting_pattern() &&
+        !(session.is_instantiating() &&
+          retaining_constraint_normal_form);
+}
+
+std::optional<bool> empty_boolean_fold_identity(BinaryOperator op) {
+    switch (op) {
+        case BinaryOperator::LogicalAnd:
+            return true;
+        case BinaryOperator::LogicalOr:
+            return false;
+        default:
+            return std::nullopt;
+    }
+}
+
+std::optional<collect::ExprResult> empty_unary_fold_identity(
+    collect::Session& session,
+    BinaryOperator op,
+    SrcLoc loc) {
+    if (std::optional<bool> identity = empty_boolean_fold_identity(op)) {
+        return session.make_boolean_literal(*identity,
+                                            *identity ? "true" : "false",
+                                            loc);
+    }
+    if (op == BinaryOperator::Comma) {
+        return session.make_void_prvalue();
+    }
+    return std::nullopt;
+}
+
+bool token_can_start_cast_operand(TokenType type) {
+    switch (type) {
+        case TokenType::IDENTIFIER:
+        case TokenType::INTEGER_CONST:
+        case TokenType::UNSIGNED_INTEGER_CONST:
+        case TokenType::LONG_CONST:
+        case TokenType::UNSIGNED_LONG_CONST:
+        case TokenType::LONG_LONG_CONST:
+        case TokenType::UNSIGNED_LONG_LONG_CONST:
+        case TokenType::BITINT_CONST:
+        case TokenType::UNSIGNED_BITINT_CONST:
+        case TokenType::PP_NUMBER:
+        case TokenType::FLOAT_CONST:
+        case TokenType::DOUBLE_CONST:
+        case TokenType::LONG_DOUBLE_CONST:
+        case TokenType::CHAR_LITERAL:
+        case TokenType::STRING_LITERAL:
+        case TokenType::TRUE_KW:
+        case TokenType::FALSE_KW:
+        case TokenType::NULLPTR_KW:
+        case TokenType::THIS_KW:
+        case TokenType::LEFT_PAREN:
+        case TokenType::PLUS:
+        case TokenType::NEGATE:
+        case TokenType::LOGICAL_NOT:
+        case TokenType::BITWISE_NOT:
+        case TokenType::MULTIPLY:
+        case TokenType::BITWISE_AND:
+
+        case TokenType::LOGICAL_AND:
+        case TokenType::INCREMENT:
+        case TokenType::DECREMENT:
+        case TokenType::SIZEOF:
+        case TokenType::ALIGNOF:
+        case TokenType::TYPEID_KW:
+        case TokenType::EXTENSION_KW:
+        case TokenType::REAL_PART:
+        case TokenType::IMAG_PART:
+
+        case TokenType::GENERIC:
+        case TokenType::REQUIRES_KW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+struct CxxNamedCastInfo {
+    collect::CppNamedCastKind collect_kind = collect::CppNamedCastKind::Static;
+    CastOperator syntax_kind = CastOperator::Invalid;
+};
+
+std::optional<CxxNamedCastInfo> cxx_named_cast_kind(std::string_view name) {
+    if (name == "static_cast") {
+        return CxxNamedCastInfo{collect::CppNamedCastKind::Static,
+                                CastOperator::CppStatic};
+    }
+    if (name == "const_cast") {
+        return CxxNamedCastInfo{collect::CppNamedCastKind::Const,
+                                CastOperator::CppConst};
+    }
+    if (name == "reinterpret_cast") {
+        return CxxNamedCastInfo{collect::CppNamedCastKind::Reinterpret,
+                                CastOperator::CppReinterpret};
+    }
+    if (name == "dynamic_cast") {
+        return CxxNamedCastInfo{collect::CppNamedCastKind::Dynamic,
+                                CastOperator::CppDynamic};
+    }
+    return std::nullopt;
+}
+
+struct TemplateReplayGuardScope {
+    collect::Session& session;
     bool active = false;
 
-    explicit TemplateArgumentGroupGuard(Parser& parser)
-        : parser(parser),
-          active(parser.is_parsing_template_argument_expression()) {
-        if (active) {
-            parser.enter_template_argument_group();
-        }
-    }
+    TemplateReplayGuardScope(collect::Session& session, SrcLoc loc)
+        : session(session), active(session.enter_template_replay_guard(loc)) {}
 
-    ~TemplateArgumentGroupGuard() {
+    ~TemplateReplayGuardScope() {
         if (active) {
-            parser.leave_template_argument_group();
+            session.leave_template_replay_guard();
         }
     }
 };
 
-void bump_parser_annotation_overlay_hit() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserAnnotationOverlayHits);
+bool template_argument_is_dependent(
+    collect::Session& session,
+    const collect::Session::TemplateArgument& argument) {
+    if (argument.kind == cir::TemplateArgumentKind::Type) {
+        return session.type_contains_type_param(argument.type.type);
     }
-}
-
-void bump_parser_annotation_overlay_miss() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserAnnotationOverlayMisses);
+    if (argument.kind == cir::TemplateArgumentKind::Value) {
+        return argument.is_dependent ||
+               session.type_contains_type_param(argument.value_type.type) ||
+               session.type_contains_type_param(
+                   argument.dependent_value_qualifier.type);
     }
-}
-
-void bump_parser_annotation_overlay_publish() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserAnnotationOverlayPublishes);
+    if (argument.kind == cir::TemplateArgumentKind::Template) {
+        return argument.is_dependent;
     }
-}
-
-void bump_type_construction_fast_reject() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTypeConstructionFastRejects);
-    }
-}
-
-void bump_type_construction_lookup_reject() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::ParserTypeConstructionLookupRejects);
-    }
-}
-
-void bump_cast_disambiguation_fast_accept() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserCastDisambiguationFastAccepts);
-    }
-}
-
-void bump_cast_disambiguation_fast_reject() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserCastDisambiguationFastRejects);
-    }
-}
-
-void bump_cast_disambiguation_inconclusive_fallback() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserCastDisambiguationInconclusiveFallbacks);
-    }
-}
-
-void bump_postfix_template_suffix_fast_reject() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserPostfixTemplateSuffixFastRejects);
-    }
-}
-
-void bump_cast_direct_type_id_parse() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserCastDirectTypeIdParses);
-    }
-}
-
-void bump_cast_direct_type_id_fallback() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserCastDirectTypeIdFallbacks);
-    }
-}
-
-void bump_type_construction_direct_type_id_parse() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserTypeConstructionDirectTypeIdParses);
-    }
-}
-
-void bump_type_construction_direct_type_id_fallback() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserTypeConstructionDirectTypeIdFallbacks);
-    }
-}
-
-bool try_get_fold_operator(const Token& token, BinOpTypes& op_out) {
-    std::string spelling = token.value;
-    op_out = string2bop(spelling);
-    return op_out != BinOpTypes::UNKNOWN &&
-           op_out != BinOpTypes::QUESTION;
-}
-
-std::unique_ptr<TemplateParameterDecl> clone_template_parameter_for_shape_check(
-    ASTContext& ast_ctx,
-    const TemplateParameterDecl* parameter) {
-    if (!parameter) {
-        return nullptr;
-    }
-
-    switch (parameter->get_kind()) {
-        case DeclKind::TemplateTypeParmDecl: {
-            auto* type_param =
-                static_cast<const TemplateTypeParmDecl*>(parameter);
-            auto cloned_type = std::make_shared<TemplateTypeParmType>(
-                type_param->name,
-                type_param->depth,
-                type_param->index,
-                type_param->is_parameter_pack);
-            auto cloned = make_ast<TemplateTypeParmDecl>(
-                ast_ctx,
-                type_param->name,
-                type_param->depth,
-                type_param->index,
-                cloned_type,
-                type_param->is_parameter_pack,
-                type_param->location);
-            cloned_type->parameter_decl = cloned.get();
-            return cloned;
-        }
-        case DeclKind::TemplateNonTypeParmDecl: {
-            auto* non_type_param =
-                static_cast<const TemplateNonTypeParmDecl*>(parameter);
-            std::shared_ptr<Symbol> cloned_symbol = nullptr;
-            if (non_type_param->sym) {
-                cloned_symbol = std::make_shared<Symbol>(
-                    non_type_param->sym->name,
-                    non_type_param->sym->kind,
-                    non_type_param->sym->type,
-                    non_type_param->sym->storage_class,
-                    non_type_param->sym->linkage,
-                    non_type_param->sym->is_inline != 0);
-                cloned_symbol->is_constexpr = non_type_param->sym->is_constexpr;
-                cloned_symbol->set_language_linkage(
-                    non_type_param->sym->get_language_linkage());
-            }
-            return make_ast<TemplateNonTypeParmDecl>(
-                ast_ctx,
-                non_type_param->name,
-                non_type_param->depth,
-                non_type_param->index,
-                non_type_param->type,
-                cloned_symbol,
-                non_type_param->is_parameter_pack,
-                non_type_param->location);
-        }
-        case DeclKind::TemplateTemplateParmDecl: {
-            auto* template_param =
-                static_cast<const TemplateTemplateParmDecl*>(parameter);
-            TemplateParameterList cloned_parameters;
-            cloned_parameters.reserve(template_param->parameters.size());
-            for (const auto& inner_parameter : template_param->parameters) {
-                cloned_parameters.push_back(
-                    clone_template_parameter_for_shape_check(
-                        ast_ctx,
-                        inner_parameter.get()));
-            }
-            return make_ast<TemplateTemplateParmDecl>(
-                ast_ctx,
-                std::move(cloned_parameters),
-                template_param->name,
-                template_param->depth,
-                template_param->index,
-                template_param->uses_typename_keyword,
-                template_param->is_parameter_pack,
-                template_param->location);
-        }
-        default:
-            return nullptr;
-    }
-}
-
-TemplateParameterList clone_active_template_parameters_for_shape_check(
-    ASTContext& ast_ctx,
-    const std::vector<std::vector<const TemplateParameterDecl*>>&
-        active_parameter_stack) {
-    TemplateParameterList parameters;
-    for (const auto& frame : active_parameter_stack) {
-        for (const auto* parameter : frame) {
-            if (auto cloned =
-                    clone_template_parameter_for_shape_check(ast_ctx, parameter)) {
-                parameters.push_back(std::move(cloned));
-            }
-        }
-    }
-    return parameters;
-}
-
-bool expr_references_active_parameter_pack(
-    ASTContext* ast_ctx,
-    const Expr* expr,
-    const std::vector<std::vector<const TemplateParameterDecl*>>&
-        active_parameter_stack) {
-    if (!ast_ctx || !expr) {
-        return false;
-    }
-
-    auto active_parameters = clone_active_template_parameters_for_shape_check(
-        *ast_ctx,
-        active_parameter_stack);
-    collect_template_internal::TemplatePackExpansionShape shape;
-    return collect_template_internal::collect_pack_expansion_shape_in_expr(
-               expr,
-               active_parameters,
-               shape) &&
-           !shape.has_unsupported_dependency &&
-           !shape.referenced_parameters.empty();
+    return false;
 }
 
 } // namespace
 
-bool Parser::skip_balanced_group_for_template_id_lookahead(
-    size_t& offset,
-    TokenType open_tok,
-    TokenType close_tok) {
-    if (peek_token_shortcut(offset).type != open_tok) {
-        return false;
-    }
-    size_t depth = 0;
-    while (peek_token_shortcut(offset).type != TokenType::Eof) {
-        TokenType tok = peek_token_shortcut(offset).type;
-        if (tok == open_tok) {
-            ++depth;
-        } else if (tok == close_tok) {
-            --depth;
-            ++offset;
-            if (depth == 0) {
-                return true;
-            }
-            continue;
-        }
-        ++offset;
-    }
-    return false;
-}
-
-bool Parser::skip_template_argument_list_for_expression_probe(size_t& offset) {
-    if (peek_token_shortcut(offset).type != TokenType::LESS_THAN) {
-        return false;
-    }
-    ++offset;
-    size_t angle_depth = 1;
-    while (peek_token_shortcut(offset).type != TokenType::Eof) {
-        TokenType tok = peek_token_shortcut(offset).type;
-        switch (tok) {
-            case TokenType::LESS_THAN:
-                ++angle_depth;
-                ++offset;
-                break;
-            case TokenType::GREATER_THAN:
-                --angle_depth;
-                ++offset;
-                if (angle_depth == 0) {
-                    return true;
-                }
-                break;
-            case TokenType::RIGHT_SHIFT:
-                if (angle_depth <= 2) {
-                    ++offset;
-                    return true;
-                }
-                angle_depth -= 2;
-                ++offset;
-                break;
-            case TokenType::LEFT_PAREN:
-                if (!skip_balanced_group_for_template_id_lookahead(
-                        offset,
-                        TokenType::LEFT_PAREN,
-                        TokenType::RIGHT_PAREN)) {
-                    return false;
-                }
-                break;
-            case TokenType::LEFT_BRACE:
-                if (!skip_balanced_group_for_template_id_lookahead(
-                        offset,
-                        TokenType::LEFT_BRACE,
-                        TokenType::RIGHT_BRACE)) {
-                    return false;
-                }
-                break;
-            case TokenType::LEFT_BRACKET:
-                if (!skip_balanced_group_for_template_id_lookahead(
-                        offset,
-                        TokenType::LEFT_BRACKET,
-                        TokenType::RIGHT_BRACKET)) {
-                    return false;
-                }
-                break;
-            default:
-                ++offset;
-                break;
-        }
-    }
-    return false;
-}
-
-void Parser::retain_type_specifier_decl_if_needed(DeclarationParser& decl_parser) {
-    if (!ast_ctx) {
+void Parser::bind_unqualified_member_template_id(
+    collect::ExprResult& expression,
+    std::string_view name,
+    SrcLoc loc) {
+    if (expression.qualified_name || expression.has_error) {
         return;
     }
-    if (decl_parser.cpp_record_obj) {
-        ast_ctx->retain_external_decl(std::move(decl_parser.cpp_record_obj));
+    std::vector<cir::EntityId> candidates = expression.candidates;
+    if (candidates.empty() && expression.entity.valid()) {
+        candidates.push_back(expression.entity);
     }
-    if (decl_parser.struct_obj) {
-        ast_ctx->retain_external_decl(std::move(decl_parser.struct_obj));
+    const cir::File& file = collect_session_.file();
+    bool has_non_static_method =
+        std::any_of(candidates.begin(), candidates.end(),
+                    [&](cir::EntityId candidate) {
+                        if (!candidate.valid() || !file.valid(candidate) ||
+                            file.entity(candidate).kind !=
+                                cir::EntityKind::Method) {
+                            return false;
+                        }
+                        const cir::RecordMethodFact* method =
+                            file.method_fact(candidate);
+                        return !file.entity(candidate)
+                                    .is_static_member_function &&
+                            !(method && method->is_static);
+                    });
+    if (!has_non_static_method) {
+        return;
     }
-    if (decl_parser.enum_obj) {
-        ast_ctx->retain_external_decl(std::move(decl_parser.enum_obj));
+
+    collect::ExprResult bound = collect_session_.lookup_name(name, loc);
+    if (bound.category != collect::ValueCategory::FunctionDesignator ||
+        !bound.place.valid()) {
+        return;
     }
-    for (auto& param_parser : decl_parser.func_args) {
-        if (!param_parser) {
-            continue;
+    expression.fragment = std::move(bound.fragment);
+    expression.place = bound.place;
+    expression.bound_member_object_category =
+        bound.bound_member_object_category;
+    expression.member_access_object_type =
+        bound.member_access_object_type;
+    expression.member_candidate_object_paths =
+        std::move(bound.member_candidate_object_paths);
+    expression.has_error = expression.has_error || bound.has_error;
+}
+
+collect::ExprResult Parser::template_id_expression_result(
+    const collect::Session::TemplateInfo& info,
+    cir::EntityId instantiated,
+    SrcLoc loc,
+    bool qualified_name) {
+    collect::ExprResult sem;
+    if (!instantiated.valid()) {
+        sem.has_error = true;
+        return sem;
+    }
+    const cir::File& file = collect_session_.file();
+    if (info.is_class_template || info.is_alias_template) {
+        sem.type = file.entity(instantiated).type;
+        sem.category = collect::ValueCategory::Type;
+        sem.unparenthesized_id_or_member = true;
+        return sem;
+    }
+    if (info.is_variable_template) {
+        std::string display =
+            file.entity(instantiated).name.valid()
+                ? std::string(file.name(file.entity(instantiated).name))
+                : info.name;
+        return collect_session_.make_entity_reference(instantiated,
+                                                      display,
+                                                      loc,
+                                                      qualified_name);
+    }
+    if (info.is_concept) {
+        sem.has_error = true;
+        return sem;
+    }
+    sem.entity = instantiated;
+    sem.type = file.entity(instantiated).type;
+    sem.name = info.name;
+    sem.qualified_name = qualified_name;
+    sem.category = collect::ValueCategory::FunctionDesignator;
+    sem.unparenthesized_id_or_member = true;
+    bind_unqualified_member_template_id(sem, info.name, loc);
+    return sem;
+}
+
+collect::ExprResult Parser::evaluate_concept_id_expression(
+    const collect::Session::TemplateInfo& info,
+    std::vector<collect::Session::TemplateArgument> arguments,
+    SrcLoc loc,
+    bool qualified_name,
+    std::vector<collect::Session::TemplateArgument>* canonical_arguments_out,
+    uint64_t point_lookup_generation) {
+
+    if (Parser* owner = module_unit_parser_for(info.entity)) {
+        collect::Session::ModuleVisibilityOverride visibility(
+            collect_session_,
+            collect_session_.file().entity(info.entity).origin_unit);
+        size_t diagnostic_watermark = owner->diagnostics_.size();
+        collect::ExprResult result = owner->evaluate_concept_id_expression(
+            info,
+            std::move(arguments),
+            loc,
+            qualified_name,
+            canonical_arguments_out,
+            point_lookup_generation);
+        diagnostics_.insert(
+            diagnostics_.end(),
+            std::make_move_iterator(
+                owner->diagnostics_.begin() + diagnostic_watermark),
+            std::make_move_iterator(owner->diagnostics_.end()));
+        owner->diagnostics_.resize(diagnostic_watermark);
+        return result;
+    }
+    if (info.entity.valid() && collect_session_.file().valid(info.entity) &&
+        collect_session_.file().entity(info.entity).attr_facts.is_deprecated) {
+        const std::string& note = collect_session_.file()
+                                      .entity(info.entity)
+                                      .attr_facts.deprecated_message;
+        collect_session_.report_warning(
+            WarningId::DeprecatedDeclarations,
+            "'" + info.name + "' is deprecated" +
+                (note.empty() ? "" : ": " + note),
+            loc);
+    }
+    auto make_error = [] {
+        collect::ExprResult sem;
+        sem.has_error = true;
+        return sem;
+    };
+    auto make_dependent = [&](const std::vector<
+                              collect::Session::TemplateArgument>&
+                                  canonical_arguments) {
+        collect_session_.bump_pattern_taint();
+        collect::ExprResult sem =
+            collect_session_.make_boolean_literal(false, "false", loc);
+        cir::TemplateValueExpression expression;
+        expression.loc = loc;
+        expression.definition_context =
+            collect_session_.current_decl_context();
+        expression.definition_lookup_generation =
+            point_lookup_generation != 0
+                ? point_lookup_generation
+                : collect_session_.lookup_generation();
+        cir::TemplateValueExprNode concept_node;
+        concept_node.kind = cir::TemplateValueExprKind::ConceptId;
+        concept_node.result_type =
+            collect_session_.type_ref(
+                collect_session_.file().builtin_type(
+                    cir::BuiltinTypeKind::Bool));
+        concept_node.entity = info.entity;
+        concept_node.name =
+            collect_session_.file().intern_name(info.name);
+        concept_node.semantic_key = info.name;
+        concept_node.template_arguments =
+            cir::TemplateArgumentList(canonical_arguments);
+        expression.nodes.push_back(std::move(concept_node));
+        expression.root = 0;
+        sem.template_value_expr = std::move(expression);
+        sem.value_dependent = true;
+        sem.name = info.name;
+        sem.qualified_name = qualified_name;
+        sem.unparenthesized_id_or_member = true;
+        return sem;
+    };
+    auto make_value = [&](bool concept_value) {
+        collect::ExprResult sem =
+            collect_session_.make_boolean_literal(
+                concept_value,
+                concept_value ? "true" : "false",
+                loc);
+        sem.name = info.name;
+        sem.qualified_name = qualified_name;
+        sem.unparenthesized_id_or_member = true;
+        return sem;
+    };
+
+    const bool substitution_candidate =
+        in_constraint_substitution_failure_context();
+    if (!canonicalize_template_arguments(
+            info,
+            arguments,
+            loc,
+            &point_lookup_generation,
+            substitution_candidate
+                ? collect::Session::TemplateArgumentCompletionMode::Candidate
+                : collect::Session::TemplateArgumentCompletionMode::Required)) {
+        if (substitution_candidate) {
+
+            note_constraint_substitution_failure();
         }
-        retain_type_specifier_decl_if_needed(*param_parser);
+        return make_error();
     }
+    if (canonical_arguments_out) {
+        *canonical_arguments_out = arguments;
+    }
+    for (const collect::Session::TemplateArgument& argument : arguments) {
+        if (template_argument_is_dependent(collect_session_, argument)) {
+            return make_dependent(arguments);
+        }
+    }
+    if (!info.has_definition) {
+        diagnose(DiagnosticLevel::Error,
+                 "cannot evaluate undefined concept '" + info.name + "'",
+                 loc);
+        return make_error();
+    }
+
+    collect::Session::TemplateArgumentBindings argument_bindings;
+    if (!collect_session_.bind_template_arguments_to_parameters(
+            info.parameters, arguments, argument_bindings)) {
+        return make_error();
+    }
+    collect_session_.canonicalize_template_argument_bindings(
+        argument_bindings);
+    using SatisfactionKind =
+        collect::Session::ConstraintSatisfactionRequestKind;
+    using SatisfactionResult =
+        collect::Session::ConstraintSatisfactionResult;
+    using SatisfactionState =
+        collect::Session::ConstraintSatisfactionScope::State;
+    collect::Session::ConstraintSatisfactionScope satisfaction_scope =
+        collect_session_.begin_constraint_satisfaction(
+            SatisfactionKind::ConceptId,
+            info.entity,
+            argument_bindings,
+            point_lookup_generation);
+    if (satisfaction_scope.state == SatisfactionState::Cached) {
+        return make_value(
+            *satisfaction_scope.cached_result ==
+            SatisfactionResult::Satisfied);
+    }
+    if (satisfaction_scope.state == SatisfactionState::Recursive) {
+        diagnose(DiagnosticLevel::Error,
+                 "constraint satisfaction depends on itself",
+                 loc);
+        return make_error();
+    }
+    struct SatisfactionExit {
+        collect::Session* session = nullptr;
+        collect::Session::ConstraintSatisfactionScope scope;
+        bool complete = false;
+
+        ~SatisfactionExit() {
+            if (session && !complete) {
+                session->abandon_constraint_satisfaction(std::move(scope));
+            }
+        }
+
+        void finish(SatisfactionResult result) {
+            session->finish_constraint_satisfaction(std::move(scope), result);
+            complete = true;
+        }
+    } satisfaction_exit{&collect_session_, std::move(satisfaction_scope)};
+
+    if (info.constraint_normal_form.has_value()) {
+        collect::Session::NormalizedConstraint normal_form;
+        uint32_t root =
+            normal_form.append_copy_of(*info.constraint_normal_form);
+        collect::Session::PatternInstantiationCallbacks callbacks;
+        callbacks.point_lookup_generation = point_lookup_generation;
+        configure_pattern_instantiation_callbacks(callbacks, loc);
+        std::string substitution_error;
+        if (!normal_form.valid_node(root)) {
+            satisfaction_exit.finish(SatisfactionResult::Unsatisfied);
+            return make_value(false);
+        }
+        {
+
+            TentativeParsingAction mapping_transaction(
+                *this, TentativeMode::CollectBacked);
+            collect::Session::NormalizedConstraint composed_form =
+                normal_form;
+            if (collect_session_.compose_constraint_parameter_mappings(
+                    composed_form,
+                    root,
+                    argument_bindings,
+                    callbacks,
+                    &substitution_error)) {
+                normal_form = std::move(composed_form);
+                mapping_transaction.commit();
+            }
+        }
+        root = expand_concept_pack_fold_constraints(normal_form, root, loc);
+        if (!normal_form.valid_node(root)) {
+            satisfaction_exit.finish(SatisfactionResult::Unsatisfied);
+            return make_value(false);
+        }
+        NormalizedConstraintCheckResult normalized =
+            evaluate_normalized_associated_constraint(
+                info,
+                arguments,
+                normal_form,
+                root,
+                loc,
+                point_lookup_generation);
+        switch (normalized) {
+            case NormalizedConstraintCheckResult::Satisfied:
+                satisfaction_exit.finish(SatisfactionResult::Satisfied);
+                return make_value(true);
+            case NormalizedConstraintCheckResult::Unsatisfied:
+                satisfaction_exit.finish(SatisfactionResult::Unsatisfied);
+                return make_value(false);
+            case NormalizedConstraintCheckResult::Invalid:
+                satisfaction_exit.finish(SatisfactionResult::Invalid);
+                return make_error();
+            case NormalizedConstraintCheckResult::Unsupported:
+                break;
+        }
+    }
+
+    TemplateReplayGuardScope replay_guard(collect_session_, loc);
+    if (!replay_guard.active) {
+        satisfaction_exit.finish(SatisfactionResult::Invalid);
+        return make_error();
+    }
+
+    size_t error_watermark = collect_session_.file().errors().size();
+    collect_session_.begin_speculative_parse();
+    collect::Session::InstantiationScope scope =
+        collect_session_.begin_template_instantiation(info,
+                                                      arguments,
+                                                      loc,
+                                                      point_lookup_generation);
+    if (!scope.active) {
+        std::vector<std::pair<SrcLoc, std::string>> captured_errors(
+            collect_session_.file().errors().begin() + error_watermark,
+            collect_session_.file().errors().end());
+        collect_session_.rollback_speculative_parse();
+        for (const auto& [error_loc, message] : captured_errors) {
+            collect_session_.report_error(message, error_loc);
+        }
+        satisfaction_exit.finish(SatisfactionResult::Invalid);
+        return make_error();
+    }
+
+    ParserCheckpoint replay_checkpoint = capture_parser_checkpoint();
+    bool isolate_substitution_failure =
+        in_constraint_substitution_failure_context();
+    bool saved_substitution_failure = constraint_substitution_failure_;
+    if (isolate_substitution_failure) {
+        constraint_substitution_failure_ = false;
+    }
+    std::vector<size_t> saved_template_argument_expression_begins =
+        template_argument_expression_begins_;
+    seek_raw_index(info.constraint_begin);
+
+    pending_template_closes_ = 0;
+    template_argument_expression_begins_.clear();
+
+    collect_session_.begin_pattern_collection();
+    uint64_t taint_before = collect_session_.pattern_taint();
+    ParsedExpr expression = parse_constraint_expression();
+    bool value_dependent =
+        collect_session_.pattern_taint() != taint_before ||
+        collect_session_.expr_is_dependent(expression.sem) ||
+        expression.sem.references_template_value_parameter;
+    bool consumed_full_expression = current_raw_index() == info.constraint_end;
+    bool valid = !expression.sem.has_error;
+    if (!consumed_full_expression) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ';' after concept constraint-expression",
+                 current_loc());
+        valid = false;
+    }
+
+    std::optional<bool> value;
+    if (valid) {
+        valid = collect_session_.evaluate_constraint_expression(
+            std::move(expression.sem),
+            value_dependent,
+            value,
+            loc_for_index(info.constraint_begin));
+    }
+    bool concept_substitution_failure =
+        isolate_substitution_failure && constraint_substitution_failure_;
+    if (isolate_substitution_failure) {
+        constraint_substitution_failure_ = saved_substitution_failure;
+    }
+
+    (void)collect_session_.finish_pattern_collection();
+    collect_session_.finish_template_instantiation(std::move(scope));
+
+    std::vector<std::pair<SrcLoc, std::string>> captured_errors(
+        collect_session_.file().errors().begin() + error_watermark,
+        collect_session_.file().errors().end());
+    std::vector<Diagnostic> captured_parser_diagnostics(
+        diagnostics_.begin() + replay_checkpoint.diagnostics_size,
+        diagnostics_.end());
+    restore_parser_checkpoint(replay_checkpoint);
+    template_argument_expression_begins_ =
+        std::move(saved_template_argument_expression_begins);
+    collect_session_.rollback_speculative_parse();
+    if (concept_substitution_failure) {
+        satisfaction_exit.finish(SatisfactionResult::Unsatisfied);
+        return make_value(false);
+    }
+    if (!valid) {
+        diagnostics_.insert(diagnostics_.end(),
+                            captured_parser_diagnostics.begin(),
+                            captured_parser_diagnostics.end());
+        for (const auto& [error_loc, message] : captured_errors) {
+            collect_session_.report_error(message, error_loc);
+        }
+        satisfaction_exit.finish(SatisfactionResult::Invalid);
+        return make_error();
+    }
+    if (!value.has_value()) {
+        satisfaction_exit.finish(SatisfactionResult::Dependent);
+        return make_dependent(arguments);
+    }
+
+    satisfaction_exit.finish(*value ? SatisfactionResult::Satisfied
+                                    : SatisfactionResult::Unsatisfied);
+    return make_value(*value);
 }
 
-TemplateParameterList Parser::lower_generic_lambda_parameter_placeholders(
-    std::vector<std::unique_ptr<Decl>>& parameters,
-    TemplateParameterList template_parameters,
-    const std::string& closure_name,
-    uint32_t parameter_depth,
-    SrcLoc lambda_loc) {
-    (void)closure_name;
-    lower_cxx_auto_function_parameter_placeholders(
-        parameters,
-        nullptr,
-        template_parameters,
-        parameter_depth,
-        lambda_loc);
+collect::ExprResult Parser::instantiate_template_id_expression_result(
+    const collect::Session::TemplateInfo& info,
+    std::vector<collect::Session::TemplateArgument> arguments,
+    SrcLoc loc,
+    bool qualified_name,
+    std::vector<collect::Session::TemplateArgument>*
+        canonical_concept_arguments_out,
+    const std::vector<const collect::Session::TemplateInfo*>*
+        function_candidates,
+    const std::vector<collect::CandidateExplicitTemplateArguments>*
+        candidate_explicit_arguments) {
+    auto arguments_for_candidate =
+        [&](const collect::Session::TemplateInfo& candidate)
+        -> const std::vector<collect::Session::TemplateArgument>& {
+        if (candidate_explicit_arguments) {
+            auto found = std::find_if(
+                candidate_explicit_arguments->begin(),
+                candidate_explicit_arguments->end(),
+                [&](const collect::CandidateExplicitTemplateArguments&
+                        entry) {
+                    return entry.template_entity == candidate.entity;
+                });
+            if (found != candidate_explicit_arguments->end()) {
+                return found->arguments;
+            }
+        }
+        return arguments;
+    };
+    auto candidate_was_rejected =
+        [&](const collect::Session::TemplateInfo& candidate) {
+        if (!candidate_explicit_arguments) {
+            return false;
+        }
+        auto found = std::find_if(
+            candidate_explicit_arguments->begin(),
+            candidate_explicit_arguments->end(),
+            [&](const collect::CandidateExplicitTemplateArguments& entry) {
+                return entry.template_entity == candidate.entity;
+            });
+        return found != candidate_explicit_arguments->end() &&
+            !found->viable;
+    };
+    if (info.is_concept) {
+        return evaluate_concept_id_expression(info,
+                                              std::move(arguments),
+                                              loc,
+                                              qualified_name,
+                                              canonical_concept_arguments_out);
+    }
+    bool dependent_function_template_id =
+        !info.is_class_template &&
+        !info.is_alias_template &&
+        !info.is_variable_template &&
+        !info.is_concept;
+    if (dependent_function_template_id) {
+        dependent_function_template_id = false;
+        for (const collect::Session::TemplateArgument& argument : arguments) {
+            if (template_argument_is_dependent(collect_session_, argument)) {
+                dependent_function_template_id = true;
+                break;
+            }
+        }
+    }
+    if (dependent_function_template_id) {
+        collect::ExprResult sem;
+        auto append_candidate = [&](const collect::Session::TemplateInfo* candidate) {
+            if (!candidate || candidate->is_class_template ||
+                candidate->is_alias_template ||
+                candidate->is_variable_template || candidate->is_concept ||
+                !candidate->entity.valid() ||
+                std::find(sem.candidates.begin(), sem.candidates.end(),
+                          candidate->entity) != sem.candidates.end()) {
+                return;
+            }
+            if (candidate_was_rejected(*candidate)) {
+                return;
+            }
+            sem.candidates.push_back(candidate->entity);
+        };
+        if (function_candidates) {
+            for (const collect::Session::TemplateInfo* candidate :
+                 *function_candidates) {
+                append_candidate(candidate);
+            }
+        }
+        append_candidate(&info);
+        if (!sem.candidates.empty()) {
+            sem.entity = sem.candidates.front();
+        }
+        sem.type = info.pattern_type;
+        sem.name = info.name;
+        sem.qualified_name = qualified_name;
 
-    return template_parameters;
+        sem.category = collect::ValueCategory::FunctionDesignator;
+        sem.has_explicit_template_arguments = true;
+        sem.explicit_template_arguments = std::move(arguments);
+        if (candidate_explicit_arguments) {
+            sem.candidate_explicit_template_arguments =
+                *candidate_explicit_arguments;
+        }
+        sem.unparenthesized_id_or_member = true;
+        bind_unqualified_member_template_id(sem, info.name, loc);
+        return sem;
+    }
+    if (!info.is_class_template &&
+        !info.is_alias_template &&
+        !info.is_variable_template &&
+        !info.is_concept) {
+        collect::ExprResult sem;
+        const bool followed_by_call = check(TokenType::LEFT_PAREN);
+        bool has_unresolved_template_candidate = false;
+        auto append_candidate =
+            [&](const collect::Session::TemplateInfo* candidate) {
+                if (!candidate || candidate->is_class_template ||
+                    candidate->is_alias_template ||
+                    candidate->is_variable_template ||
+                    candidate->is_concept || !candidate->entity.valid() ||
+                    std::find(sem.candidates.begin(),
+                              sem.candidates.end(),
+                              candidate->entity) != sem.candidates.end()) {
+                    return;
+                }
+                if (candidate_was_rejected(*candidate)) {
+                    return;
+                }
+
+                if (!followed_by_call) {
+                    const auto& candidate_arguments =
+                        arguments_for_candidate(*candidate);
+                    collect::Session::TemplateArgumentBindings bindings;
+                    if (!collect_session_
+                             .bind_explicit_template_arguments_prefix_to_parameters(
+                                 candidate->parameters,
+                                 candidate_arguments,
+                                 bindings,
+                                 nullptr,
+                                 collect::Session::
+                                     TemplateArgumentBindingMode::
+                                         FunctionExplicitPrefix)) {
+                        return;
+                    }
+                    collect::Session::TemplateArgumentBindings completed =
+                        bindings;
+                    collect::Session::PatternInstantiationCallbacks callbacks;
+                    configure_pattern_instantiation_callbacks(callbacks, loc);
+                    if (collect_session_
+                            .complete_template_argument_bindings_with_defaults(
+                                *candidate,
+                                completed,
+                                nullptr,
+                                &callbacks,
+                                loc,
+                                collect::Session::
+                                    TemplateArgumentCompletionMode::Candidate)) {
+                        cir::EntityId specialization =
+                            instantiate_template_with_args(
+                                *candidate,
+                                collect_session_
+                                    .flatten_template_argument_bindings(
+                                        completed),
+                                loc,
+                                callbacks.point_lookup_generation);
+                        if (specialization.valid() &&
+                            std::find(sem.candidates.begin(),
+                                      sem.candidates.end(),
+                                      specialization) ==
+                                sem.candidates.end()) {
+                            sem.candidates.push_back(specialization);
+                        }
+                        return;
+                    }
+                }
+                sem.candidates.push_back(candidate->entity);
+                has_unresolved_template_candidate = true;
+            };
+        if (function_candidates) {
+            for (const collect::Session::TemplateInfo* candidate :
+                 *function_candidates) {
+                append_candidate(candidate);
+            }
+        }
+        append_candidate(&info);
+        if (sem.candidates.empty()) {
+            sem.has_error = true;
+            return sem;
+        }
+        sem.entity = sem.candidates.front();
+        sem.has_explicit_template_arguments =
+            has_unresolved_template_candidate;
+        if (has_unresolved_template_candidate) {
+            sem.explicit_template_arguments = std::move(arguments);
+            if (candidate_explicit_arguments) {
+                sem.candidate_explicit_template_arguments =
+                    *candidate_explicit_arguments;
+            }
+        }
+        sem.type = collect_session_.file().valid(sem.entity) &&
+                           collect_session_.template_info(sem.entity) == nullptr
+                       ? collect_session_.file().entity(sem.entity).type
+                       : info.pattern_type;
+        sem.name = info.name;
+        sem.qualified_name = qualified_name;
+        sem.category = collect::ValueCategory::FunctionDesignator;
+        sem.unparenthesized_id_or_member = true;
+        bind_unqualified_member_template_id(sem, info.name, loc);
+        return sem;
+    }
+    cir::EntityId instantiated =
+        instantiate_template_with_args(info, std::move(arguments), loc);
+    return template_id_expression_result(info, instantiated, loc, qualified_name);
 }
 
-bool Parser::is_lambda_declarator_parameter_clause_ahead() {
-    if (!gentle_check(TokenType::LEFT_PAREN)) {
+Parser::ParsedExpr Parser::parse_unqualified_template_id_expression(
+    const collect::Session::TemplateInfo& info,
+    std::string name,
+    SrcLoc loc,
+    size_t begin) {
+    std::vector<const collect::Session::TemplateInfo*> function_candidates;
+    if (!info.is_class_template && !info.is_alias_template &&
+        !info.is_variable_template && !info.is_concept) {
+        function_candidates = collect_session_.function_template_infos_for_name(
+            {}, name, /*include_parents=*/true);
+    }
+    std::vector<collect::Session::TemplateArgument> arguments;
+    std::vector<collect::CandidateExplicitTemplateArguments>
+        candidate_explicit_arguments;
+    const collect::Session::TemplateInfo* selected_info = &info;
+
+    bool parsed_arguments =
+        parse_function_template_argument_list_for_candidates(
+            info,
+            function_candidates,
+            arguments,
+            candidate_explicit_arguments,
+            loc,
+            &selected_info);
+    std::vector<collect::Session::TemplateArgument> canonical_concept_arguments;
+    collect::ExprResult sem = parsed_arguments
+        ? instantiate_template_id_expression_result(
+              *selected_info,
+              std::move(arguments),
+              loc,
+              /*qualified_name=*/false,
+              selected_info->is_concept ? &canonical_concept_arguments
+                                        : nullptr,
+              function_candidates.empty() ? nullptr : &function_candidates,
+              candidate_explicit_arguments.empty()
+                  ? nullptr
+                  : &candidate_explicit_arguments)
+        : collect::ExprResult{};
+    sem.has_error = sem.has_error || !parsed_arguments;
+    sem.unparenthesized_id_or_member = true;
+    NodeId syntax = make_node(NodeKind::Identifier,
+                              begin,
+                              last_consumed_raw_end(),
+                              {},
+                              text_payload(name),
+                              sem.has_error ? NodeFlagHasError : NodeFlagNone);
+    if (parsed_arguments && info.is_concept && !sem.has_error) {
+        record_constraint_concept_id_syntax(
+            syntax,
+            info,
+            std::move(canonical_concept_arguments),
+            /*qualified_name=*/false);
+    }
+    return {syntax, std::move(sem)};
+}
+
+void Parser::record_constraint_concept_id_syntax(
+    NodeId syntax,
+    const collect::Session::TemplateInfo& info,
+    std::vector<collect::Session::TemplateArgument> arguments,
+    bool qualified_name) {
+    if (!info.is_concept || syntax == InvalidNodeId) {
+        return;
+    }
+    if (constraint_concept_id_syntax_.size() <= syntax) {
+        constraint_concept_id_syntax_.resize(static_cast<size_t>(syntax) + 1);
+    }
+    ConstraintConceptIdSyntaxInfo annotation;
+    annotation.concept_entity = info.entity;
+    annotation.concept_name =
+        info.name.empty() ? cir::NameId{}
+                          : collect_session_.file().intern_name(info.name);
+    annotation.qualified_name = qualified_name;
+    annotation.arguments = std::move(arguments);
+    constraint_concept_id_syntax_[syntax] = std::move(annotation);
+}
+
+void Parser::record_dependent_constraint_concept_id_syntax(
+    NodeId syntax,
+    cir::TypeRef dependent_qualifier,
+    std::string_view concept_name,
+    bool qualified_name,
+    size_t argument_list_begin,
+    size_t argument_list_end) {
+    if (syntax == InvalidNodeId || !dependent_qualifier.type.valid()) {
+        return;
+    }
+    if (constraint_concept_id_syntax_.size() <= syntax) {
+        constraint_concept_id_syntax_.resize(static_cast<size_t>(syntax) + 1);
+    }
+    ConstraintConceptIdSyntaxInfo annotation;
+    annotation.dependent_qualifier = dependent_qualifier;
+    annotation.concept_name =
+        collect_session_.file().intern_name(concept_name);
+    annotation.qualified_name = qualified_name;
+    annotation.argument_list_begin = argument_list_begin;
+    annotation.argument_list_end = argument_list_end;
+    constraint_concept_id_syntax_[syntax] = std::move(annotation);
+}
+
+const Parser::ConstraintConceptIdSyntaxInfo*
+Parser::constraint_concept_id_syntax_info(NodeId syntax) const {
+    if (syntax == InvalidNodeId ||
+        syntax >= constraint_concept_id_syntax_.size()) {
+        return nullptr;
+    }
+    const std::optional<ConstraintConceptIdSyntaxInfo>& annotation =
+        constraint_concept_id_syntax_[syntax];
+    return annotation ? &*annotation : nullptr;
+}
+
+void Parser::record_constraint_fold_operand_syntax(
+    NodeId syntax,
+    ConstraintFoldOperandSyntaxInfo info) {
+    if (syntax == InvalidNodeId) {
+        return;
+    }
+    if (constraint_fold_operand_syntax_.size() <= syntax) {
+        constraint_fold_operand_syntax_.resize(static_cast<size_t>(syntax) + 1);
+    }
+    constraint_fold_operand_syntax_[syntax] = std::move(info);
+}
+
+const Parser::ConstraintFoldOperandSyntaxInfo*
+Parser::constraint_fold_operand_syntax_info(NodeId syntax) const {
+    if (syntax == InvalidNodeId ||
+        syntax >= constraint_fold_operand_syntax_.size()) {
+        return nullptr;
+    }
+    const std::optional<ConstraintFoldOperandSyntaxInfo>& annotation =
+        constraint_fold_operand_syntax_[syntax];
+    return annotation ? &*annotation : nullptr;
+}
+
+bool Parser::diagnose_invalid_concept_pack_fold_pattern(NodeId syntax,
+                                                        SrcLoc loc) {
+    const ConstraintFoldOperandSyntaxInfo* info =
+        constraint_fold_operand_syntax_info(syntax);
+    if (!info) {
         return false;
     }
 
-    size_t offset = 0;
-    size_t depth = 0;
-    while (true) {
-        TokenType type = peek_token_shortcut(offset).type;
-        if (type == TokenType::Eof) {
+    bool has_concept_template_pack = false;
+    bool has_other_template_parameter_pack = false;
+    for (const collect::Session::ParameterPackIdentity& pack : info->packs) {
+        if (pack.kind != collect::Session::ParameterPackKind::Template) {
+            has_other_template_parameter_pack = true;
+            continue;
+        }
+        const collect::Session::TemplateInfo* pack_info =
+            collect_session_.template_parameter_pack_info_for_name(pack.name);
+        if (pack_info && pack_info->is_concept) {
+            has_concept_template_pack = true;
+        } else {
+            has_other_template_parameter_pack = true;
+        }
+    }
+    if (!has_concept_template_pack || !has_other_template_parameter_pack) {
+        return false;
+    }
+
+    diagnose(DiagnosticLevel::Error,
+             "constraint fold over a concept template parameter pack cannot "
+             "contain another unexpanded template parameter pack",
+             loc);
+    return true;
+}
+
+Parser::ParsedExpr Parser::parse_expression(PrecLevel min_prec) {
+    if (min_prec <= PrecLevel::COMMA) {
+        ParsedExpr lhs = parse_assignment_expression();
+        while (match(TokenType::COMMA)) {
+            Token op = last_consumed();
+            ParsedExpr rhs = parse_assignment_expression();
+            size_t begin = tree_.node(lhs.syntax).tokens.begin;
+            NodeId syntax = make_node(NodeKind::BinaryExpr,
+                                      begin,
+                                      tree_.node(rhs.syntax).tokens.end,
+                                      {lhs.syntax, rhs.syntax},
+                                      text_payload(op.value),
+                                      NodeFlagNone,
+                                      static_cast<uint16_t>(BinaryOperator::Comma));
+            collect::ExprResult sem =
+                collect_session_.collect_binary_expr(BinaryOperator::Comma,
+                                                     std::move(lhs.sem),
+                                                     std::move(rhs.sem),
+                                                     op.loc);
+            lhs = {syntax, std::move(sem)};
+        }
+        return lhs;
+    }
+    if (min_prec <= PrecLevel::ASSIGNMENT) {
+        return parse_assignment_expression();
+    }
+    return parse_binary_expression(min_prec);
+}
+
+Parser::ParsedExpr Parser::parse_assignment_expression() {
+    if (lang_opts_.is_cxx_mode() && check(TokenType::THROW_KW)) {
+        return parse_throw_expression();
+    }
+    if (check(TokenType::CO_YIELD_KW)) {
+        return parse_yield_expression();
+    }
+    ParsedExpr lhs = parse_conditional_expression();
+    if (!is_assignment_token(current().type)) {
+        return lhs;
+    }
+
+    Token op = current();
+    BinaryOperator sem_op = binary_operator_for(op.type);
+    consume();
+    ParsedExpr rhs = parse_assignment_expression();
+    size_t begin = tree_.node(lhs.syntax).tokens.begin;
+    NodeId syntax = make_node(NodeKind::BinaryExpr,
+                              begin,
+                              tree_.node(rhs.syntax).tokens.end,
+                              {lhs.syntax, rhs.syntax},
+                              text_payload(op.value),
+                              NodeFlagNone,
+                              static_cast<uint16_t>(sem_op));
+    collect::ExprResult sem =
+        collect_session_.collect_binary_expr(sem_op, std::move(lhs.sem), std::move(rhs.sem), op.loc);
+    return {syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_throw_expression() {
+
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+    std::optional<ParsedExpr> operand;
+    std::vector<NodeId> children;
+    switch (current().type) {
+        case TokenType::SEMICOLON:
+        case TokenType::RIGHT_PAREN:
+        case TokenType::RIGHT_BRACKET:
+        case TokenType::RIGHT_BRACE:
+        case TokenType::COMMA:
+        case TokenType::COLON:
+        case TokenType::Eof:
+            break;
+        default:
+            operand = parse_assignment_expression();
+            children.push_back(operand->syntax);
+            break;
+    }
+    NodeId syntax = make_node(NodeKind::ThrowExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              text_payload("throw"));
+    collect::ExprResult sem = collect_session_.collect_throw_expr(
+        operand.has_value()
+            ? std::optional<collect::ExprResult>(std::move(operand->sem))
+            : std::nullopt,
+        loc);
+    return {syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_yield_expression() {
+
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+    ParsedExpr operand = check(TokenType::LEFT_BRACE)
+        ? parse_init_list_expression()
+        : parse_assignment_expression();
+    NodeId syntax = make_node(NodeKind::YieldExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              {operand.syntax},
+                              text_payload("co_yield"));
+    collect::ExprResult sem =
+        collect_session_.collect_yield_expr(std::move(operand.sem), loc);
+    return {syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_conditional_expression() {
+    ParsedExpr condition = parse_binary_expression(PrecLevel::CONDITIONAL);
+    if (!match(TokenType::QUESTION)) {
+        return condition;
+    }
+
+    Token question = last_consumed();
+    std::vector<NodeId> children{condition.syntax};
+    std::optional<ParsedExpr> true_expr;
+    if (!check(TokenType::COLON)) {
+        true_expr = parse_expression();
+        children.push_back(true_expr->syntax);
+    }
+    if (!match(TokenType::COLON)) {
+        diagnose(DiagnosticLevel::Error, "expected ':' in conditional expression", current_loc());
+    }
+    ParsedExpr false_expr = parse_assignment_expression();
+    children.push_back(false_expr.syntax);
+
+    NodeId syntax = make_node(NodeKind::ConditionalExpr,
+                              tree_.node(condition.syntax).tokens.begin,
+                              tree_.node(false_expr.syntax).tokens.end,
+                              children,
+                              text_payload(true_expr.has_value() ? "?:" : "?:<omitted>"));
+    std::optional<collect::ExprResult> true_sem;
+    if (true_expr.has_value()) {
+        true_sem = std::move(true_expr->sem);
+    }
+    collect::ExprResult sem =
+        collect_session_.collect_conditional_expr(std::move(condition.sem),
+                                                  std::move(true_sem),
+                                                  std::move(false_expr.sem),
+                                                  question.loc);
+    return {syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_constraint_expression() {
+    return parse_binary_expression(PrecLevel::LOGICAL_OR);
+}
+
+uint32_t Parser::expand_concept_pack_fold_constraints(
+    collect::Session::NormalizedConstraint& normal_form,
+    uint32_t root,
+    SrcLoc loc) {
+    using Session = collect::Session;
+    using NodeKind = Session::NormalizedConstraintKind;
+    using Fold = Session::ConstraintFoldOperator;
+    using Mapping = Session::ConstraintParameterMapping;
+    using TemplateArgument = Session::TemplateArgument;
+
+    struct ConceptPackBinding {
+        Session::TemplateParameterKind parameter_kind =
+            Session::TemplateParameterKind::Template;
+        uint32_t parameter_depth = 0;
+        uint32_t parameter_index = cir::ArrayTypePayload::no_extent_param;
+        cir::EntityId parameter_entity{};
+        std::vector<TemplateArgument> arguments;
+    };
+
+    auto same_parameter_as = [](const ConceptPackBinding& binding,
+                                const Mapping& mapping) {
+        if (binding.parameter_entity.valid() ||
+            mapping.parameter_entity.valid()) {
+            return binding.parameter_entity == mapping.parameter_entity;
+        }
+        return binding.parameter_kind == mapping.parameter_kind &&
+               binding.parameter_depth == mapping.parameter_depth &&
+               binding.parameter_index == mapping.parameter_index;
+    };
+    auto is_concept_pack_mapping = [](const Mapping& mapping) {
+        return mapping.parameter_kind ==
+                   Session::TemplateParameterKind::Template &&
+               mapping.parameter_template_template_kind ==
+                   Session::TemplateTemplateParameterKind::Concept &&
+               mapping.parameter_is_pack &&
+               mapping.argument.kind == cir::TemplateArgumentKind::Template &&
+               mapping.argument_pack.has_value();
+    };
+    auto argument_lists_equivalent =
+        [&](const std::vector<TemplateArgument>& lhs,
+            const std::vector<TemplateArgument>& rhs) {
+        if (lhs.size() != rhs.size()) {
             return false;
         }
-        if (type == TokenType::LEFT_PAREN) {
-            ++depth;
-        } else if (type == TokenType::RIGHT_PAREN) {
-            if (depth == 0) {
+        for (size_t i = 0; i < lhs.size(); ++i) {
+            if (!collect_session_.template_arguments_equivalent(lhs[i],
+                                                                rhs[i])) {
                 return false;
             }
-            --depth;
-            if (depth == 0) {
-                ++offset;
+        }
+        return true;
+    };
+
+    auto add_or_check_binding =
+        [&](std::vector<ConceptPackBinding>& bindings,
+            const Mapping& mapping) {
+        for (ConceptPackBinding& binding : bindings) {
+            if (!same_parameter_as(binding, mapping)) {
+                continue;
+            }
+            return argument_lists_equivalent(binding.arguments,
+                                             *mapping.argument_pack);
+        }
+
+        ConceptPackBinding binding;
+        binding.parameter_kind = mapping.parameter_kind;
+        binding.parameter_depth = mapping.parameter_depth;
+        binding.parameter_index = mapping.parameter_index;
+        binding.parameter_entity = mapping.parameter_entity;
+        binding.arguments = *mapping.argument_pack;
+        bindings.push_back(std::move(binding));
+        return true;
+    };
+
+    std::function<bool(uint32_t, std::vector<ConceptPackBinding>&)>
+        collect_bindings =
+            [&](uint32_t index,
+                std::vector<ConceptPackBinding>& bindings) -> bool {
+        if (!normal_form.valid_node(index)) {
+            return false;
+        }
+        const auto node = normal_form.nodes[index];
+        switch (node.kind) {
+            case NodeKind::Atomic:
+            case NodeKind::ConceptDependent:
+                for (const Mapping& mapping : node.atom.parameter_mapping) {
+                    if (is_concept_pack_mapping(mapping) &&
+                        !add_or_check_binding(bindings, mapping)) {
+                        return false;
+                    }
+                }
+                return true;
+            case NodeKind::Conjunction:
+            case NodeKind::Disjunction:
+                return collect_bindings(node.lhs, bindings) &&
+                       collect_bindings(node.rhs, bindings);
+            case NodeKind::FoldExpanded:
+                return collect_bindings(node.lhs, bindings);
+        }
+        return true;
+    };
+
+    auto binding_for_concept_id =
+        [&](const Session::NormalizedConstraintNode& node,
+            const std::vector<ConceptPackBinding>& bindings)
+            -> const ConceptPackBinding* {
+        if (node.concept_id_template_parameter_index !=
+            cir::ArrayTypePayload::no_extent_param) {
+            for (const ConceptPackBinding& binding : bindings) {
+                if (binding.parameter_index ==
+                    node.concept_id_template_parameter_index) {
+                    return &binding;
+                }
+            }
+        }
+        if (!node.concept_id_entity.valid()) {
+            return nullptr;
+        }
+        for (const ConceptPackBinding& binding : bindings) {
+            if (binding.parameter_entity.valid() &&
+                node.concept_id_entity == binding.parameter_entity) {
+                return &binding;
+            }
+        }
+        const Session::TemplateInfo* concept_info =
+            collect_session_.template_info(node.concept_id_entity);
+        if (!concept_info) {
+            return nullptr;
+        }
+        for (const ConceptPackBinding& binding : bindings) {
+            if (!binding.parameter_entity.valid() &&
+                concept_info->template_parameter_index ==
+                    binding.parameter_index) {
+                return &binding;
+            }
+        }
+        return nullptr;
+    };
+
+    auto replace_pack_mapping_arguments =
+        [&](Session::NormalizedConstraintNode& node,
+            const std::vector<ConceptPackBinding>& bindings,
+            size_t element_index) {
+        for (Mapping& mapping : node.atom.parameter_mapping) {
+            for (const ConceptPackBinding& binding : bindings) {
+                if (!same_parameter_as(binding, mapping)) {
+                    continue;
+                }
+                if (element_index >= binding.arguments.size()) {
+                    continue;
+                }
+                mapping.argument = binding.arguments[element_index];
+                mapping.argument_pack.reset();
                 break;
             }
         }
-        ++offset;
-    }
-
-    Token after = peek_token_shortcut(offset);
-    if (after.type == TokenType::LEFT_BRACE ||
-        after.type == TokenType::NOEXCEPT_KW ||
-        after.type == TokenType::CONSTEXPR_KW ||
-        after.type == TokenType::CONSTEVAL_KW ||
-        after.type == TokenType::ARROW ||
-        after.type == TokenType::MUTABLE_KW ||
-        after.type == TokenType::REQUIRES_KW) {
-        return true;
-    }
-    return after.type == TokenType::IDENTIFIER && after.value == "mutable";
-}
-
-std::unique_ptr<Expr> Parser::maybe_parse_pack_expansion_expression(
-    std::unique_ptr<Expr> expr) {
-    if (!gentle_check(TokenType::ELLIPSIS)) {
-        return expr;
-    }
-    if (!is_in_template_pattern_context()) {
-        error_custloc(
-            "pack expansion is only supported in template patterns",
-            current_token().loc);
-    }
-    SrcLoc expansion_loc = expr ? expr->location : current_token().loc;
-    check_and_consume(TokenType::ELLIPSIS);
-    return collect_->collect_pack_expansion_expression(
-        std::move(expr),
-        expansion_loc);
-}
-
-std::unique_ptr<Expr> Parser::parse_assignment_expression_with_optional_pack_expansion() {
-    return maybe_parse_pack_expansion_expression(parse_assignment_expression());
-}
-
-std::unique_ptr<Expr> Parser::parse_call_argument_expression() {
-    if (is_cxx_mode_active() && gentle_check(TokenType::LEFT_BRACE)) {
-        return maybe_parse_pack_expansion_expression(parse_init_list());
-    }
-    return parse_assignment_expression_with_optional_pack_expansion();
-}
-
-std::unique_ptr<Expr> Parser::try_parse_fold_expression(SrcLoc lparen_loc) {
-    if (!is_cxx_mode_active()) {
-        return nullptr;
-    }
-
-    auto fold_expression_shape_possible = [&]() {
-        size_t offset = 0;
-        size_t paren_depth = 0;
-        size_t bracket_depth = 0;
-        size_t brace_depth = 0;
-        while (true) {
-            TokenType tok = peek_token_shortcut(offset).type;
-            if (tok == TokenType::Eof) {
-                return false;
-            }
-            if (paren_depth == 0 &&
-                bracket_depth == 0 &&
-                brace_depth == 0) {
-                if (tok == TokenType::RIGHT_PAREN) {
-                    return false;
-                }
-                if (tok == TokenType::ELLIPSIS) {
-                    return true;
-                }
-            }
-            switch (tok) {
-                case TokenType::LEFT_PAREN:
-                    ++paren_depth;
-                    break;
-                case TokenType::RIGHT_PAREN:
-                    if (paren_depth > 0) {
-                        --paren_depth;
-                    }
-                    break;
-                case TokenType::LEFT_BRACKET:
-                    ++bracket_depth;
-                    break;
-                case TokenType::RIGHT_BRACKET:
-                    if (bracket_depth > 0) {
-                        --bracket_depth;
-                    }
-                    break;
-                case TokenType::LEFT_BRACE:
-                    ++brace_depth;
-                    break;
-                case TokenType::RIGHT_BRACE:
-                    if (brace_depth > 0) {
-                        --brace_depth;
-                    }
-                    break;
-                default:
-                    break;
-            }
-            ++offset;
-        }
     };
 
-    if (!fold_expression_shape_possible()) {
-        return nullptr;
-    }
-
-    RevertingTentativeParsingAction tentative(*this);
-    try {
-        auto build_fold =
-            [&](BinOpTypes op,
-                FoldDirection direction,
-                std::unique_ptr<Expr> pattern,
-                std::unique_ptr<Expr> init) -> std::unique_ptr<Expr> {
-                if (!is_in_template_pattern_context()) {
-                    error_custloc(
-                        "fold expression is only supported in template patterns",
-                        lparen_loc);
-                }
-                tentative.commit();
-                return collect_->collect_fold_expression(
-                    op,
-                    direction,
-                    std::move(pattern),
-                    std::move(init),
-                    lparen_loc);
-            };
-
-        if (gentle_check(TokenType::ELLIPSIS)) {
-            advance();
-            BinOpTypes op = BinOpTypes::UNKNOWN;
-            if (!try_get_fold_operator(current_token(), op)) {
-                return nullptr;
-            }
-            advance();
-
-            auto pattern = parse_cast_expression();
-            if (!pattern) {
-                error_custloc(
-                    "expected fold-expression pattern after fold operator",
-                    current_token().loc);
-            }
-            if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                error_custloc(
-                    "expected ')' after fold-expression pattern",
-                    current_token().loc);
-            }
-
-            if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                return nullptr;
-            }
-            return build_fold(
-                op,
-                FoldDirection::Left,
-                std::move(pattern),
-                nullptr);
-        }
-
-        auto first_operand = parse_cast_expression();
-        if (!first_operand) {
-            return nullptr;
-        }
-
-        BinOpTypes op = BinOpTypes::UNKNOWN;
-        if (!try_get_fold_operator(current_token(), op)) {
-            return nullptr;
-        }
-        advance();
-
-        if (!gentle_check(TokenType::ELLIPSIS)) {
-            return nullptr;
-        }
-        advance();
-
-        if (gentle_check(TokenType::RIGHT_PAREN)) {
-            return build_fold(
-                op,
-                FoldDirection::Right,
-                std::move(first_operand),
-                nullptr);
-        }
-
-        BinOpTypes trailing_op = BinOpTypes::UNKNOWN;
-        if (!try_get_fold_operator(current_token(), trailing_op)) {
-            error_custloc(
-                "expected fold operator after '...'",
-                current_token().loc);
-        }
-        if (trailing_op != op) {
-            error_custloc(
-                "fold expression requires the same operator on both sides of '...'",
-                current_token().loc);
-        }
-        advance();
-
-        auto other_operand = parse_cast_expression();
-        if (!other_operand) {
-            error_custloc(
-                "expected fold-expression initializer",
-                current_token().loc);
-        }
-        if (!gentle_check(TokenType::RIGHT_PAREN)) {
-            return nullptr;
-        }
-        bool first_is_pack = expr_references_active_parameter_pack(
-            ast_ctx.get(),
-            first_operand.get(),
-            active_template_parameter_stack_);
-        bool second_is_pack = expr_references_active_parameter_pack(
-            ast_ctx.get(),
-            other_operand.get(),
-            active_template_parameter_stack_);
-        if (first_is_pack == second_is_pack) {
-            error_custloc(
-                "binary fold expression requires exactly one operand to contain an unexpanded parameter pack",
-                lparen_loc);
-        }
-        if (first_is_pack) {
-            return build_fold(
-                op,
-                FoldDirection::Right,
-                std::move(first_operand),
-                std::move(other_operand));
-        }
-        return build_fold(
-            op,
-            FoldDirection::Left,
-            std::move(other_operand),
-            std::move(first_operand));
-    } catch (const ParseError&) {
-        return nullptr;
-    } catch (const FatalErrorLimitReached&) {
-        throw;
-    }
-}
-
-Parser::CxxTypeConstructionClassification
-Parser::classify_cpp_type_construction_candidate(
-    const tentative_syntax_probe::CxxTypeConstructionScan& scan) {
-    if (!is_cxx_mode_active()) {
-        return CxxTypeConstructionClassification::Reject;
-    }
-
-    auto starts_named_type_spelling = [&]() {
-        TokenType tok = current_token().type;
-        return tok == TokenType::IDENTIFIER ||
-               tok == TokenType::SCOPE_RESOLUTION ||
-               (tok == TokenType::COLON &&
-                peek_token().type == TokenType::COLON);
+    auto append_atomic_like_node =
+        [&](Session::NormalizedConstraintNode node) {
+        uint32_t copied = node.kind == NodeKind::ConceptDependent
+            ? normal_form.add_concept_dependent(std::move(node.atom))
+            : normal_form.add_atomic(std::move(node.atom));
+        normal_form.nodes[copied].concept_id_entity =
+            node.concept_id_entity;
+        normal_form.nodes[copied].concept_id_template_parameter_index =
+            node.concept_id_template_parameter_index;
+        normal_form.nodes[copied].concept_id_dependent_qualifier =
+            node.concept_id_dependent_qualifier;
+        normal_form.nodes[copied].concept_id_name =
+            node.concept_id_name;
+        normal_form.nodes[copied].concept_id_qualified_name =
+            node.concept_id_qualified_name;
+        normal_form.nodes[copied].concept_id_argument_list_begin =
+            node.concept_id_argument_list_begin;
+        normal_form.nodes[copied].concept_id_argument_list_end =
+            node.concept_id_argument_list_end;
+        normal_form.nodes[copied].concept_id_arguments =
+            std::move(node.concept_id_arguments);
+        return copied;
     };
 
-    if (!starts_named_type_spelling()) {
-        return CxxTypeConstructionClassification::NeedsCurrentPath;
-    }
-
-    if (!scan.complete) {
-        return CxxTypeConstructionClassification::NeedsCurrentPath;
-    }
-
-    if (!scan.followed_by_left_paren && !scan.followed_by_left_brace) {
-        return CxxTypeConstructionClassification::Reject;
-    }
-
-    const bool use_store = can_use_semantic_annotation_store();
-    const size_t token_idx = get_token_idx();
-    ParserAnnotationStore::SemanticKey key;
-    if (use_store) {
-        key = semantic_annotation_key();
-        if (auto stored = annotation_store_.lookup_semantic_annotation(
-                token_idx,
-                ParserAnnotationStore::SemanticKind::
-                    CppTypeConstructionClassification,
-                key)) {
-            bump_parser_annotation_overlay_hit();
-            return static_cast<CxxTypeConstructionClassification>(
-                stored->value);
+    std::function<uint32_t(uint32_t,
+                           const std::vector<ConceptPackBinding>&,
+                           size_t)>
+        clone_pattern_element =
+            [&](uint32_t index,
+                const std::vector<ConceptPackBinding>& bindings,
+                size_t element_index) -> uint32_t {
+        if (!normal_form.valid_node(index)) {
+            return Session::NormalizedConstraint::no_node;
         }
-        bump_parser_annotation_overlay_miss();
-    }
+        Session::NormalizedConstraintNode node = normal_form.nodes[index];
+        switch (node.kind) {
+            case NodeKind::Atomic:
+            case NodeKind::ConceptDependent: {
+                const ConceptPackBinding* concept_binding =
+                    binding_for_concept_id(node, bindings);
+                replace_pack_mapping_arguments(node,
+                                               bindings,
+                                               element_index);
+                if (!concept_binding ||
+                    element_index >= concept_binding->arguments.size()) {
+                    return append_atomic_like_node(std::move(node));
+                }
 
-    if (!scan.is_qualified &&
-        (!cxx_record_parse_stack_.empty() ||
-         (collect_ && collect_->collect_current_cpp_record_lookup_type()))) {
-        CxxTypeConstructionClassification result =
-            CxxTypeConstructionClassification::DependentOrAmbiguous;
-        if (use_store) {
-            annotation_store_.store_semantic_annotation(
-                token_idx,
-                ParserAnnotationStore::SemanticKind::
-                    CppTypeConstructionClassification,
-                key,
-                ParserAnnotationStore::SemanticAnnotation{
-                    get_token_idx(),
-                    static_cast<uint8_t>(result),
-                    true});
-            bump_parser_annotation_overlay_publish();
+                const TemplateArgument& concept_argument =
+                    concept_binding->arguments[element_index];
+                if (concept_argument.kind !=
+                    cir::TemplateArgumentKind::Template) {
+                    return Session::NormalizedConstraint::no_node;
+                }
+                if (concept_argument.template_entity.valid()) {
+                    const Session::TemplateInfo* concept_info =
+                        collect_session_.template_info(
+                            concept_argument.template_entity);
+                    if (concept_info && concept_info->is_concept &&
+                        concept_info->constraint_normal_form.has_value()) {
+                        uint32_t copied =
+                            normal_form.append_copy_of(
+                                *concept_info->constraint_normal_form);
+                        if (!normal_form.valid_node(copied)) {
+                            return Session::NormalizedConstraint::no_node;
+                        }
+                        Session::PatternInstantiationCallbacks callbacks;
+                        configure_pattern_instantiation_callbacks(callbacks,
+                                                                  loc);
+                        std::string substitution_error;
+                        Session::TemplateArgumentBindings
+                            concept_argument_bindings;
+                        if (!collect_session_
+                                 .bind_template_arguments_to_parameters(
+                                     concept_info->parameters,
+                                     node.concept_id_arguments,
+                                     concept_argument_bindings)) {
+                            return Session::NormalizedConstraint::no_node;
+                        }
+                        if (!collect_session_
+                                 .compose_constraint_parameter_mappings(
+                                     normal_form,
+                                     copied,
+                                     concept_argument_bindings,
+                                     callbacks,
+                                     &substitution_error)) {
+                            return Session::NormalizedConstraint::no_node;
+                        }
+                        uint32_t expanded =
+                            expand_concept_pack_fold_constraints(normal_form,
+                                                                 copied,
+                                                                 loc);
+                        return normal_form.valid_node(expanded)
+                            ? expanded
+                            : Session::NormalizedConstraint::no_node;
+                    }
+                }
+
+                node.concept_id_entity = concept_argument.template_entity;
+                node.concept_id_template_parameter_index =
+                    concept_argument.template_param_index;
+                node.concept_id_name = concept_argument.template_name;
+                node.concept_id_dependent_qualifier =
+                    concept_argument.dependent_template_qualifier;
+                return append_atomic_like_node(std::move(node));
+            }
+            case NodeKind::Conjunction:
+            case NodeKind::Disjunction: {
+                uint32_t lhs = clone_pattern_element(node.lhs,
+                                                     bindings,
+                                                     element_index);
+                uint32_t rhs = clone_pattern_element(node.rhs,
+                                                     bindings,
+                                                     element_index);
+                if (!normal_form.valid_node(lhs) ||
+                    !normal_form.valid_node(rhs)) {
+                    return Session::NormalizedConstraint::no_node;
+                }
+                return node.kind == NodeKind::Conjunction
+                    ? normal_form.add_conjunction(lhs, rhs)
+                    : normal_form.add_disjunction(lhs, rhs);
+            }
+            case NodeKind::FoldExpanded: {
+                uint32_t lhs = clone_pattern_element(node.lhs,
+                                                     bindings,
+                                                     element_index);
+                if (!normal_form.valid_node(lhs)) {
+                    return Session::NormalizedConstraint::no_node;
+                }
+                uint32_t fold =
+                    normal_form.add_fold_expanded(node.fold_operator, lhs);
+                uint32_t expanded =
+                    expand_concept_pack_fold_constraints(normal_form,
+                                                         fold,
+                                                         loc);
+                return normal_form.valid_node(expanded)
+                    ? expanded
+                    : Session::NormalizedConstraint::no_node;
+            }
+        }
+        return Session::NormalizedConstraint::no_node;
+    };
+
+    auto compose_fold_elements =
+        [&](Fold op,
+            uint32_t pattern,
+            const std::vector<ConceptPackBinding>& bindings) {
+        if (bindings.empty()) {
+            return Session::NormalizedConstraint::no_node;
+        }
+        size_t count = bindings.front().arguments.size();
+        for (const ConceptPackBinding& binding : bindings) {
+            if (binding.arguments.size() != count) {
+                return Session::NormalizedConstraint::no_node;
+            }
+        }
+        if (count == 0) {
+            return Session::NormalizedConstraint::no_node;
+        }
+
+        uint32_t result = Session::NormalizedConstraint::no_node;
+        for (size_t i = 0; i < count; ++i) {
+            uint32_t element =
+                clone_pattern_element(pattern, bindings, i);
+            if (!normal_form.valid_node(element)) {
+                return Session::NormalizedConstraint::no_node;
+            }
+            if (!normal_form.valid_node(result)) {
+                result = element;
+                continue;
+            }
+            result = op == Fold::LogicalAnd
+                ? normal_form.add_conjunction(result, element)
+                : normal_form.add_disjunction(result, element);
         }
         return result;
-    }
+    };
 
-    CxxTypeConstructionClassification result =
-        CxxTypeConstructionClassification::NeedsCurrentPath;
-    auto type_scope = classify_cpp_type_scope_for_lookahead(
-        ParserAnnotationStore::CppTypeScopeContext::TypeConstruction);
-    switch (type_scope.kind) {
-        case ParserAnnotationStore::CppTypeScopeKind::TypeName:
-        case ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId:
-        case ParserAnnotationStore::CppTypeScopeKind::PlaceholderConstraint:
-            result = scan.is_qualified
-                         ? CxxTypeConstructionClassification::
-                               DependentOrAmbiguous
-                         : CxxTypeConstructionClassification::KnownType;
-            break;
-        case ParserAnnotationStore::CppTypeScopeKind::DependentType:
-        case ParserAnnotationStore::CppTypeScopeKind::ScopeOnly:
-        case ParserAnnotationStore::CppTypeScopeKind::DependentScope:
-            result =
-                CxxTypeConstructionClassification::DependentOrAmbiguous;
-            break;
-        case ParserAnnotationStore::CppTypeScopeKind::NoMatch:
-        case ParserAnnotationStore::CppTypeScopeKind::NonType:
-        case ParserAnnotationStore::CppTypeScopeKind::Inconclusive:
-        case ParserAnnotationStore::CppTypeScopeKind::Error:
-            result = CxxTypeConstructionClassification::Reject;
-            break;
-    }
+    std::function<uint32_t(uint32_t)> visit =
+        [&](uint32_t index) -> uint32_t {
+        if (!normal_form.valid_node(index)) {
+            return Session::NormalizedConstraint::no_node;
+        }
+        Session::NormalizedConstraintNode node = normal_form.nodes[index];
+        switch (node.kind) {
+            case NodeKind::Atomic:
+            case NodeKind::ConceptDependent:
+                return index;
+            case NodeKind::Conjunction:
+            case NodeKind::Disjunction: {
+                uint32_t lhs = visit(node.lhs);
+                uint32_t rhs = visit(node.rhs);
+                if (!normal_form.valid_node(lhs) ||
+                    !normal_form.valid_node(rhs)) {
+                    return Session::NormalizedConstraint::no_node;
+                }
+                normal_form.nodes[index].lhs = lhs;
+                normal_form.nodes[index].rhs = rhs;
+                return index;
+            }
+            case NodeKind::FoldExpanded: {
+                uint32_t pattern = visit(node.lhs);
+                if (!normal_form.valid_node(pattern)) {
+                    return Session::NormalizedConstraint::no_node;
+                }
+                normal_form.nodes[index].lhs = pattern;
 
-    if (use_store) {
-        annotation_store_.store_semantic_annotation(
-            token_idx,
-            ParserAnnotationStore::SemanticKind::
-                CppTypeConstructionClassification,
-            key,
-            ParserAnnotationStore::SemanticAnnotation{
-                get_token_idx(),
-                static_cast<uint8_t>(result),
-                result == CxxTypeConstructionClassification::
-                              DependentOrAmbiguous});
-        bump_parser_annotation_overlay_publish();
-    }
+                std::vector<ConceptPackBinding> bindings;
+                if (!collect_bindings(pattern, bindings)) {
+                    return Session::NormalizedConstraint::no_node;
+                }
+                if (bindings.empty()) {
+                    return index;
+                }
+                std::string length_error;
+                if (!collect_session_
+                         .constraint_concept_pack_fold_argument_lengths_match(
+                             normal_form,
+                             pattern,
+                             &length_error)) {
+                    diagnose(DiagnosticLevel::Error,
+                             length_error.empty()
+                                 ? "concept template parameter packs in constraint fold must have the same number of arguments"
+                                 : length_error,
+                             loc);
+                    return Session::NormalizedConstraint::no_node;
+                }
+                uint32_t expanded =
+                    compose_fold_elements(node.fold_operator,
+                                          pattern,
+                                          bindings);
+                return normal_form.valid_node(expanded) ? expanded : index;
+            }
+        }
+        return Session::NormalizedConstraint::no_node;
+    };
 
-    return result;
+    return visit(root);
 }
 
-std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
-    if (!is_cxx_mode_active()) {
-        return nullptr;
+uint32_t Parser::normalize_direct_constraint_expression_syntax(
+    NodeId syntax,
+    collect::Session::NormalizedConstraint& normal_form) {
+    if (!tree_.valid(syntax)) {
+        return collect::Session::NormalizedConstraint::no_node;
     }
-
-    SrcLoc loc = current_token().loc;
-    // Keep non-construction qualified-ids on the existing qualified-id expression
-    // path. Tentative declaration parsing can diagnose or attach semantic
-    // state even when reverted, so only probe qualified type construction
-    // forms such as `N::T{}` and `N::T(...)`.
-    auto qualified_scan = scan_cpp_type_construction_candidate_syntax();
-    if (qualified_scan.is_qualified &&
-        !qualified_scan.followed_by_left_brace &&
-        !qualified_scan.followed_by_left_paren) {
-        return nullptr;
+    const Node& node = tree_.node(syntax);
+    auto children = tree_.children(syntax);
+    if (node.kind == NodeKind::ParenExpr && children.size() == 1) {
+        return normalize_direct_constraint_expression_syntax(children[0],
+                                                             normal_form);
     }
-    if (!qualified_scan.is_qualified &&
-        current_token().type == TokenType::IDENTIFIER &&
-        !qualified_scan.followed_by_left_paren &&
-        !qualified_scan.followed_by_left_brace) {
-        return nullptr;
-    }
-    auto type_construction_classification =
-        classify_cpp_type_construction_candidate(qualified_scan);
-    if (type_construction_classification ==
-        CxxTypeConstructionClassification::Reject) {
-        bump_type_construction_fast_reject();
-        if (qualified_scan.followed_by_left_paren ||
-            qualified_scan.followed_by_left_brace) {
-            bump_type_construction_lookup_reject();
+    if (node.kind == NodeKind::BinaryExpr && children.size() == 2) {
+        BinaryOperator op = static_cast<BinaryOperator>(node.opcode);
+        if (op == BinaryOperator::LogicalAnd ||
+            op == BinaryOperator::LogicalOr) {
+            uint32_t lhs =
+                normalize_direct_constraint_expression_syntax(children[0],
+                                                              normal_form);
+            uint32_t rhs =
+                normalize_direct_constraint_expression_syntax(children[1],
+                                                              normal_form);
+            if (!normal_form.valid_node(lhs) ||
+                !normal_form.valid_node(rhs)) {
+                return collect::Session::NormalizedConstraint::no_node;
+            }
+            return op == BinaryOperator::LogicalAnd
+                ? normal_form.add_conjunction(lhs, rhs)
+                : normal_form.add_disjunction(lhs, rhs);
         }
-        return nullptr;
     }
-    if (starts_with_cpp_dependent_qualified_call_expression()) {
-        return nullptr;
-    }
-
-    size_t direct_start_idx = get_token_idx();
-    auto direct_split_state = tok_mgnt.get_split_token_state();
-    auto restore_direct_type_construction = [&]() {
-        set_token_idx(direct_start_idx);
-        tok_mgnt.set_split_token_state(direct_split_state);
-    };
-    try {
-        auto direct_type =
-            try_parse_cpp_direct_simple_type_id(
-                CppDirectTypeIdContext::TypeConstruction);
-        if (direct_type) {
-            QualType target_type = direct_type->type;
-            if (auto dependent_name =
-                    dyn_cast_shared<DependentNameType>(
-                        target_type.get_shared());
-                dependent_name &&
-                !dependent_name->requires_typename_keyword) {
-                restore_direct_type_construction();
-                return nullptr;
-            }
-
-            if (gentle_check(TokenType::LEFT_PAREN)) {
-                advance(); // consume '('
-                std::vector<std::unique_ptr<Expr>> args;
-                if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                    TemplateArgumentGroupGuard group_guard(*this);
-                    do {
-                        auto arg = parse_call_argument_expression();
-                        args.push_back(std::move(arg));
-                    } while (gentle_check_and_consume(TokenType::COMMA));
-                }
-                check_and_consume(TokenType::RIGHT_PAREN);
-                bump_type_construction_direct_type_id_parse();
-                return collect_->collect_cpp_function_style_cast(
-                    target_type,
-                    std::move(args),
-                    loc);
-            }
-
-            if (gentle_check(TokenType::LEFT_BRACE)) {
-                auto init_expr = parse_init_list();
-                auto* init_list = dyn_cast<InitListExpr>(init_expr.get());
-                if (!init_list) {
-                    restore_direct_type_construction();
-                    bump_type_construction_direct_type_id_fallback();
-                } else {
-                    auto owned_init_list = std::unique_ptr<InitListExpr>(
-                        static_cast<InitListExpr*>(init_expr.release()));
-
-                    auto init_list_depends_on_template_parameters =
-                        [&](const InitListExpr* list,
-                            const auto& self) -> bool {
-                        if (!list) {
-                            return false;
-                        }
-                        for (const auto& element : list->elements) {
-                            for (const auto& designator :
-                                 element.designators) {
-                                if (expr_depends_on_active_template_parameter(
-                                        designator.index.get()) ||
-                                    expr_depends_on_active_template_parameter(
-                                        designator.range_end.get())) {
-                                    return true;
-                                }
-                            }
-                            if (!element.value) {
-                                continue;
-                            }
-                            if (auto* nested =
-                                    dyn_cast<InitListExpr>(
-                                        element.value.get())) {
-                                if (self(nested, self)) {
-                                    return true;
-                                }
-                            }
-                            if (expr_depends_on_active_template_parameter(
-                                    element.value.get()) ||
-                                type_depends_on_template_parameters(
-                                    element.value->get_type(),
-                                    ast_ctx.get())) {
-                                return true;
-                            }
-                        }
-                        return false;
-                    };
-
-                    bool dependent_list_initialization =
-                        type_depends_on_template_parameters(
-                            target_type,
-                            ast_ctx.get()) ||
-                        init_list_depends_on_template_parameters(
-                            owned_init_list.get(),
-                            init_list_depends_on_template_parameters);
-                    bump_type_construction_direct_type_id_parse();
-                    if (dependent_list_initialization) {
-                        if (!owned_init_list->actions.empty() ||
-                            !owned_init_list->mappings.empty()) {
-                            error_custloc(
-                                "dependent braced type construction does not support lowered initializer actions",
-                                loc);
-                            return collect_->collect_error_expression(
-                                "unsupported dependent braced type construction",
-                                loc);
-                        }
-
-                        std::vector<std::unique_ptr<Expr>> args;
-                        args.reserve(owned_init_list->elements.size());
-                        for (auto& element : owned_init_list->elements) {
-                            if (!element.designators.empty()) {
-                                error_custloc(
-                                    "dependent braced type construction does not support designators",
-                                    element.loc);
-                                return collect_->collect_error_expression(
-                                    "unsupported dependent braced type construction",
-                                    element.loc);
-                            }
-                            args.push_back(std::move(element.value));
-                        }
-
-                        auto deferred =
-                            collect_->collect_cpp_function_style_cast(
-                                target_type,
-                                std::move(args),
-                                loc);
-                        if (auto* cast =
-                                dyn_cast<CppFunctionStyleCastExpr>(
-                                    deferred.get())) {
-                            cast->is_list_init = true;
-                        }
-                        return deferred;
+    if (node.kind == NodeKind::AmbiguousSyntax) {
+        std::string_view fold_kind = node_text(node);
+        bool unary_fold = fold_kind == "unary-left-fold" ||
+                          fold_kind == "unary-right-fold";
+        bool binary_right_fold = fold_kind == "binary-right-fold";
+        bool binary_left_fold = fold_kind == "binary-left-fold";
+        bool binary_fold = binary_right_fold || binary_left_fold;
+        if (unary_fold || binary_fold) {
+            auto constraint_fold_operator =
+                [&]() -> std::optional<
+                    collect::Session::ConstraintFoldOperator> {
+                size_t begin = node.tokens.begin;
+                size_t end = std::min(node.tokens.end, tokens_.size());
+                auto logical_operator_at =
+                    [&](size_t index)
+                    -> std::optional<
+                        collect::Session::ConstraintFoldOperator> {
+                    if (index >= tokens_.size()) {
+                        return std::nullopt;
                     }
-
-                    return collect_
-                        ->collect_cpp_type_list_initialization_expression(
-                            target_type,
-                            std::move(owned_init_list),
-                            loc);
-                }
-            } else {
-                restore_direct_type_construction();
-                bump_type_construction_direct_type_id_fallback();
-            }
-        } else {
-            bump_type_construction_direct_type_id_fallback();
-        }
-    } catch (const FatalErrorLimitReached&) {
-        throw;
-    } catch (const ParseError&) {
-        restore_direct_type_construction();
-        bump_type_construction_direct_type_id_fallback();
-    }
-
-    RevertingTentativeParsingAction tentative(*this);
-    try {
-        DeclarationParser parse_decl(this);
-        auto parsed_type = parse_decl.parse_declaration(false);
-        if (!parsed_type ||
-            !parse_decl.name.empty() ||
-            parse_decl.str_class != StorageClass::NONE) {
-            return nullptr;
-        }
-
-        QualType target_type(parsed_type, parse_decl.qualifiers);
-        // Dependent qualified-ids are expressions unless `typename` made the
-        // type interpretation explicit; otherwise calls like Box<T>::f() would
-        // be misparsed as unresolved type construction.
-        if (auto dependent_name =
-                dyn_cast_shared<DependentNameType>(target_type.get_shared());
-            dependent_name && !dependent_name->requires_typename_keyword) {
-            return nullptr;
-        }
-        if (gentle_check(TokenType::LEFT_PAREN)) {
-            advance(); // consume '('
-            std::vector<std::unique_ptr<Expr>> args;
-            if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                TemplateArgumentGroupGuard group_guard(*this);
-                do {
-                    auto arg = parse_call_argument_expression();
-                    args.push_back(std::move(arg));
-                } while (gentle_check_and_consume(TokenType::COMMA));
-            }
-            check_and_consume(TokenType::RIGHT_PAREN);
-            retain_type_specifier_decl_if_needed(parse_decl);
-            tentative.commit();
-            return collect_->collect_cpp_function_style_cast(
-                target_type,
-                std::move(args),
-                loc);
-        }
-
-        if (gentle_check(TokenType::LEFT_BRACE)) {
-            auto init_expr = parse_init_list();
-            auto* init_list = dyn_cast<InitListExpr>(init_expr.get());
-            if (!init_list) {
-                return nullptr;
-            }
-            auto owned_init_list = std::unique_ptr<InitListExpr>(
-                static_cast<InitListExpr*>(init_expr.release()));
-            retain_type_specifier_decl_if_needed(parse_decl);
-            tentative.commit();
-
-            auto init_list_depends_on_template_parameters =
-                [&](const InitListExpr* list, const auto& self) -> bool {
-                if (!list) {
-                    return false;
-                }
-                for (const auto& element : list->elements) {
-                    for (const auto& designator : element.designators) {
-                        if (expr_depends_on_active_template_parameter(
-                                designator.index.get()) ||
-                            expr_depends_on_active_template_parameter(
-                                designator.range_end.get())) {
-                            return true;
-                        }
+                    BinaryOperator op =
+                        binary_operator_for(tokens_[index].type);
+                    if (op == BinaryOperator::LogicalAnd) {
+                        return collect::Session::ConstraintFoldOperator::
+                            LogicalAnd;
                     }
-                    if (!element.value) {
+                    if (op == BinaryOperator::LogicalOr) {
+                        return collect::Session::ConstraintFoldOperator::
+                            LogicalOr;
+                    }
+                    return std::nullopt;
+                };
+                for (size_t i = begin; i < end; ++i) {
+                    if (tokens_[i].type != TokenType::ELLIPSIS) {
                         continue;
                     }
-                    if (auto* nested =
-                            dyn_cast<InitListExpr>(element.value.get())) {
-                        if (self(nested, self)) {
-                            return true;
+                    if (i > begin) {
+                        if (auto before = logical_operator_at(i - 1)) {
+                            return before;
                         }
                     }
-                    if (expr_depends_on_active_template_parameter(
-                            element.value.get()) ||
-                        type_depends_on_template_parameters(
-                            element.value->get_type(),
-                            ast_ctx.get())) {
-                        return true;
+                    if (i + 1 < end) {
+                        if (auto after = logical_operator_at(i + 1)) {
+                            return after;
+                        }
                     }
-                }
-                return false;
-            };
-
-            bool dependent_list_initialization =
-                type_depends_on_template_parameters(
-                    target_type,
-                    ast_ctx.get()) ||
-                init_list_depends_on_template_parameters(
-                    owned_init_list.get(),
-                    init_list_depends_on_template_parameters);
-            if (dependent_list_initialization) {
-                if (!owned_init_list->actions.empty() ||
-                    !owned_init_list->mappings.empty()) {
-                    error_custloc(
-                        "dependent braced type construction does not support lowered initializer actions",
-                        loc);
-                    return collect_->collect_error_expression(
-                        "unsupported dependent braced type construction",
-                        loc);
-                }
-
-                std::vector<std::unique_ptr<Expr>> args;
-                args.reserve(owned_init_list->elements.size());
-                for (auto& element : owned_init_list->elements) {
-                    if (!element.designators.empty()) {
-                        error_custloc(
-                            "dependent braced type construction does not support designators",
-                            element.loc);
-                        return collect_->collect_error_expression(
-                            "unsupported dependent braced type construction",
-                            element.loc);
-                    }
-                    args.push_back(std::move(element.value));
-                }
-
-                auto deferred = collect_->collect_cpp_function_style_cast(
-                    target_type,
-                    std::move(args),
-                    loc);
-                if (auto* cast =
-                        dyn_cast<CppFunctionStyleCastExpr>(deferred.get())) {
-                    cast->is_list_init = true;
-                }
-                return deferred;
-            }
-
-            return collect_->collect_cpp_type_list_initialization_expression(
-                target_type,
-                std::move(owned_init_list),
-                loc);
-        }
-    } catch (const ParseError&) {
-    } catch (const FatalErrorLimitReached&) {
-        throw;
-    }
-
-    return nullptr;
-}
-
-std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
-    SrcLoc qualified_loc = current_token().loc;
-    auto current_scope = collect_->collect_current_scope();
-    auto current_context = collect_->get_current_decl_context();
-
-    auto parse_component =
-        [&](bool preceded_by_template_keyword) -> CppQualifiedNameComponent {
-            if (!gentle_check(TokenType::IDENTIFIER) &&
-                !gentle_check(TokenType::OPERATOR_KW)) {
-                error_custloc(
-                    "expected identifier after '::' in qualified-id expression",
-                    current_token().loc);
-            }
-            CppQualifiedNameComponent component;
-            component.loc = current_token().loc;
-            component.preceded_by_template_keyword = preceded_by_template_keyword;
-            if (gentle_check(TokenType::OPERATOR_KW)) {
-                auto operator_name = try_parse_cpp_operator_function_id_name();
-                if (!operator_name) {
-                    error_custloc(
-                        "expected operator-function-id after '::' in qualified-id expression",
-                        component.loc);
-                }
-                component.name = std::move(*operator_name);
-                return component;
-            }
-
-            component.name = current_token().value;
-            advance();
-            if (gentle_check(TokenType::LESS_THAN)) {
-                auto scope_follow =
-                    classify_template_argument_list_scope_follow_syntax();
-                if (scope_follow ==
-                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        FollowedByScope) {
-                    component.has_template_argument_list = true;
-                    component.template_arguments =
-                        parse_cpp_template_argument_list();
-                } else if (scope_follow ==
-                           tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                               Inconclusive) {
-                    RevertingTentativeParsingAction tentative(*this);
-                    auto parsed_arguments = parse_cpp_template_argument_list();
-                    bool scope_after_template_id = is_cpp_scope_resolution_here();
-                    if (scope_after_template_id) {
-                        tentative.commit();
-                        component.has_template_argument_list = true;
-                        component.template_arguments = std::move(parsed_arguments);
-                    }
-                }
-            }
-            return component;
-        };
-
-    bool has_global_qualifier = false;
-    std::optional<CppQualifiedOwnerSeed> initial_owner;
-    std::vector<CppQualifiedNameComponent> components;
-    if (gentle_check(TokenType::DECLTYPE_KW)) {
-        SrcLoc decltype_loc = current_token().loc;
-        QualType owner_type = parse_cpp_decltype_type_specifier();
-        if (!is_cpp_scope_resolution_here()) {
-            error_custloc(
-                "expected '::' after decltype-specifier in qualified-id expression",
-                current_token().loc);
-        }
-        CppQualifiedOwnerSeed seed;
-        seed.owner_type = owner_type;
-        seed.spelling = "decltype(<expr>)";
-        seed.loc = decltype_loc;
-        seed.is_dependent =
-            type_depends_on_template_parameters(owner_type, ast_ctx.get());
-        seed.requires_class_or_enum = true;
-        initial_owner = std::move(seed);
-
-        consume_cpp_scope_resolution();
-        bool preceded_by_template_keyword =
-            gentle_check_and_consume(TokenType::TEMPLATE);
-        components.push_back(parse_component(preceded_by_template_keyword));
-        while (is_cpp_scope_resolution_here()) {
-            consume_cpp_scope_resolution();
-            preceded_by_template_keyword =
-                gentle_check_and_consume(TokenType::TEMPLATE);
-            components.push_back(parse_component(preceded_by_template_keyword));
-        }
-    } else {
-        has_global_qualifier = consume_cpp_scope_resolution();
-        if (!gentle_check(TokenType::IDENTIFIER) &&
-            !(has_global_qualifier && gentle_check(TokenType::OPERATOR_KW))) {
-            error_custloc("expected identifier after '::' in qualified-id expression",
-                current_token().loc);
-        }
-
-        components.push_back(parse_component(false));
-        while (is_cpp_scope_resolution_here()) {
-            consume_cpp_scope_resolution();
-            bool preceded_by_template_keyword =
-                gentle_check_and_consume(TokenType::TEMPLATE);
-            components.push_back(parse_component(preceded_by_template_keyword));
-        }
-    }
-
-    std::vector<CppQualifiedNameComponent> qualifiers;
-    CppQualifiedNameComponent terminal_component;
-    if (!components.empty()) {
-        qualifiers.assign(components.begin(), components.end() - 1);
-        terminal_component = std::move(components.back());
-    }
-    SrcLoc terminal_loc = terminal_component.loc;
-    std::string terminal_name = terminal_component.name;
-    bool saw_terminal_template_keyword =
-        terminal_component.preceded_by_template_keyword;
-
-    auto lookup_record_type_in_context =
-        [&](const DeclContext* start_context,
-            const std::string& name,
-            bool allow_enclosing_lookup) -> QualType {
-            if (!start_context || name.empty()) {
-                return QualType();
-            }
-            auto try_ctx = [&](const DeclContext* ctx) -> QualType {
-                if (!ctx) {
-                    return QualType();
-                }
-                auto* tag_binding = ctx->lookup_local(name, LookupNamespace::Tag);
-                if (!tag_binding) {
-                    return QualType();
-                }
-                return tag_binding->type;
-            };
-
-            if (!allow_enclosing_lookup) {
-                return try_ctx(start_context);
-            }
-            for (auto* ctx = start_context; ctx; ctx = ctx->semantic_parent()) {
-                if (auto record_type = try_ctx(ctx)) {
-                    return record_type;
-                }
-            }
-            return QualType();
-        };
-    auto current_record_instantiation_type =
-        [&](std::string_view record_name) -> QualType {
-            if (record_name.empty() || cxx_record_parse_stack_.empty()) {
-                return QualType();
-            }
-            const auto& current_record = cxx_record_parse_stack_.back();
-            if (current_record.name != record_name) {
-                return QualType();
-            }
-            return current_record.current_instantiation_type;
-        };
-    Parser::CppQualifiedOwnerChainResolution owner_chain;
-    bool used_single_qualifier_record_compat = false;
-    if (!initial_owner &&
-        !has_global_qualifier &&
-        qualifiers.size() == 1 &&
-        !qualifiers.front().has_template_argument_list &&
-        current_context) {
-        QualType compatibility_owner_type = lookup_record_type_in_context(
-            current_context.get(),
-            qualifiers.front().name,
-            /*allow_enclosing_lookup=*/true);
-        if (compatibility_owner_type) {
-            bool is_current_instantiation =
-                cpp_qualifier_is_current_instantiation(
-                    qualifiers.front().name,
-                    compatibility_owner_type);
-            if (is_current_instantiation) {
-                if (QualType current_instantiation =
-                        current_record_instantiation_type(qualifiers.front().name)) {
-                    compatibility_owner_type = current_instantiation;
-                }
-            }
-            owner_chain.owner_type = compatibility_owner_type;
-            owner_chain.is_current_instantiation = is_current_instantiation;
-            owner_chain.is_dependent =
-                type_depends_on_template_parameters(
-                    compatibility_owner_type,
-                    ast_ctx.get());
-            owner_chain.qualifier_spellings = {qualifiers.front().spelling()};
-            owner_chain.qualifier_chain_spelling =
-                qualifiers.front().spelling();
-            owner_chain.lookup_scope = current_scope;
-            owner_chain.lookup_context = current_context.get();
-            used_single_qualifier_record_compat = true;
-        }
-    }
-    if (!used_single_qualifier_record_compat) {
-        owner_chain = resolve_cpp_qualified_owner_chain(
-            qualifiers,
-            has_global_qualifier,
-            qualified_loc,
-            /*diagnose_dependent_names=*/true,
-            initial_owner);
-    }
-    auto current_function_owner_type =
-        [&]() -> QualType {
-            auto fn_type = dyn_cast_shared<FunctionType>(func_type);
-            if (!fn_type || fn_type->parameters.empty()) {
-                return QualType();
-            }
-            auto this_ptr_type =
-                desugar_type(fn_type->parameters.front(), ast_ctx.get())
-                    .as_shared<PointerType>();
-            if (!this_ptr_type) {
-                return QualType();
-            }
-            return this_ptr_type->pointed_type;
-        };
-    if (owner_chain.lookup_failed &&
-        !has_global_qualifier &&
-        qualifiers.size() == 1 &&
-        !qualifiers.front().has_template_argument_list) {
-        QualType function_owner_type = current_function_owner_type();
-        if (function_owner_type) {
-            auto semantic_owner_type =
-                desugar_type(function_owner_type, ast_ctx.get());
-            bool owner_matches = false;
-            if (auto owner_record = semantic_owner_type.as_shared<ObjectType>()) {
-                if (const auto* owner_decl =
-                        dyn_cast<ObjectDecl>(owner_record->get_decl())) {
-                    owner_matches =
-                        owner_decl->tag == qualifiers.front().name;
-                }
-            } else if (auto owner_specialization =
-                           semantic_owner_type.as<TemplateSpecializationType>()) {
-                owner_matches =
-                    owner_specialization->template_name ==
-                    qualifiers.front().name;
-            }
-            if (owner_matches) {
-                owner_chain.lookup_failed = false;
-                owner_chain.failed_prefix_spelling.clear();
-                owner_chain.owner_type = function_owner_type;
-                owner_chain.is_current_instantiation = true;
-                owner_chain.is_dependent =
-                    type_depends_on_template_parameters(
-                        function_owner_type,
-                        ast_ctx.get());
-                owner_chain.qualifier_spellings = {
-                    qualifiers.front().spelling()
-                };
-                owner_chain.qualifier_chain_spelling =
-                    qualifiers.front().spelling();
-                owner_chain.lookup_scope = collect_->collect_current_scope();
-                auto current_context = collect_->get_current_decl_context();
-                owner_chain.lookup_context =
-                    current_context ? current_context.get() : nullptr;
-            }
-        }
-    }
-
-    auto set_qualified_expr_info =
-        [&](std::unique_ptr<Expr>& expr,
-            QualType qualifier_type = QualType(),
-            bool is_type_qualified = false,
-            bool current_instantiation = false) {
-            if (!expr || !isa<VarRef>(expr.get())) {
-                return;
-            }
-            expr = attach_cpp_qualified_info_to_expr(
-                std::move(expr),
-                build_cpp_qualified_expr_info(
-                    has_global_qualifier,
-                    owner_chain.qualifier_spellings,
-                    qualifier_type,
-                    is_type_qualified,
-                    current_instantiation));
-        };
-
-    if (saw_terminal_template_keyword &&
-        !gentle_check(TokenType::LESS_THAN)) {
-        error_custloc(
-            "expected template-id after 'template' keyword",
-            terminal_loc);
-    }
-
-    if (!saw_terminal_template_keyword &&
-        gentle_check(TokenType::LESS_THAN) &&
-        owner_chain.requires_template_keyword()) {
-        if (!owner_chain.qualifier_chain_spelling.empty()) {
-            diagnose_missing_cpp_template_keyword(
-                owner_chain.qualifier_chain_spelling,
-                terminal_name,
-                terminal_loc);
-        }
-    }
-
-    if (saw_terminal_template_keyword) {
-        QualType qualifier_type;
-        bool current_instantiation = false;
-        bool is_type_qualified = false;
-        if (owner_chain.has_owner_type()) {
-            qualifier_type = owner_chain.owner_type;
-            current_instantiation = owner_chain.is_current_instantiation;
-            is_type_qualified = true;
-        }
-        auto qualified_expr = collect_->collect_identifier_reference(
-            terminal_name, nullptr, qualified_loc);
-        set_qualified_expr_info(
-            qualified_expr,
-            qualifier_type,
-            is_type_qualified,
-            current_instantiation);
-        return qualified_expr;
-    }
-
-    bool looks_like_call = gentle_check(TokenType::LEFT_PAREN);
-    bool might_be_template_id = looks_like_call;
-        if (!looks_like_call &&
-            is_cxx_mode_active() &&
-            gentle_check(TokenType::LESS_THAN)) {
-            size_t offset = 0;
-            if (skip_template_argument_list_for_expression_probe(offset)) {
-                might_be_template_id = true;
-                looks_like_call =
-                    peek_token_shortcut(offset).type == TokenType::LEFT_PAREN;
-            }
-        }
-
-    auto lookup_scope = owner_chain.lookup_scope;
-    const DeclContext* lookup_context = owner_chain.lookup_context;
-    bool qualifier_lookup_failed = owner_chain.lookup_failed;
-    std::shared_ptr<ObjectType> qualified_owner_type = nullptr;
-    const ObjectDecl* qualified_owner_record_decl = nullptr;
-    std::shared_ptr<EnumType> qualified_owner_enum_type = nullptr;
-    const EnumDecl* qualified_owner_enum_decl = nullptr;
-    if (owner_chain.has_owner_type() &&
-        !owner_chain.is_dependent_context()) {
-        QualType lookup_owner_type = owner_chain.owner_type;
-        if (!owner_chain.is_current_instantiation && collect_) {
-            if (auto realized_owner =
-                    collect_->collect_try_realize_deferred_semantic_type(
-                        lookup_owner_type)) {
-                lookup_owner_type = realized_owner;
-            }
-        }
-        QualType qualified_owner_canonical =
-            desugar_type(
-                remove_reference(lookup_owner_type, ast_ctx.get()),
-                ast_ctx.get());
-        qualified_owner_type = qualified_owner_canonical.as_shared<ObjectType>();
-        qualified_owner_record_decl =
-            dyn_cast<ObjectDecl>(
-                qualified_owner_type
-                    ? qualified_owner_type->get_decl()
-                    : nullptr);
-        if (!qualified_owner_record_decl) {
-            qualified_owner_enum_type = qualified_owner_canonical.as_shared<EnumType>();
-            qualified_owner_enum_decl =
-                dyn_cast<EnumDecl>(
-                    qualified_owner_enum_type
-                        ? qualified_owner_enum_type->get_decl()
-                        : nullptr);
-        }
-        qualifier_lookup_failed =
-            qualifier_lookup_failed ||
-            ((!qualified_owner_type || !qualified_owner_record_decl) &&
-             (!qualified_owner_enum_type || !qualified_owner_enum_decl));
-    }
-
-    if (qualified_owner_type && qualified_owner_record_decl) {
-        std::vector<std::pair<const RecordSemanticState::Method*, const ObjectDecl*>>
-            method_matches;
-        std::vector<std::pair<const RecordSemanticState::MethodTemplate*,
-                              const ObjectDecl*>>
-            method_template_matches;
-        std::vector<std::pair<const RecordSemanticState::StaticDataMember*,
-                              const ObjectDecl*>>
-            static_data_matches;
-        std::vector<std::shared_ptr<Symbol>> enumerator_matches;
-        std::unordered_set<const ObjectDecl*> visited;
-        // Search owner + bases until we find the first level that defines the name.
-        // If a level matches, stop descending so hidden base members stay hidden.
-        std::function<void(const ObjectDecl*)> collect_methods =
-            [&](const ObjectDecl* current_decl) {
-            if (!current_decl || visited.contains(current_decl)) {
-                return;
-            }
-            visited.insert(current_decl);
-            const RecordSemanticState* state =
-                collect_
-                    ? collect_->ensure_record_semantics_available(
-                          QualType(current_decl->get_record_type()),
-                          qualified_loc)
-                    : record_semantics_cache_lookup(current_decl);
-            if (!state) {
-                return;
-            }
-            bool matched_here = false;
-            for (const auto& static_data : state->static_data_members) {
-                if (static_data.name == terminal_name) {
-                    static_data_matches.emplace_back(
-                        &static_data, current_decl);
-                    matched_here = true;
-                }
-            }
-            for (const auto& enumerator : state->enumerator_members) {
-                if (enumerator.name == terminal_name) {
-                    enumerator_matches.push_back(enumerator.symbol);
-                    matched_here = true;
-                }
-            }
-            for (const auto& method : state->methods) {
-                if (method.name == terminal_name) {
-                    method_matches.emplace_back(&method, current_decl);
-                    matched_here = true;
-                }
-            }
-            for (const auto& method_template : state->method_templates) {
-                if (method_template.name == terminal_name) {
-                    method_template_matches.emplace_back(
-                        &method_template,
-                        current_decl);
-                    matched_here = true;
-                }
-            }
-            if (matched_here) {
-                return;
-            }
-            for (const auto& base : state->bases) {
-                collect_methods(base.record_decl);
-            }
-        };
-        collect_methods(qualified_owner_record_decl);
-
-        size_t static_method_matches = 0;
-        size_t nonstatic_method_matches = 0;
-        for (const auto& method_match : method_matches) {
-            if (method_match.first && method_match.first->is_static) {
-                ++static_method_matches;
-            } else {
-                ++nonstatic_method_matches;
-            }
-        }
-        size_t static_method_template_matches = 0;
-        size_t nonstatic_method_template_matches = 0;
-        for (const auto& method_template_match : method_template_matches) {
-            if (method_template_match.first &&
-                method_template_match.first->is_static) {
-                ++static_method_template_matches;
-            } else {
-                ++nonstatic_method_template_matches;
-            }
-        }
-        size_t static_callable_matches =
-            static_method_matches + static_method_template_matches;
-        size_t total_matches =
-            method_matches.size() +
-            method_template_matches.size() +
-            static_data_matches.size() +
-            enumerator_matches.size();
-        bool callable_only_matches =
-            looks_like_call &&
-            (method_matches.size() + method_template_matches.size()) > 0 &&
-            static_data_matches.empty() &&
-            enumerator_matches.empty();
-        if (looks_like_call &&
-            static_callable_matches > 0 &&
-            nonstatic_method_matches == 0 &&
-            nonstatic_method_template_matches == 0 &&
-            static_data_matches.empty()) {
-            std::shared_ptr<Symbol> selected_symbol = nullptr;
-            if (static_method_matches == 1 &&
-                static_method_template_matches == 0 &&
-                method_matches.size() == 1 &&
-                method_matches.front().first &&
-                method_matches.front().first->is_static) {
-                selected_symbol = method_matches.front().first->symbol;
-            }
-            auto qualified_ref = collect_->collect_identifier_reference(
-                terminal_name,
-                std::move(selected_symbol),
-                qualified_loc);
-            set_qualified_expr_info(
-                qualified_ref,
-                QualType(qualified_owner_type),
-                true,
-                false);
-            return qualified_ref;
-        }
-        if (total_matches > 1 && !callable_only_matches) {
-            diag_engine->report_error(
-                "member '" + terminal_name + "' is ambiguous",
-                qualified_loc);
-            return collect_->collect_error_expression(
-                "ambiguous member reference", qualified_loc);
-        }
-        if (total_matches == 0) {
-            diag_engine->report_error(
-                "no member named '" + terminal_name + "' in '" +
-                    qualified_owner_type->to_string() + "'",
-                qualified_loc);
-            return collect_->collect_error_expression(
-                "missing qualified member", qualified_loc);
-        }
-
-        if (static_data_matches.size() == 1) {
-            const auto* static_data = static_data_matches.front().first;
-            if (!static_data || !static_data->symbol) {
-                diag_engine->report_error(
-                    "internal error: unresolved static data member symbol '" +
-                        terminal_name + "'",
-                    qualified_loc);
-                return collect_->collect_error_expression(
-                    "unresolved static data member symbol",
-                    qualified_loc);
-            }
-                auto qualified_ref = collect_->collect_identifier_reference(
-                    terminal_name, static_data->symbol, qualified_loc);
-                set_qualified_expr_info(
-                    qualified_ref,
-                    QualType(qualified_owner_type),
-                    true,
-                    false);
-                return qualified_ref;
-        }
-
-        if (enumerator_matches.size() == 1) {
-            auto qualified_ref = collect_->collect_identifier_reference(
-                terminal_name, enumerator_matches.front(), qualified_loc);
-            set_qualified_expr_info(
-                qualified_ref,
-                QualType(qualified_owner_type),
-                true,
-                false);
-            return qualified_ref;
-        }
-
-        if (method_matches.size() == 1) {
-            const auto* method = method_matches.front().first;
-            if (method && method->is_static) {
-                if (!method->symbol) {
-                    diag_engine->report_error(
-                        "internal error: unresolved member function symbol '" +
-                            terminal_name + "'",
-                        qualified_loc);
-                    return collect_->collect_error_expression(
-                        "unresolved member function symbol", qualified_loc);
-                }
-                auto qualified_ref = collect_->collect_identifier_reference(
-                    terminal_name, method->symbol, qualified_loc);
-                set_qualified_expr_info(
-                    qualified_ref,
-                    QualType(qualified_owner_type),
-                    true,
-                    false);
-                return qualified_ref;
-            }
-        }
-
-        // Non-static member access through a qualified-id still needs an object;
-        // build `this`, cast it to the qualified owner, then form member access.
-        auto this_expr = collect_->collect_cpp_this_expression(qualified_loc);
-        if (isa<ErrorExpr>(this_expr.get())) {
-            return this_expr;
-        }
-        auto this_ptr_type = desugar_type(this_expr->get_type())
-            .as_shared<PointerType>();
-        uint8_t owner_quals = this_ptr_type
-            ? this_ptr_type->pointed_type.get_qualifiers()
-            : QUAL_NONE;
-        QualType owner_qt(qualified_owner_type, owner_quals);
-        QualType owner_ptr_type(std::make_shared<PointerType>(owner_qt));
-        auto owner_this_expr =
-            collect_->collect_cpp_named_cast(
-                Collect::CppNamedCastKind::Static,
-                std::move(this_expr),
-                owner_ptr_type,
-                qualified_loc);
-        return collect_->collect_member_expression(
-            std::move(owner_this_expr),
-            terminal_name,
-            true,
-            qualified_loc,
-            looks_like_call,
-            true,
-            owner_chain.requires_template_keyword());
-    }
-
-    if (qualified_owner_enum_type && qualified_owner_enum_decl) {
-        auto enumerator_symbol =
-            collect_->collect_lookup_enum_enumerator(
-                owner_chain.owner_type,
-                terminal_name);
-        if (!enumerator_symbol) {
-            diag_engine->report_error(
-                "use of undeclared identifier '" + terminal_name + "'",
-                qualified_loc);
-            return collect_->collect_error_expression("undeclared identifier",
-                qualified_loc);
-        }
-        auto qualified_ref = collect_->collect_identifier_reference(
-            terminal_name,
-            enumerator_symbol,
-            qualified_loc);
-        set_qualified_expr_info(
-            qualified_ref,
-            QualType(qualified_owner_enum_type),
-            true,
-            false);
-        return qualified_ref;
-    }
-
-    if (owner_chain.is_dependent_context()) {
-        auto qualifier = build_dependent_lookup_qualifier(
-            build_cpp_qualified_expr_info(
-                has_global_qualifier,
-                owner_chain.qualifier_spellings,
-                owner_chain.owner_type,
-                /*is_type_qualified=*/true,
-                owner_chain.is_current_instantiation));
-        return collect_->collect_unresolved_lookup_expression(
-            terminal_name,
-            std::move(qualifier),
-            /*requires_template_keyword=*/false,
-            qualified_loc);
-    }
-
-    if (!qualifier_lookup_failed) {
-        std::shared_ptr<Symbol> sym = nullptr;
-        const DeclBinding* binding = nullptr;
-        if (lookup_context) {
-            auto qualified_lookup = LookupEngine::lookup_qualified(
-                terminal_name,
-                lookup_context,
-                LookupNamespace::Ordinary);
-            binding =
-                qualified_lookup.status == LookupEngine::QualifiedLookupStatus::Found
-                    ? qualified_lookup.binding
-                    : nullptr;
-            if (binding) {
-                sym = qualified_lookup.symbol;
-                if (!sym && binding->symbol) {
-                    sym = binding->symbol;
-                } else if (!sym &&
-                           binding->has_overload_set() &&
-                           !binding->overload_candidates.empty()) {
-                    sym = binding->overload_candidates.front();
-                }
-            }
-        }
-
-        if (!sym &&
-            might_be_template_id &&
-            binding &&
-            (binding->template_decl || binding->has_template_overload_set())) {
-            auto qualified_ref = collect_->collect_identifier_reference(
-                terminal_name, nullptr, qualified_loc);
-            set_qualified_expr_info(qualified_ref);
-            return qualified_ref;
-        }
-
-        if (!sym && !looks_like_call) {
-            diag_engine->report_error(
-                "use of undeclared identifier '" + terminal_name + "'",
-                qualified_loc);
-            return collect_->collect_error_expression("undeclared identifier",
-                qualified_loc);
-        }
-
-        auto qualified_ref = collect_->collect_identifier_reference(
-            terminal_name, std::move(sym), qualified_loc);
-        set_qualified_expr_info(qualified_ref);
-        return qualified_ref;
-    }
-    if (qualifier_lookup_failed && !qualifiers.empty()) {
-        diag_engine->report_error(
-            "use of undeclared identifier '" +
-                (owner_chain.failed_prefix_spelling.empty()
-                     ? qualifiers.front().spelling()
-                     : owner_chain.failed_prefix_spelling) +
-                "'",
-            qualified_loc);
-        return collect_->collect_error_expression("undeclared identifier",
-            qualified_loc);
-    }
-
-    if (might_be_template_id) {
-        auto qualified_ref = collect_->collect_identifier_reference(
-            terminal_name, nullptr, qualified_loc);
-        set_qualified_expr_info(qualified_ref);
-        return qualified_ref;
-    }
-
-    if (!looks_like_call) {
-        diag_engine->report_error(
-            "use of undeclared identifier '" + terminal_name + "'",
-            qualified_loc);
-        return collect_->collect_error_expression("undeclared identifier",
-            qualified_loc);
-    }
-    auto qualified_ref = collect_->collect_identifier_reference(
-        terminal_name, nullptr, qualified_loc);
-    set_qualified_expr_info(qualified_ref);
-    return qualified_ref;
-}
-
-std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
-    if (!is_cxx_mode_active() || !gentle_check(TokenType::LEFT_BRACKET)) {
-        return nullptr;
-    }
-
-    SrcLoc lambda_loc = current_token().loc;
-    LambdaClosureInfo closure_info;
-    CppThisContext enclosing_this_context =
-        collect_->collect_current_cpp_this_context();
-
-    auto parse_simple_capture =
-        [&](std::vector<CppLambdaCapture>& captures) {
-            CppLambdaCapture capture;
-            capture.location = current_token().loc;
-            if (gentle_check_and_consume(TokenType::BITWISE_AND)) {
-                capture.by_reference = true;
-                capture.location = current_token().loc;
-                if (gentle_check(TokenType::ELLIPSIS)) {
-                    fail_cpp_future_work(
-                        "lambda capture pack",
-                        "lambda_capture_pack",
-                        current_token().loc);
-                }
-                if (gentle_check(TokenType::THIS_KW)) {
-                    error_custloc(
-                        "lambda capture '&this' is not valid",
-                        current_token().loc);
-                }
-            }
-
-            if (gentle_check(TokenType::THIS_KW)) {
-                if (!enclosing_this_context.is_member_function ||
-                    enclosing_this_context.is_static_member_function ||
-                    !enclosing_this_context.this_type) {
-                    error_custloc(
-                        "lambda capture 'this' is only valid in a non-static member function",
-                        current_token().loc);
-                }
-                capture.captures_this = true;
-                capture.name = "this";
-                advance();
-                captures.push_back(std::move(capture));
-                return;
-            }
-
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc("expected lambda capture", current_token().loc);
-            }
-
-            capture.name = current_token().value;
-            capture.location = current_token().loc;
-            advance();
-            if (gentle_check(TokenType::ASSIGN)) {
-                capture.is_init_capture = true;
-                advance();
-                auto initializer = parse_assignment_expression();
-                if (!initializer) {
-                    error_custloc(
-                        "lambda init-capture requires an initializer expression",
-                        capture.location);
-                }
-                capture.initializer =
-                    std::shared_ptr<Expr>(initializer.release());
-            } else if (gentle_check(TokenType::LEFT_BRACE) ||
-                       gentle_check(TokenType::LEFT_PAREN)) {
-                fail_cpp_future_work(
-                    "lambda init-capture initializer form",
-                    "lambda_init_capture_initializer",
-                    current_token().loc);
-            } else {
-                capture.symbol =
-                    collect_->collect_lookup_variable_symbol(capture.name, true);
-            }
-            if (gentle_check(TokenType::ELLIPSIS)) {
-                fail_cpp_future_work(
-                    "lambda capture pack",
-                    "lambda_capture_pack",
-                    current_token().loc);
-            }
-            captures.push_back(std::move(capture));
-        };
-
-    check_and_consume(TokenType::LEFT_BRACKET);
-    if (!gentle_check(TokenType::RIGHT_BRACKET)) {
-        bool parsed_default_capture = false;
-        if ((gentle_check(TokenType::BITWISE_AND) || gentle_check(TokenType::ASSIGN)) &&
-            (peek_token().type == TokenType::COMMA ||
-             peek_token().type == TokenType::RIGHT_BRACKET)) {
-            closure_info.default_capture =
-                gentle_check(TokenType::BITWISE_AND)
-                    ? CppLambdaCaptureDefault::ByReference
-                    : CppLambdaCaptureDefault::ByCopy;
-            advance();
-            parsed_default_capture = true;
-        }
-
-        if (!gentle_check(TokenType::RIGHT_BRACKET)) {
-            if (parsed_default_capture) {
-                check_and_consume(TokenType::COMMA);
-            }
-            while (true) {
-                parse_simple_capture(closure_info.captures);
-                if (!gentle_check_and_consume(TokenType::COMMA)) {
                     break;
                 }
+                return std::nullopt;
+            }();
+            auto add_logical_fold_composition =
+                [&](uint32_t lhs,
+                    uint32_t rhs,
+                    collect::Session::ConstraintFoldOperator op)
+                -> uint32_t {
+                return op == collect::Session::ConstraintFoldOperator::
+                                 LogicalAnd
+                    ? normal_form.add_conjunction(lhs, rhs)
+                    : normal_form.add_disjunction(lhs, rhs);
+            };
+            auto fold_expansion_parameters =
+                [&](NodeId operand_syntax)
+                -> std::vector<
+                    collect::Session::ConstraintFoldExpansionParameter> {
+                using FoldParameter =
+                    collect::Session::ConstraintFoldExpansionParameter;
+                using FoldParameterKind =
+                    collect::Session::ConstraintFoldExpansionParameterKind;
+
+                std::vector<FoldParameter> parameters;
+                const ConstraintFoldOperandSyntaxInfo* info =
+                    constraint_fold_operand_syntax_info(operand_syntax);
+                if (!info) {
+                    return parameters;
+                }
+
+                for (const collect::Session::ParameterPackIdentity& pack :
+                     info->packs) {
+                    FoldParameter parameter;
+                    parameter.name = pack.name;
+                    parameter.parameter_depth = pack.depth;
+                    parameter.parameter_index = pack.index;
+                    parameter.owning_template_entity = pack.owner;
+                    switch (pack.kind) {
+                        case collect::Session::ParameterPackKind::Function:
+                            parameter.kind = FoldParameterKind::Function;
+                            break;
+                        case collect::Session::ParameterPackKind::Type: {
+                            parameter.kind = FoldParameterKind::Type;
+                            if (auto type =
+                                    collect_session_.type_parameter_pack_type(
+                                        pack.name)) {
+                                parameter.type_parameter_pack_type = *type;
+                                parameter.argument.kind =
+                                    cir::TemplateArgumentKind::Type;
+                                parameter.argument.type =
+                                    collect_session_.type_ref(*type);
+                                parameter.argument.is_dependent = true;
+                            }
+                            break;
+                        }
+                        case collect::Session::ParameterPackKind::Value:
+                            parameter.kind = FoldParameterKind::Value;
+                            parameter.argument.kind =
+                                cir::TemplateArgumentKind::Value;
+                            parameter.argument.value_param_index = pack.index;
+                            parameter.argument.value_spelling = pack.name;
+                            parameter.argument.is_dependent = true;
+                            break;
+                        case collect::Session::ParameterPackKind::Template: {
+                            parameter.kind = FoldParameterKind::Template;
+                            parameter.parameter_entity = pack.declaration;
+                            parameter.argument.kind =
+                                cir::TemplateArgumentKind::Template;
+                            parameter.argument.template_entity =
+                                pack.declaration;
+                            parameter.argument.template_param_index =
+                                pack.index;
+                            parameter.argument.is_dependent = true;
+                            if (const collect::Session::TemplateInfo* info =
+                                    collect_session_
+                                        .template_parameter_pack_info_for_name(
+                                            pack.name)) {
+                                parameter.template_template_parameter_kind =
+                                    info->is_concept
+                                        ? collect::Session::
+                                              TemplateTemplateParameterKind::Concept
+                                        : collect::Session::
+                                              TemplateTemplateParameterKind::Type;
+                            }
+                            break;
+                        }
+                    }
+                    parameters.push_back(std::move(parameter));
+                }
+                return parameters;
+            };
+            if (constraint_fold_operator.has_value() &&
+                ((unary_fold && children.size() == 1) ||
+                 (binary_fold && children.size() == 2))) {
+                NodeId pattern_syntax =
+                    binary_left_fold ? children[1] : children[0];
+                if (diagnose_invalid_concept_pack_fold_pattern(
+                        pattern_syntax,
+                        node.loc)) {
+                    return collect::Session::NormalizedConstraint::no_node;
+                }
+                uint32_t pattern =
+                    normalize_direct_constraint_expression_syntax(
+                        pattern_syntax,
+                        normal_form);
+                if (!normal_form.valid_node(pattern)) {
+                    return collect::Session::NormalizedConstraint::no_node;
+                }
+                uint32_t fold =
+                    normal_form.add_fold_expanded(
+                        *constraint_fold_operator,
+                        pattern,
+                        fold_expansion_parameters(pattern_syntax));
+                if (unary_fold) {
+                    return expand_concept_pack_fold_constraints(normal_form,
+                                                                fold,
+                                                                node.loc);
+                }
+
+                NodeId init_syntax =
+                    binary_left_fold ? children[0] : children[1];
+                uint32_t init =
+                    normalize_direct_constraint_expression_syntax(init_syntax,
+                                                                  normal_form);
+                if (!normal_form.valid_node(init)) {
+                    return collect::Session::NormalizedConstraint::no_node;
+                }
+                uint32_t composed = binary_left_fold
+                    ? add_logical_fold_composition(
+                          init,
+                          fold,
+                          *constraint_fold_operator)
+                    : add_logical_fold_composition(
+                          fold,
+                          init,
+                          *constraint_fold_operator);
+                return expand_concept_pack_fold_constraints(normal_form,
+                                                            composed,
+                                                            node.loc);
             }
         }
     }
-    check_and_consume(TokenType::RIGHT_BRACKET);
 
-    bool has_parameter_clause = false;
-    bool is_mutable = false;
-    bool is_constexpr = false;
-    bool is_consteval = false;
-    bool has_trailing_return = false;
-    bool is_generic = false;
-    bool has_auto_template_parameters = false;
-    uint32_t lambda_template_parameter_depth =
-        static_cast<uint32_t>(active_template_parameter_stack_.size());
-    TemplateParameterList call_operator_template_parameters;
-    std::unique_ptr<Expr> template_requires_clause = nullptr;
-    std::unique_ptr<Expr> trailing_requires_clause = nullptr;
-    std::vector<std::unique_ptr<Decl>> parameters;
-    auto semantic_info = make_lambda_semantic_info(*ast_ctx, lambda_loc);
-    semantic_info.lexical_this_context = enclosing_this_context;
-    auto lambda_function_type = std::make_shared<FunctionType>();
-    lambda_function_type->ret_type =
-        QualType(std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
-
-    struct LambdaTemplateScopeGuard {
-        Collect* collect = nullptr;
-        std::vector<std::vector<const TemplateParameterDecl*>>* stack = nullptr;
-        std::shared_ptr<Scope> scope;
-        bool scope_active = false;
-        bool stack_active = false;
-
-        void leave_now() {
-            if (scope_active && collect && scope) {
-                collect->collect_set_current_scope(scope);
-                collect->collect_leave_scope();
-                scope_active = false;
+    if (const ConstraintConceptIdSyntaxInfo* concept_id =
+            constraint_concept_id_syntax_info(syntax)) {
+        const collect::Session::TemplateInfo* concept_info =
+            collect_session_.template_info(concept_id->concept_entity);
+        auto concept_entity_is_template_parameter = [&]() {
+            return concept_id->concept_entity.valid() &&
+                   collect_session_.file().valid(concept_id->concept_entity) &&
+                   collect_session_.file()
+                           .entity(concept_id->concept_entity)
+                           .kind == cir::EntityKind::TemplateParam;
+        };
+        if (concept_id->is_dependent_concept_id() ||
+            (concept_info && concept_info->is_concept &&
+             concept_entity_is_template_parameter())) {
+            collect::Session::ConstraintAtomIdentity atom;
+            atom.expression_begin = node.tokens.begin;
+            atom.expression_end = node.tokens.end;
+            if (concept_info && concept_entity_is_template_parameter() &&
+                concept_info->template_parameter_index !=
+                    cir::ArrayTypePayload::no_extent_param) {
+                collect::Session::ConstraintParameterMapping mapping;
+                mapping.parameter_kind =
+                    collect::Session::TemplateParameterKind::Template;
+                mapping.parameter_index =
+                    concept_info->template_parameter_index;
+                mapping.parameter_template_template_kind =
+                    collect::Session::TemplateTemplateParameterKind::Concept;
+                mapping.parameter_is_pack =
+                    concept_info->is_template_parameter_pack;
+                mapping.argument.kind = cir::TemplateArgumentKind::Template;
+                mapping.argument.template_param_index =
+                    concept_info->template_parameter_index;
+                mapping.argument.is_dependent = true;
+                atom.parameter_mapping.push_back(std::move(mapping));
             }
-            if (stack_active && stack && !stack->empty()) {
-                stack->pop_back();
-                stack_active = false;
+            uint32_t dependent =
+                normal_form.add_concept_dependent(std::move(atom));
+            normal_form.nodes[dependent].concept_id_entity =
+                concept_id->concept_entity;
+            normal_form.nodes[dependent].concept_id_template_parameter_index =
+                concept_info && concept_entity_is_template_parameter()
+                    ? concept_info->template_parameter_index
+                    : cir::ArrayTypePayload::no_extent_param;
+            normal_form.nodes[dependent].concept_id_dependent_qualifier =
+                concept_id->dependent_qualifier;
+            normal_form.nodes[dependent].concept_id_name =
+                concept_id->concept_name;
+            normal_form.nodes[dependent].concept_id_qualified_name =
+                concept_id->qualified_name;
+            normal_form.nodes[dependent].concept_id_argument_list_begin =
+                concept_id->argument_list_begin;
+            normal_form.nodes[dependent].concept_id_argument_list_end =
+                concept_id->argument_list_end;
+            normal_form.nodes[dependent].concept_id_arguments =
+                concept_id->arguments;
+            return dependent;
+        }
+        if (concept_info && concept_info->is_concept &&
+            concept_info->constraint_normal_form.has_value()) {
+            uint32_t copied =
+                normal_form.append_copy_of(*concept_info
+                                                ->constraint_normal_form);
+            if (normal_form.valid_node(copied)) {
+                collect::Session::PatternInstantiationCallbacks callbacks;
+                configure_pattern_instantiation_callbacks(callbacks,
+                                                          node.loc);
+                std::string substitution_error;
+                collect::Session::TemplateArgumentBindings
+                    concept_argument_bindings;
+                if (!collect_session_
+                         .bind_template_arguments_to_parameters(
+                             concept_info->parameters,
+                             concept_id->arguments,
+                             concept_argument_bindings)) {
+                    return collect::Session::NormalizedConstraint::no_node;
+                }
+                if (collect_session_.compose_constraint_parameter_mappings(
+                        normal_form,
+                        copied,
+                        concept_argument_bindings,
+                        callbacks,
+                        &substitution_error)) {
+                    uint32_t expanded =
+                        expand_concept_pack_fold_constraints(normal_form,
+                                                             copied,
+                                                             node.loc);
+                    return normal_form.valid_node(expanded)
+                        ? expanded
+                        : collect::Session::NormalizedConstraint::no_node;
+                }
+                return collect::Session::NormalizedConstraint::no_node;
             }
         }
+    }
 
-        ~LambdaTemplateScopeGuard() {
-            leave_now();
+    collect::Session::ConstraintAtomIdentity atom;
+    atom.expression_begin = node.tokens.begin;
+    atom.expression_end = node.tokens.end;
+    uint32_t atomic = normal_form.add_atomic(std::move(atom));
+    if (const ConstraintConceptIdSyntaxInfo* concept_id =
+            constraint_concept_id_syntax_info(syntax)) {
+        normal_form.nodes[atomic].concept_id_entity =
+            concept_id->concept_entity;
+        normal_form.nodes[atomic].concept_id_arguments =
+            concept_id->arguments;
+        normal_form.nodes[atomic].concept_id_argument_list_begin =
+            concept_id->argument_list_begin;
+        normal_form.nodes[atomic].concept_id_argument_list_end =
+            concept_id->argument_list_end;
+    }
+    return atomic;
+}
+
+void Parser::stamp_constraint_declaration_keys(
+    collect::Session::NormalizedConstraint& normal_form,
+    const std::vector<collect::Session::TemplateParameter>& parameters) {
+    for (collect::Session::NormalizedConstraintNode& node : normal_form.nodes) {
+        if (node.kind != collect::Session::NormalizedConstraintKind::Atomic ||
+            node.atom.appearance_owner.valid() ||
+            node.atom.expression_end <= node.atom.expression_begin) {
+
+            continue;
         }
-    } lambda_template_scope_guard;
-
-    struct LambdaTemplatePatternGuard {
-        uint32_t& depth;
-        bool active = false;
-
-        void enter() {
-            if (!active) {
-                ++depth;
-                active = true;
+        uint64_t hash = 1469598103934665603ull;
+        auto mix = [&hash](std::string_view text) {
+            for (unsigned char ch : text) {
+                hash ^= ch;
+                hash *= 1099511628211ull;
+            }
+            hash ^= 0x1fu;
+            hash *= 1099511628211ull;
+        };
+        for (size_t index = node.atom.expression_begin;
+             index < node.atom.expression_end && index < cooked_to_raw_.size();
+             ++index) {
+            const Token& token = tokens_[cooked_to_raw_[index]];
+            bool mapped = false;
+            if (is_identifier_token(token.type)) {
+                for (size_t j = 0; j < parameters.size(); ++j) {
+                    if (!parameters[j].name.empty() &&
+                        parameters[j].name == token.value) {
+                        char slot[24];
+                        int written = std::snprintf(slot, sizeof(slot),
+                                                    "\x01%zu", j);
+                        if (written > 0) {
+                            mix(std::string_view(slot,
+                                                 static_cast<size_t>(written)));
+                        }
+                        mapped = true;
+                        break;
+                    }
+                }
+            }
+            if (!mapped) {
+                char kind[16];
+                int written = std::snprintf(kind, sizeof(kind), "\x02%u",
+                                            static_cast<unsigned>(token.type));
+                if (written > 0) {
+                    mix(std::string_view(kind, static_cast<size_t>(written)));
+                }
+                mix(token.value);
             }
         }
+        node.atom.declaration_equivalence_key = hash == 0 ? 1 : hash;
+    }
+}
 
-        ~LambdaTemplatePatternGuard() {
-            if (active) {
-                --depth;
+bool Parser::parse_and_validate_constraint_expression(SrcLoc loc,
+                                                      size_t& begin,
+                                                      size_t& end,
+                                                      std::optional<bool>* value_out,
+                                                      collect::Session::
+                                                          NormalizedConstraint*
+                                                              normal_form_out) {
+    begin = current_raw_index();
+
+    bool owns_pattern_collection = !collect_session_.collecting_pattern();
+    if (owns_pattern_collection) {
+        collect_session_.begin_pattern_collection();
+    }
+    uint64_t taint_before = collect_session_.pattern_taint();
+    bool saved_retain_constraint_normal_form_syntax =
+        retain_constraint_normal_form_syntax_;
+    ++requires_expression_template_context_depth_;
+    retain_constraint_normal_form_syntax_ = normal_form_out != nullptr;
+    ParsedExpr expression = parse_constraint_expression();
+    retain_constraint_normal_form_syntax_ =
+        saved_retain_constraint_normal_form_syntax;
+    --requires_expression_template_context_depth_;
+    end = current_raw_index();
+    if (normal_form_out) {
+        collect::Session::NormalizedConstraint normal_form;
+        uint32_t root =
+            normalize_direct_constraint_expression_syntax(expression.syntax,
+                                                          normal_form);
+        if (normal_form.valid_node(root)) {
+            normal_form.root = root;
+            normal_form.value_expression =
+                expression.sem.template_value_expr;
+            collect_session_.file().canonicalize_template_value_expression(
+                normal_form.value_expression);
+            *normal_form_out = std::move(normal_form);
+        } else {
+            *normal_form_out = {};
+        }
+    }
+    bool value_dependent =
+        collect_session_.pattern_taint() != taint_before ||
+        collect_session_.expr_is_dependent(expression.sem) ||
+        expression.sem.references_template_value_parameter;
+    bool valid = !expression.sem.has_error;
+    if (valid) {
+        std::optional<bool> value;
+        valid = collect_session_.evaluate_constraint_expression(
+            std::move(expression.sem),
+            value_dependent,
+            value,
+            loc);
+        if (value_out) {
+            *value_out = value;
+        }
+    } else if (value_out) {
+        value_out->reset();
+    }
+    if (owns_pattern_collection) {
+        (void)collect_session_.finish_pattern_collection();
+    }
+    return valid;
+}
+
+bool Parser::parse_requires_parameter_list(
+    std::vector<NodeId>& children,
+    collect::Session::PrototypeParameterScope& parameter_scope) {
+    size_t diagnostic_watermark = diagnostics_.size();
+    size_t error_watermark = collect_session_.file().errors().size();
+    bool is_variadic = false;
+    (void)parse_parameter_list(
+        false,
+        TypeParseContext::type_only(
+            TypeParseContext::Origin::RequirementParameter),
+        &is_variadic,
+        [&](ParsedParam& parameter, uint32_t) {
+            if (parameter.syntax != InvalidNodeId) {
+                children.push_back(parameter.syntax);
+            }
+            collect::Session::TemplateInfo::FunctionConstraintParameter recipe;
+            recipe.name = parameter.name;
+            recipe.type = parameter.type_ref;
+            recipe.loc = parameter.loc;
+            recipe.is_parameter_pack = parameter.is_parameter_pack;
+            recipe.source_parameter_pack_name =
+                parameter.source_parameter_pack_name;
+            recipe.is_parameter_pack_expansion_sentinel =
+                parameter.is_parameter_pack_expansion_sentinel;
+            recipe.type_originates_from_template_parameter =
+                parameter.type_originates_from_template_parameter;
+            collect_session_.bind_prototype_parameter(parameter_scope,
+                                                      recipe);
+        },
+        ParameterListPolicy::RequirementLocal);
+    return diagnostics_.size() == diagnostic_watermark &&
+        collect_session_.file().errors().size() == error_watermark &&
+        !is_variadic;
+}
+
+Parser::ParsedRequiresRequirement Parser::parse_requires_type_requirement() {
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+
+    std::vector<NodeId> children;
+    cir::TypeRef type;
+    bool type_originates_from_template_parameter = false;
+    bool valid = true;
+    bool qualified_type_name =
+        check(TokenType::SCOPE_RESOLUTION) ||
+        (is_identifier_token(current().type) &&
+         (peek(1).type == TokenType::SCOPE_RESOLUTION ||
+          template_id_precedes_scope(0)));
+
+    if (qualified_type_name) {
+        if (auto parsed = parse_cxx_qualified_type_name(
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::TypeRequirement))) {
+            type = *parsed;
+        } else {
+            valid = false;
+            type = collect_session_.type_ref(
+                collect_session_.file().unknown_type());
+        }
+    } else if (is_identifier_token(current().type)) {
+        cir::TypeId type_id{};
+        NodeId type_syntax =
+            parse_type_name(&type_id,
+                            nullptr,
+                            nullptr,
+                            &type,
+                            nullptr,
+                            &type_originates_from_template_parameter);
+        children.push_back(type_syntax);
+    } else {
+        diagnose(DiagnosticLevel::Error,
+                 "expected type name in type requirement",
+                 current_loc());
+        valid = false;
+        type = collect_session_.type_ref(
+            collect_session_.file().unknown_type());
+    }
+
+    if (!match(TokenType::SEMICOLON)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ';' after type requirement",
+                 current_loc());
+        valid = false;
+    }
+
+    bool dependent =
+        (type.valid() && collect_session_.is_dependent_type(type.type)) ||
+        type_originates_from_template_parameter;
+    NodeId syntax = make_node(
+        NodeKind::TypeName,
+        begin,
+        last_consumed_raw_end(),
+        children,
+        text_payload(collect_session_.file().format_type(type)));
+    return {syntax, dependent, valid};
+}
+
+Parser::ParsedRequiresRequirement Parser::parse_requires_compound_requirement() {
+    size_t begin = current_raw_index();
+    consume();
+
+    ParsedExpr expression = parse_expression();
+    bool saw_close = match(TokenType::RIGHT_BRACE);
+    if (!saw_close) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected '}' after compound requirement expression",
+                 current_loc());
+    }
+
+    bool has_noexcept = match(TokenType::NOEXCEPT_KW);
+    bool valid = !expression.sem.has_error && saw_close;
+    bool dependent =
+        collect_session_.expr_is_dependent(expression.sem) ||
+        expression.sem.references_template_value_parameter;
+    if (has_noexcept && valid) {
+        bool noexcept_dependent = false;
+        bool potentially_throwing =
+            collect_session_.expression_potentially_throws(
+                expression.sem,
+                &noexcept_dependent);
+        dependent = dependent || noexcept_dependent;
+        if (potentially_throwing && !noexcept_dependent) {
+            diagnose(DiagnosticLevel::Error,
+                     "compound requirement expression is potentially throwing",
+                     tree_.node(expression.syntax).loc);
+            valid = false;
+        }
+    }
+
+    if (match(TokenType::ARROW)) {
+        std::optional<ParsedTypeConstraint> type_constraint =
+            try_parse_type_constraint();
+        if (!type_constraint.has_value()) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected type-constraint after '->' in compound requirement",
+                     current_loc());
+            valid = false;
+            while (!at_end() && !check(TokenType::SEMICOLON) &&
+                   !check(TokenType::RIGHT_BRACE)) {
+                consume();
+            }
+        } else {
+            valid = valid && !type_constraint->has_error;
+            if (valid) {
+                cir::TypeRef result_type =
+                    collect_session_.resolve_decltype_expr_type(
+                        expression.sem,
+                        /*use_declared_type_rule=*/false,
+                        tree_.node(expression.syntax).loc);
+                bool constraint_dependent = false;
+                bool constraint_satisfied = false;
+                bool constraint_valid =
+                    evaluate_type_constraint_for_constrained_type(
+                        *type_constraint,
+                        result_type,
+                        type_constraint->loc,
+                        constraint_dependent,
+                        constraint_satisfied);
+                dependent = dependent || constraint_dependent;
+                valid = constraint_valid && constraint_satisfied;
+                if (constraint_valid && !constraint_satisfied) {
+                    diagnose(DiagnosticLevel::Error,
+                             "compound requirement return type constraint is not satisfied",
+                             type_constraint->loc);
+                }
             }
         }
-    } lambda_template_pattern_guard{template_pattern_depth_};
+    }
 
-    auto ensure_lambda_template_parameter_stack = [&]() {
-        if (lambda_template_scope_guard.stack_active) {
+    if (!match(TokenType::SEMICOLON)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ';' after compound requirement",
+                 current_loc());
+        valid = false;
+    }
+
+    NodeId syntax = make_node(NodeKind::BlockExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              {expression.syntax},
+                              text_payload("compound-requirement"));
+    return {syntax, dependent, valid};
+}
+
+Parser::ParsedRequiresRequirement Parser::parse_requires_nested_requirement() {
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+
+    uint64_t taint_before = collect_session_.pattern_taint();
+    bool saved_retain_constraint_normal_form_syntax =
+        retain_constraint_normal_form_syntax_;
+    ++requires_expression_template_context_depth_;
+    retain_constraint_normal_form_syntax_ = true;
+    ParsedExpr expression = parse_constraint_expression();
+    retain_constraint_normal_form_syntax_ =
+        saved_retain_constraint_normal_form_syntax;
+    --requires_expression_template_context_depth_;
+
+    bool saw_semicolon = match(TokenType::SEMICOLON);
+    if (!saw_semicolon) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ';' after nested requirement",
+                 current_loc());
+    }
+
+    bool dependent =
+        collect_session_.pattern_taint() != taint_before ||
+        collect_session_.expr_is_dependent(expression.sem) ||
+        expression.sem.references_template_value_parameter;
+    bool valid = !expression.sem.has_error && saw_semicolon;
+
+    auto diagnose_unsatisfied = [&]() {
+        diagnose(DiagnosticLevel::Error,
+                 "nested requirement is not satisfied",
+                 tree_.node(expression.syntax).loc);
+    };
+
+    bool evaluated = false;
+    if (valid && !dependent) {
+        collect::Session::NormalizedConstraint normal_form;
+        uint32_t root =
+            normalize_direct_constraint_expression_syntax(expression.syntax,
+                                                          normal_form);
+        if (normal_form.valid_node(root)) {
+            normal_form.root = root;
+            collect::Session::TemplateInfo dummy_info;
+            NormalizedConstraintCheckResult result =
+                evaluate_normalized_associated_constraint(
+                    dummy_info,
+                    {},
+                    normal_form,
+                    collect::Session::NormalizedConstraint::no_node,
+                    loc,
+                    /*point_lookup_generation=*/0);
+            switch (result) {
+                case NormalizedConstraintCheckResult::Satisfied:
+                    evaluated = true;
+                    break;
+                case NormalizedConstraintCheckResult::Unsatisfied:
+                    evaluated = true;
+                    valid = false;
+                    diagnose_unsatisfied();
+                    break;
+                case NormalizedConstraintCheckResult::Invalid:
+                    evaluated = true;
+                    valid = false;
+                    break;
+                case NormalizedConstraintCheckResult::Unsupported:
+                    break;
+            }
+        }
+    }
+
+    if (valid && !evaluated) {
+        std::optional<bool> value;
+        valid = collect_session_.evaluate_constraint_expression(
+            std::move(expression.sem),
+            dependent,
+            value,
+            loc);
+        if (valid && value.has_value() && !*value) {
+            valid = false;
+            diagnose_unsatisfied();
+        }
+        if (valid && !value.has_value()) {
+            dependent = true;
+        }
+    }
+
+    NodeId syntax = make_node(NodeKind::UnaryExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              {expression.syntax},
+                              text_payload("nested-requirement"));
+    return {syntax, dependent, valid};
+}
+
+Parser::ParsedExpr Parser::parse_requires_expression() {
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+
+    std::vector<NodeId> children;
+    bool has_error = false;
+    bool value = true;
+    bool value_dependent = false;
+
+    auto failures_evaluate_false = [&]() {
+        return requires_expression_template_context_depth_ > 0 ||
+               in_constraint_substitution_failure_context() ||
+               collect_session_.in_template_definition() ||
+               collect_session_.in_template_instantiation();
+    };
+
+    auto skip_requirement = [&]() {
+        int parens = 0;
+        int brackets = 0;
+        int braces = 0;
+        while (!at_end()) {
+            TokenType type = current().type;
+            if (type == TokenType::SEMICOLON && parens == 0 &&
+                brackets == 0 && braces == 0) {
+                consume();
+                return;
+            }
+            if (type == TokenType::RIGHT_BRACE && parens == 0 &&
+                brackets == 0 && braces == 0) {
+                return;
+            }
+            consume();
+            if (type == TokenType::LEFT_PAREN) {
+                ++parens;
+            } else if (type == TokenType::RIGHT_PAREN && parens > 0) {
+                --parens;
+            } else if (type == TokenType::LEFT_BRACKET) {
+                ++brackets;
+            } else if (type == TokenType::RIGHT_BRACKET && brackets > 0) {
+                --brackets;
+            } else if (type == TokenType::LEFT_BRACE) {
+                ++braces;
+            } else if (type == TokenType::RIGHT_BRACE && braces > 0) {
+                --braces;
+            }
+        }
+    };
+
+    auto requirement_is_dependent = [](const collect::ExprResult& expr) {
+        return expr.references_template_value_parameter;
+    };
+
+    collect::Session::PrototypeParameterScope parameter_scope;
+    auto close_parameter_scope = [&]() {
+        if (!parameter_scope.active) {
             return;
         }
-        lambda_template_scope_guard.stack = &active_template_parameter_stack_;
-        active_template_parameter_stack_.emplace_back();
-        lambda_template_scope_guard.stack_active = true;
+        collect_session_.finish_prototype_parameter_scope(
+            std::move(parameter_scope));
+        parameter_scope = {};
     };
 
-    auto append_lambda_template_parameters_to_active_stack =
-        [&](size_t first_index) {
-            if (first_index >= call_operator_template_parameters.size()) {
-                return;
-            }
-            ensure_lambda_template_parameter_stack();
-            auto& active_parameters = active_template_parameter_stack_.back();
-            for (size_t index = first_index;
-                 index < call_operator_template_parameters.size();
-                 ++index) {
-                active_parameters.push_back(
-                    call_operator_template_parameters[index].get());
-            }
-        };
+    if (match(TokenType::LEFT_PAREN)) {
+        size_t parameter_diagnostic_watermark = diagnostics_.size();
+        collect_session_.begin_speculative_parse();
+        parameter_scope =
+            collect_session_.begin_prototype_parameter_scope();
+        bool valid_parameters =
+            parse_requires_parameter_list(children, parameter_scope);
+        bool substitution_failure =
+            !valid_parameters &&
+            (in_constraint_substitution_failure_context() ||
+             collect_session_.in_template_instantiation());
+        if (substitution_failure) {
 
-    if (gentle_check(TokenType::LESS_THAN)) {
-        if (!lang_opts.is_cxx20_or_later()) {
-            error_custloc(
-                "lambda template parameter list requires C++20",
-                current_token().loc);
-        }
-        is_generic = true;
-        auto entered_template_scope =
-            collect_->collect_enter_scope(ScopeFlags::TemplateParameterScope);
-        lambda_template_scope_guard.collect = collect_.get();
-        lambda_template_scope_guard.stack = &active_template_parameter_stack_;
-        lambda_template_scope_guard.scope = entered_template_scope.scope;
-        lambda_template_scope_guard.scope_active = true;
-        active_template_parameter_stack_.emplace_back();
-        lambda_template_scope_guard.stack_active = true;
-
-        call_operator_template_parameters =
-            parse_cpp_template_parameter_list(lambda_template_parameter_depth);
-        if (call_operator_template_parameters.empty()) {
-            error_custloc(
-                "lambda template parameter list cannot be empty",
-                lambda_loc);
-        }
-
-        if (gentle_check(TokenType::REQUIRES_KW)) {
-            advance(); // 'requires'
-            ++lambda_template_requires_clause_depth_;
-            struct TemplateRequiresParseGuard {
-                uint32_t& depth;
-                ~TemplateRequiresParseGuard() { --depth; }
-            } template_requires_guard{lambda_template_requires_clause_depth_};
-            template_requires_clause = parse_cpp_template_constraint_expression();
-            if (!template_requires_clause) {
-                error_custloc(
-                    "invalid lambda template requires-clause",
-                    current_token().loc);
-            }
-        }
-    }
-
-    auto saved_scope = collect_->collect_current_scope();
-    auto saved_func_type = func_type;
-    auto saved_seen_stmt_labels = seen_stmt_labels;
-    auto saved_stmt_labels = stmt_labels;
-    auto saved_local_label_scopes = local_label_scopes_;
-    uint64_t saved_local_label_unique_id = local_label_unique_id_;
-
-    auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
-    auto lambda_scope = entered_scope.scope;
-
-    seen_stmt_labels.clear();
-    stmt_labels.clear();
-    local_label_scopes_.clear();
-    local_label_unique_id_ = 0;
-
-    auto restore_lambda_parse_state = [&]() {
-        collect_->collect_set_current_scope(saved_scope);
-        func_type = saved_func_type;
-        seen_stmt_labels = saved_seen_stmt_labels;
-        stmt_labels = saved_stmt_labels;
-        local_label_scopes_ = saved_local_label_scopes;
-        local_label_unique_id_ = saved_local_label_unique_id;
-    };
-
-    auto bind_lambda_init_capture_symbols =
-        [&]() {
-            for (auto& capture : closure_info.captures) {
-                if (!capture.is_init_capture) {
-                    continue;
-                }
-                if (!capture.initializer) {
-                    error_custloc(
-                        "lambda init-capture requires an initializer expression",
-                        capture.location);
-                }
-
-                QualType declared_type(
-                    std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
-                if (capture.by_reference) {
-                    declared_type = QualType(
-                        std::make_shared<ReferenceType>(
-                            QualType(
-                                std::make_shared<AutoType>(
-                                    AutoTypeFlavor::Cxx)),
-                            ReferenceKind::LValue));
-                }
-
-                auto capture_symbol = collect_->collect_declare_variable_symbol(
-                    capture.name,
-                    declared_type,
-                    StorageClass::NONE,
-                    false,
-                    false,
-                    capture.location);
-                collect_->collect_resolve_auto_variable_type_from_expr(
-                    declared_type,
-                    capture.initializer.get(),
-                    capture_symbol,
-                    capture.name,
-                    capture.location);
-                if (capture.by_reference && capture_symbol) {
-                    capture_symbol->type =
-                        remove_reference(declared_type, ast_ctx.get());
-                }
-                capture.symbol = std::move(capture_symbol);
-            }
-        };
-
-    try {
-        bind_lambda_init_capture_symbols();
-
-        if (gentle_check(TokenType::LEFT_PAREN)) {
-            has_parameter_clause = true;
-            advance();
-            if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                while (true) {
-                    auto parameter = parse_parameter_declaration();
-                    auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
-                    if (!param_decl) {
-                        error_custloc(
-                            "internal error: lambda parameter did not produce ParamDecl",
-                            lambda_loc);
-                    }
-                    if (auto_type_utils::has_cxx_auto_type(
-                            param_decl->type.get_shared())) {
-                        is_generic = true;
-                        has_auto_template_parameters = true;
-                    }
-                    parameters.push_back(std::move(parameter));
-                    if (!gentle_check_and_consume(TokenType::COMMA)) {
-                        break;
-                    }
-                }
-            }
-            check_and_consume(TokenType::RIGHT_PAREN);
-        }
-
-        if (has_auto_template_parameters) {
-            size_t previous_template_parameter_count =
-                call_operator_template_parameters.size();
-            call_operator_template_parameters =
-                lower_generic_lambda_parameter_placeholders(
-                    parameters,
-                    std::move(call_operator_template_parameters),
-                    semantic_info.closure_name(),
-                    lambda_template_parameter_depth,
-                    lambda_loc);
-            append_lambda_template_parameters_to_active_stack(
-                previous_template_parameter_count);
-        }
-
-        if (is_generic) {
-            lambda_template_pattern_guard.enter();
-        }
-
-        lambda_function_type->clear_parameters();
-        lambda_function_type->parameters.reserve(parameters.size());
-        lambda_function_type->parameter_pack_flags.reserve(parameters.size());
-        for (const auto& parameter : parameters) {
-            auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
-            if (!param_decl) {
-                error_custloc(
-                    "internal error: lambda parameter did not produce ParamDecl",
-                    lambda_loc);
-            }
-            lambda_function_type->push_parameter(
-                param_decl->type,
-                param_decl->is_parameter_pack);
-        }
-
-        while (true) {
-            if (gentle_check(TokenType::MUTABLE_KW)) {
-                if (is_mutable) {
-                    error_custloc(
-                        "duplicate 'mutable' in lambda declarator",
-                        current_token().loc);
-                }
-                is_mutable = true;
-                advance();
-                continue;
-            }
-            if (gentle_check(TokenType::CONSTEXPR_KW)) {
-                if (!lang_opts.is_cxx17_or_later()) {
-                    error_custloc(
-                        "lambda 'constexpr' specifier requires C++17",
-                        current_token().loc);
-                }
-                if (is_constexpr) {
-                    error_custloc(
-                        "duplicate 'constexpr' in lambda declarator",
-                        current_token().loc);
-                }
-                is_constexpr = true;
-                advance();
-                continue;
-            }
-            if (gentle_check(TokenType::CONSTEVAL_KW)) {
-                if (!lang_opts.is_cxx20_or_later()) {
-                    error_custloc(
-                        "lambda 'consteval' specifier requires C++20",
-                        current_token().loc);
-                }
-                if (is_consteval) {
-                    error_custloc(
-                        "duplicate 'consteval' in lambda declarator",
-                        current_token().loc);
-                }
-                is_consteval = true;
-                advance();
-                continue;
-            }
-            break;
-        }
-
-        if (is_constexpr && is_consteval) {
-            error_custloc(
-                "'constexpr' cannot be combined with 'consteval' on a lambda",
-                lambda_loc);
-        }
-
-        if (gentle_check(TokenType::NOEXCEPT_KW)) {
-            parse_cpp_optional_noexcept_spec(*lambda_function_type);
-        }
-
-        DeclarationParser return_parser(this);
-        if (auto return_type = return_parser.parse_cpp_trailing_return_type()) {
-            if (return_parser.is_parameter_pack) {
-                fail_cpp_future_work(
-                    "lambda trailing return parameter pack",
-                    "lambda_trailing_return_pack",
-                    lambda_loc);
-            }
-            lambda_function_type->ret_type = *return_type;
-            has_trailing_return = true;
-        }
-
-        if (lang_opts.is_cxx20_or_later() &&
-            gentle_check(TokenType::REQUIRES_KW)) {
-            advance(); // 'requires'
-            trailing_requires_clause = is_generic
-                ? parse_cpp_template_constraint_expression()
-                : parse_cpp_constraint_expression();
-            if (!trailing_requires_clause) {
-                error_custloc(
-                    "invalid lambda trailing requires-clause",
-                    current_token().loc);
-            }
-            if (!is_generic) {
-                error_custloc(
-                    "non-generic lambda cannot have a trailing requires-clause",
-                    trailing_requires_clause->location.isInvalid()
-                        ? lambda_loc
-                        : trailing_requires_clause->location);
-            }
-        }
-
-        auto call_operator_type = std::make_shared<FunctionType>(*lambda_function_type);
-        call_operator_type->has_prototype = true;
-        auto closure_owner_type = semantic_info.closure_type();
-        if (!closure_owner_type) {
-            error_custloc(
-                "internal error: lambda closure semantic owner has no object type",
-                lambda_loc);
+            close_parameter_scope();
+            collect_session_.rollback_speculative_parse();
+            diagnostics_.resize(parameter_diagnostic_watermark);
+            value = false;
         } else {
-            uint8_t this_object_quals = is_mutable ? QUAL_NONE : QUAL_CONST;
-            QualType qualified_owner_type(
-                closure_owner_type.get_shared(),
-                this_object_quals);
-            QualType this_type(
-                std::make_shared<PointerType>(qualified_owner_type));
-            call_operator_type->insert_parameter(0, this_type);
+            collect_session_.commit_speculative_parse();
+        }
+        if (!valid_parameters && !substitution_failure) {
+            has_error = true;
+        }
+    }
+
+    if (!match(TokenType::LEFT_BRACE)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected requirement body after 'requires'",
+                 current_loc());
+        close_parameter_scope();
+        NodeId syntax = make_node(NodeKind::RequiresExpr,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  children,
+                                  {},
+                                  NodeFlagHasError);
+        collect::ExprResult sem =
+            collect_session_.make_boolean_literal(false, "false", loc);
+        sem.has_error = true;
+        return {syntax, std::move(sem)};
+    }
+
+    if (check(TokenType::RIGHT_BRACE)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected requirement in requires-expression",
+                 current_loc());
+        has_error = true;
+    }
+
+    while (!at_end() && !check(TokenType::RIGHT_BRACE)) {
+        if (!value || has_error) {
+            skip_requirement();
+            continue;
         }
 
-        func_type = QualType(call_operator_type).get_shared();
-        collect_->collect_start_function_definition(
-            semantic_info.closure_name() + "::operator()",
-            QualType(call_operator_type),
-            enclosing_this_context,
-            is_in_template_pattern_context());
+        ParserCheckpoint checkpoint = capture_parser_checkpoint();
+        size_t error_watermark = collect_session_.file().errors().size();
+        size_t child_count_before = children.size();
+        collect_session_.begin_speculative_parse();
 
-        std::unique_ptr<CompoundStmt> body;
-        std::unordered_set<std::string> lambda_stmt_labels;
-        try {
-            auto body_stmt = parse_compound_stmt(lambda_scope);
-            body = std::unique_ptr<CompoundStmt>(
-                dyn_cast<CompoundStmt>(body_stmt.release()));
-            if (!body) {
-                error_custloc(
-                    "expected lambda compound-statement body",
-                    lambda_loc);
+        bool dependent = false;
+        bool valid = true;
+        uint64_t requirement_taint_before =
+            collect_session_.pattern_taint();
+        collect_session_.begin_unevaluated_operand();
+        if (check(TokenType::LEFT_BRACE)) {
+            ParsedRequiresRequirement requirement =
+                parse_requires_compound_requirement();
+            children.push_back(requirement.syntax);
+            dependent = requirement.dependent;
+            valid = requirement.valid;
+        } else if (check(TokenType::REQUIRES_KW)) {
+            ParsedRequiresRequirement requirement =
+                parse_requires_nested_requirement();
+            children.push_back(requirement.syntax);
+            dependent = requirement.dependent;
+            valid = requirement.valid;
+        } else if (check(TokenType::TYPENAME)) {
+            ParsedRequiresRequirement requirement =
+                parse_requires_type_requirement();
+            children.push_back(requirement.syntax);
+            dependent = requirement.dependent;
+            valid = requirement.valid;
+        } else {
+            ParsedExpr requirement = parse_expression();
+            children.push_back(requirement.syntax);
+            bool saw_semicolon = match(TokenType::SEMICOLON);
+            dependent =
+                collect_session_.expr_is_dependent(requirement.sem) ||
+                requirement_is_dependent(requirement.sem);
+            valid = !requirement.sem.has_error && saw_semicolon;
+            if (!saw_semicolon) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after simple requirement",
+                         current_loc());
             }
-            lambda_stmt_labels = stmt_labels;
-            collect_->collect_finish_function_definition(lambda_scope);
-            lambda_function_type->ret_type = call_operator_type->ret_type;
-        } catch (...) {
-            collect_->collect_abort_function_definition();
-            throw;
+        }
+        collect_session_.end_unevaluated_operand();
+
+        dependent = dependent ||
+            collect_session_.pattern_taint() != requirement_taint_before;
+
+        bool parser_had_error =
+            std::any_of(diagnostics_.begin() + checkpoint.diagnostics_size,
+                        diagnostics_.end(),
+                        [](const Diagnostic& diagnostic) {
+                            return diagnostic.level == DiagnosticLevel::Error;
+                        });
+        std::vector<std::pair<SrcLoc, std::string>> captured_errors(
+            collect_session_.file().errors().begin() + error_watermark,
+            collect_session_.file().errors().end());
+        collect_session_.rollback_speculative_parse();
+        valid = valid && !parser_had_error && captured_errors.empty();
+
+        if (valid) {
+            value_dependent = value_dependent || dependent;
+            continue;
         }
 
-        restore_lambda_parse_state();
-        lambda_template_scope_guard.leave_now();
-        auto lambda_expr = collect_->collect_cpp_lambda_expression(
-            std::move(closure_info),
-            std::move(semantic_info),
-            QualType(lambda_function_type),
-            std::move(call_operator_template_parameters),
-            std::move(template_requires_clause),
-            std::move(trailing_requires_clause),
-            std::move(parameters),
-            std::move(body),
-            std::move(lambda_stmt_labels),
-            call_operator_type->ret_type,
-            has_parameter_clause,
-            is_mutable,
-            is_constexpr,
-            is_consteval,
-            lambda_function_type->has_explicit_exception_spec,
-            has_trailing_return,
-            is_generic,
-            lambda_loc);
-        return lambda_expr;
-    } catch (...) {
-        restore_lambda_parse_state();
-        throw;
-    }
-}
-
-std::unique_ptr<Expr> Parser::parse_block_literal_expression() {
-    if (!gentle_check(TokenType::BITWISE_XOR)) {
-        return nullptr;
-    }
-    if (!type_ctx || !type_ctx->target ||
-        !darwin_blocks::blocks_enabled_for_langopts(lang_opts, *type_ctx->target)) {
-        return nullptr;
-    }
-
-    SrcLoc block_loc = current_token().loc;
-    advance(); // consume '^'
-
-    bool has_parameter_clause = false;
-    bool has_explicit_return_type = false;
-    QualType explicit_return_type = nullptr;
-    std::vector<std::unique_ptr<Decl>> parameters;
-    auto block_function_type = std::make_shared<FunctionType>();
-    block_function_type->ret_type =
-        QualType(std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
-    block_function_type->has_prototype = true;
-
-    auto parse_block_parameter_clause =
-        [&]() {
-            has_parameter_clause = true;
-            check_and_consume(TokenType::LEFT_PAREN);
-            if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                while (true) {
-                    auto parameter = parse_parameter_declaration();
-                    auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
-                    if (!param_decl) {
-                        error_custloc(
-                            "internal error: block parameter did not produce ParamDecl",
-                            block_loc);
-                    }
-                    parameters.push_back(std::move(parameter));
-                    if (!gentle_check_and_consume(TokenType::COMMA)) {
-                        break;
-                    }
-                }
-            }
-            check_and_consume(TokenType::RIGHT_PAREN);
-        };
-
-    if (gentle_check(TokenType::LEFT_PAREN)) {
-        parse_block_parameter_clause();
-    } else if (isTokenDeclarationSpec(current_token())) {
-        DeclarationParser return_parser(this);
-        explicit_return_type = QualType(return_parser.parse_declaration(false));
-        retain_type_specifier_decl_if_needed(return_parser);
-        if (!explicit_return_type) {
-            error_custloc("expected block return type after '^'", block_loc);
+        if (failures_evaluate_false()) {
+            restore_parser_checkpoint(checkpoint);
+            children.resize(child_count_before);
+            value = false;
+            skip_requirement();
+            continue;
         }
-        has_explicit_return_type = true;
-        block_function_type->ret_type = explicit_return_type;
-        if (gentle_check(TokenType::LEFT_PAREN)) {
-            parse_block_parameter_clause();
+
+        for (const auto& [error_loc, message] : captured_errors) {
+            collect_session_.report_error(message, error_loc);
         }
+        has_error = true;
     }
 
-    block_function_type->clear_parameters();
-    if (parameters.empty()) {
-        block_function_type->push_parameter(
-            QualType(type_ctx->get_builtin(BuiltinTypes::Void)));
+    if (!match(TokenType::RIGHT_BRACE)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected '}' after requires-expression body",
+                 current_loc());
+        has_error = true;
+    }
+
+    close_parameter_scope();
+
+    uint16_t flags = has_error ? NodeFlagHasError : NodeFlagNone;
+    NodeId syntax = make_node(NodeKind::RequiresExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              {},
+                              flags);
+    collect::ExprResult sem;
+    if (has_error) {
+        sem = collect_session_.make_boolean_literal(false, "false", loc);
+        sem.has_error = true;
+    } else if (value_dependent) {
+        sem = collect_session_.make_dependent_boolean_expr(loc);
     } else {
-        block_function_type->parameters.reserve(parameters.size());
-        block_function_type->parameter_pack_flags.reserve(parameters.size());
-        for (const auto& parameter : parameters) {
-            auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
-            if (!param_decl) {
-                error_custloc(
-                    "internal error: block parameter did not produce ParamDecl",
-                    block_loc);
-            }
-            block_function_type->push_parameter(
-                param_decl->type,
-                param_decl->is_parameter_pack);
-        }
+        sem = collect_session_.make_boolean_literal(value,
+                                                    value ? "true" : "false",
+                                                    loc);
     }
-
-    auto saved_scope = collect_->collect_current_scope();
-    auto saved_func_type = func_type;
-    auto saved_seen_stmt_labels = seen_stmt_labels;
-    auto saved_stmt_labels = stmt_labels;
-    auto saved_local_label_scopes = local_label_scopes_;
-    uint64_t saved_local_label_unique_id = local_label_unique_id_;
-
-    auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
-    auto block_scope = entered_scope.scope;
-
-    seen_stmt_labels.clear();
-    stmt_labels.clear();
-    local_label_scopes_.clear();
-    local_label_unique_id_ = 0;
-
-    auto restore_block_parse_state = [&]() {
-        collect_->collect_set_current_scope(saved_scope);
-        func_type = saved_func_type;
-        seen_stmt_labels = saved_seen_stmt_labels;
-        stmt_labels = saved_stmt_labels;
-        local_label_scopes_ = saved_local_label_scopes;
-        local_label_unique_id_ = saved_local_label_unique_id;
-    };
-
-    try {
-        func_type = QualType(block_function_type).get_shared();
-        collect_->collect_start_function_definition(
-            make_block_internal_name(block_loc) + "::__invoke",
-            QualType(block_function_type),
-            Collect::CppThisContext{},
-            is_in_template_pattern_context());
-
-        std::unique_ptr<CompoundStmt> body;
-        std::unordered_set<std::string> block_stmt_labels;
-        try {
-            auto body_stmt = parse_compound_stmt(block_scope);
-            body = std::unique_ptr<CompoundStmt>(
-                dyn_cast<CompoundStmt>(body_stmt.release()));
-            if (!body) {
-                error_custloc(
-                    "expected block compound-statement body",
-                    block_loc);
-            }
-            block_stmt_labels = stmt_labels;
-            collect_->collect_finish_function_definition(block_scope);
-            if (has_explicit_return_type) {
-                block_function_type->ret_type = explicit_return_type;
-            }
-        } catch (...) {
-            collect_->collect_abort_function_definition();
-            throw;
-        }
-
-        restore_block_parse_state();
-
-        if (parameters.empty()) {
-            parameters.push_back(collect_->collect_parameter_declaration(
-                QualType(type_ctx->get_builtin(BuiltinTypes::Void)),
-                "",
-                nullptr,
-                StorageClass::NONE,
-                block_loc));
-        }
-
-        QualType block_type(
-            std::make_shared<BlockPointerType>(QualType(block_function_type)));
-        return collect_->collect_block_expression(
-            make_block_semantic_info(*ast_ctx, block_loc),
-            block_type,
-            std::move(parameters),
-            std::move(body),
-            std::move(block_stmt_labels),
-            explicit_return_type,
-            has_parameter_clause,
-            has_explicit_return_type,
-            block_loc);
-    } catch (...) {
-        restore_block_parse_state();
-        throw;
-    }
+    return {syntax, std::move(sem)};
 }
 
-std::unique_ptr<Expr> Parser::parse_primary_expression() {
-    Token tok = current_token();
-    auto collect_unqualified_id_expression_after_name =
-        [&](std::string name, SrcLoc loc) -> std::unique_ptr<Expr> {
-        bool looks_like_call = gentle_check(TokenType::LEFT_PAREN);
-        bool might_be_template_id = looks_like_call;
-        if (!looks_like_call &&
-            is_cxx_mode_active() &&
-            gentle_check(TokenType::LESS_THAN)) {
-            size_t offset = 0;
-            if (skip_template_argument_list_for_expression_probe(offset)) {
-                might_be_template_id = true;
-                looks_like_call =
-                    peek_token_shortcut(offset).type == TokenType::LEFT_PAREN;
-            }
-        }
-        // todo: when we get typedefs this can be ambgioous. But we should realize that at cast_expression not here
-        return collect_->collect_unqualified_identifier_expression(
-            name, looks_like_call, might_be_template_id, loc);
-    };
-    if (is_cxx_mode_active()) {
-        if (auto type_construction = try_parse_cpp_type_construction_expression()) {
-            return type_construction;
-        }
-        TPResult qualified_id_probe = try_parse_cpp_qualified_id();
-        if (qualified_id_probe == TPResult::True) {
-            return parse_cpp_qualified_primary_expression();
-        }
-        if (lang_opts.is_cxx20_or_later() &&
-            tok.type == TokenType::REQUIRES_KW) {
-            return parse_cpp_requires_expression();
-        }
-        if (tok.type == TokenType::IDENTIFIER) {
-            const std::string& ident = tok.value;
-            if (ident == "typeid") {
-                return parse_cpp_typeid_expression();
-            }
-            if (ident == "dynamic_cast" || ident == "static_cast" ||
-                ident == "reinterpret_cast" || ident == "const_cast") {
-                return parse_cpp_named_cast_expression();
-            }
-        }
-        if (tok.type == TokenType::LEFT_BRACKET) {
-            return parse_cpp_lambda_expression();
-        }
-        if (tok.type == TokenType::OPERATOR_KW) {
-            auto operator_name = try_parse_cpp_operator_function_id_name();
-            if (!operator_name) {
-                error_custloc(
-                    "expected operator-function-id in expression",
-                    tok.loc);
-            }
-            return collect_unqualified_id_expression_after_name(
-                std::move(*operator_name),
-                tok.loc);
-        }
+NodeId Parser::retain_replayed_fold_operand_syntax(
+    size_t operand_cursor,
+    size_t operand_last_consumed_raw_end,
+    size_t operand_end_cursor,
+    SrcLoc ellipsis_loc) {
+    cursor_ = operand_cursor;
+    last_consumed_raw_end_ = operand_last_consumed_raw_end;
+    collect_session_.begin_speculative_parse();
+    auto capture_scope =
+        collect_session_.begin_parameter_pack_pattern_capture();
+    ParsedExpr operand = parse_cast_expression();
+    ConstraintFoldOperandSyntaxInfo fold_operand_info;
+    fold_operand_info.packs =
+        collect_session_.finish_parameter_pack_pattern_capture(capture_scope);
+    collect_session_.rollback_speculative_parse();
+    record_constraint_fold_operand_syntax(operand.syntax,
+                                          std::move(fold_operand_info));
+    if (cursor_ != operand_end_cursor) {
+        diagnose(DiagnosticLevel::Error,
+                 "could not replay fold expression operand",
+                 ellipsis_loc);
+        cursor_ = operand_end_cursor;
     }
-    if (is_imaginary_integer_literal(tok.type)) {
-        advance();
-        Token real_tok = tok;
-        real_tok.type = imaginary_integer_to_real_token(tok.type);
-        std::shared_ptr<CType> int_type = getNumericTypeConstant(real_tok, type_ctx.get());
-        if (!int_type) {
-            error_custloc("int const doesn't fit", tok.loc);
-            return nullptr;
-        }
-        auto int_builtin = dyn_cast_shared<BuiltinType>(int_type);
-        if (!int_builtin) {
-            error_custloc("imaginary integer literal requires builtin integer type", tok.loc);
-            return nullptr;
-        }
-        auto complex_type = type_ctx->get_complex(int_builtin->builtin_kind);
-        if (!complex_type) {
-            error_custloc("imaginary integer literal has unsupported type", tok.loc);
-            return nullptr;
-        }
-        return collect_->collect_floating_literal(tok.value, complex_type, true, tok.loc);
-    }
-    if (is_integer_literal(tok.type)) {
-        advance();
-        std::shared_ptr<CType> int_type;
-        TokenType tt = tok.type;
-        int_type = getNumericTypeConstant(tok, type_ctx.get());
-        if (int_type == nullptr) {
-            error_custloc("int const doesn't fit", tok.loc);
-            return nullptr;
-        }
-        return collect_->collect_integer_literal(tok.value, int_type, tok.loc);
-    }
-    if (is_floating_literal(tok.type)) {
-        advance();
-        if (tok.type == TokenType::IMAG_FLOAT_CONST ||
-            tok.type == TokenType::IMAG_DOUBLE_CONST ||
-            tok.type == TokenType::IMAG_LONG_DOUBLE_CONST) {
-            std::shared_ptr<CType> complex_type;
-            if (tok.type == TokenType::IMAG_FLOAT_CONST) {
-                complex_type = type_ctx->get_complex(BuiltinTypes::Float);
-            } else if (tok.type == TokenType::IMAG_LONG_DOUBLE_CONST) {
-                complex_type = type_ctx->get_complex(BuiltinTypes::LongDouble);
-            } else {
-                complex_type = type_ctx->get_complex(BuiltinTypes::Double);
-            }
-            return collect_->collect_floating_literal(tok.value, complex_type, true, tok.loc);
-        }
-        std::shared_ptr<CType> float_type;
-        if (tok.type == TokenType::FLOAT_CONST) {
-            float_type = type_ctx->get_builtin(BuiltinTypes::Float);
-        } else if (tok.type == TokenType::LONG_DOUBLE_CONST) {
-            float_type = type_ctx->get_builtin(BuiltinTypes::LongDouble);
-        } else {
-            float_type = type_ctx->get_builtin(BuiltinTypes::Double);
-        }
-        return collect_->collect_floating_literal(tok.value, float_type, false, tok.loc);
-    }
-    if (tok.type == TokenType::TRUE_KW || tok.type == TokenType::FALSE_KW) {
-        advance();
-        auto bool_type = type_ctx->get_builtin(BuiltinTypes::Bool);
-        const std::string bool_value = (tok.type == TokenType::TRUE_KW) ? "1" : "0";
-        return collect_->collect_integer_literal(bool_value, bool_type, tok.loc);
-    }
-    if (tok.type == TokenType::NULLPTR_KW) {
-        advance();
-        auto int_type = type_ctx->get_builtin(BuiltinTypes::Int);
-        auto zero = collect_->collect_integer_literal("0", int_type, tok.loc);
-        auto nullptr_type = type_ctx->get_builtin(BuiltinTypes::NullPtr);
-        return collect_->collect_explicit_cast(
-            std::move(zero), QualType(nullptr_type), tok.loc);
-    }
-    if (tok.type == TokenType::THIS_KW) {
-        advance();
-        if (!is_cxx_mode_active()) {
-            error_custloc("'this' is only valid in C++ mode", tok.loc);
-            return nullptr;
-        }
-        return collect_->collect_cpp_this_expression(tok.loc);
-    }
-    if (tok.type == TokenType::CHAR_LITERAL) {
-        advance();
-        // Character literals have type int in C
-        bool cxx_mode = is_cxx_mode_active();
-        int32_t fin_val = 0;
-        bool is_unicode_prefixed = (tok.literal_prefix == LiteralPrefix::L ||
-                                    tok.literal_prefix == LiteralPrefix::u ||
-                                    tok.literal_prefix == LiteralPrefix::U);
-        if (is_unicode_prefixed) {
-            auto cps = decode_utf8_codepoints(tok.value);
-            fin_val = cps.empty() ? 0 : static_cast<int32_t>(cps[0]);
-        } else {
-            for (char &c: tok.value) {
-                // if there is more than one char it is undefined, mainstream compilers just add extra chars to int
-                fin_val <<= 8;
-                fin_val |= static_cast<int32_t>(static_cast<unsigned char>(c));
-            }
-        }
-        std::shared_ptr<CType> char_type;
-        switch (tok.literal_prefix) {
-            case LiteralPrefix::u:
-                char_type = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::Char16 : BuiltinTypes::UShort);
-                break;
-            case LiteralPrefix::U:
-                char_type = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::Char32 : BuiltinTypes::UInt);
-                break;
-            case LiteralPrefix::L:
-                char_type = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::WChar : BuiltinTypes::Int);
-                break;
-            case LiteralPrefix::U8:
-            case LiteralPrefix::None:
-            default:
-                char_type = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::Char : BuiltinTypes::Int);
-                break;
-        }
-        return collect_->collect_character_literal(tok.value, fin_val, QualType(char_type), tok.loc);
-    }
-    if (tok.type == TokenType::STRING_LITERAL) {
-        advance();
-        bool cxx_mode = is_cxx_mode_active();
-        bool is_unicode_prefixed = (tok.literal_prefix == LiteralPrefix::L ||
-                                    tok.literal_prefix == LiteralPrefix::u ||
-                                    tok.literal_prefix == LiteralPrefix::U);
-        size_t length = (is_unicode_prefixed
-            ? decode_utf8_codepoints(tok.value).size()
-            : tok.value.length()) + 1; // +1 for null terminator
-        std::shared_ptr<CType> charType;
-        switch (tok.literal_prefix) {
-            case LiteralPrefix::u:
-                charType = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::Char16 : BuiltinTypes::UShort);
-                break;
-            case LiteralPrefix::U:
-                charType = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::Char32 : BuiltinTypes::UInt);
-                break;
-            case LiteralPrefix::L:
-                charType = type_ctx->get_builtin(
-                    cxx_mode ? BuiltinTypes::WChar : BuiltinTypes::Int);
-                break;
-            case LiteralPrefix::U8:
-            case LiteralPrefix::None:
-            default:
-                charType = type_ctx->get_builtin(BuiltinTypes::Char);
-                break;
-        }
-        auto arrayType = std::make_shared<ArrayType>(QualType(charType), length);
-        return collect_->collect_string_literal(tok.value, QualType(arrayType), tok.loc);
-    }
-    if (tok.type == TokenType::LEFT_PAREN) {
-        advance();
-        if (gentle_check(TokenType::LEFT_BRACE)) {
-            auto compound_stmt = parse_compound_stmt();
-            check_and_consume(TokenType::RIGHT_PAREN);
-            auto cs_ptr = std::unique_ptr<CompoundStmt>(static_cast<CompoundStmt*>(compound_stmt.release()));
-            return collect_->collect_statement_expression(std::move(cs_ptr), tok.loc);
-        }
-        if (auto fold = try_parse_fold_expression(tok.loc)) {
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return fold;
-        }
-        TemplateArgumentGroupGuard group_guard(*this);
-        std::unique_ptr<Expr> exp = parse_expression();
-        check_and_consume(TokenType::RIGHT_PAREN);
-        return make_ast<ParenExpr>(*ast_ctx, std::move(exp), tok.loc);
-    }
-    // Handle _Generic selection expression
-    // Grammar: _Generic ( assignment-expression , generic-assoc-list )
-    if (tok.type == TokenType::GENERIC) {
-        advance(); // consume '_Generic'
-        check_and_consume(TokenType::LEFT_PAREN);
-        auto controlling = parse_assignment_expression();
-        if (!controlling) {
-            error_custloc("Error parsing controlling expression in _Generic", tok.loc);
-            return nullptr;
-        }
-        check_and_consume(TokenType::COMMA);
-        std::vector<GenericAssociation> associations;
-        // Parse generic-assoc-list
-        do {
-            GenericAssociation assoc;
-            assoc.loc = current_token().loc;
-            if (gentle_check(TokenType::DEFAULT)) {
-                advance(); // consume 'default'
-                assoc.is_default = true;
-                assoc.type = QualType();
-            } else {
-                // Parse type-name
-                auto parse_decl = DeclarationParser(this);
-                auto assoc_type = parse_decl.parse_declaration();
-                if (assoc_type == nullptr) {
-                    error_custloc("Error parsing type in _Generic association", assoc.loc);
-                    return nullptr;
-                }
-                retain_type_specifier_decl_if_needed(parse_decl);
-                assoc.type = assoc_type;
-                assoc.is_default = false;
-            }
-            check_and_consume(TokenType::COLON);
-            assoc.expr = parse_assignment_expression();
-            if (!assoc.expr) {
-                error_custloc("Error parsing expression in _Generic association", assoc.loc);
-                return nullptr;
-            }
-            associations.push_back(std::move(assoc));
-        } while (gentle_check_and_consume(TokenType::COMMA));
-        check_and_consume(TokenType::RIGHT_PAREN);
-        return collect_->collect_generic_expression(std::move(controlling), std::move(associations), tok.loc);
-    }
-    // C++ style functional casts: int(67), std::string("Accra and Belgrade")
-    if (is_cxx_mode_active() && isTokenDeclarationSpec(tok)) {
-        TentativeParsingAction tentative(*this);
-        try {
-            DeclarationParser parse_decl(this);
-            auto parsed_type = parse_decl.parse_declaration(false);
-            if (parsed_type &&
-                parse_decl.name.empty() &&
-                parse_decl.str_class == StorageClass::NONE &&
-                gentle_check(TokenType::LEFT_PAREN)) {
-                QualType target_type(parsed_type, parse_decl.qualifiers);
-                retain_type_specifier_decl_if_needed(parse_decl);
-                advance(); // consume '('
-                std::vector<std::unique_ptr<Expr>> args;
-                if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                    TemplateArgumentGroupGuard group_guard(*this);
-                    do {
-                        auto arg = parse_call_argument_expression();
-                        args.push_back(std::move(arg));
-                    } while (gentle_check_and_consume(TokenType::COMMA));
-                }
-                check_and_consume(TokenType::RIGHT_PAREN);
-                tentative.commit();
-                return collect_->collect_cpp_function_style_cast(
-                    target_type,
-                    std::move(args),
-                    tok.loc);
-            }
-        } catch (const ParseError&) {
-        } catch (const FatalErrorLimitReached&) {
-            throw;
-        }
-    }
-
-    if (tok.type == TokenType::IDENTIFIER) {
-        if (const auto* builtin_info =
-                BuiltinRegistry::instance().lookup(tok.value);
-            builtin_info &&
-            is_builtin_type_trait_kind(builtin_info->kind)) {
-            advance(); // consume builtin trait identifier
-            check_and_consume(TokenType::LEFT_PAREN);
-
-            std::vector<QualType> type_args;
-            while (!gentle_check(TokenType::RIGHT_PAREN) &&
-                   !gentle_check(TokenType::Eof)) {
-                auto parse_decl = DeclarationParser(this);
-                auto type_arg = parse_decl.parse_declaration();
-                if (type_arg == nullptr) {
-                    error_custloc(
-                        "Error parsing type operand in " +
-                            std::string(builtin_info->name),
-                        tok.loc);
-                    return nullptr;
-                }
-                retain_type_specifier_decl_if_needed(parse_decl);
-                if (gentle_check(TokenType::ELLIPSIS)) {
-                    advance(); // consume pack expansion marker; the type already carries pack-ness
-                }
-                type_args.emplace_back(type_arg, parse_decl.qualifiers);
-                if (!gentle_check_and_consume(TokenType::COMMA)) {
-                    break;
-                }
-            }
-            check_and_consume(TokenType::RIGHT_PAREN);
-
-            int arg_count = static_cast<int>(type_args.size());
-            if (arg_count < builtin_info->min_args ||
-                (builtin_info->max_args >= 0 &&
-                 arg_count > builtin_info->max_args)) {
-                error_custloc(
-                    std::string(builtin_info->name) + " requires " +
-                        std::to_string(builtin_info->min_args) +
-                        " type argument(s)",
-                    tok.loc);
-                return nullptr;
-            }
-
-            return collect_->collect_builtin_type_trait_expression(
-                builtin_info->kind,
-                std::move(type_args),
-                tok.loc);
-        }
-        // Handle __builtin_convertvector(expr, type)
-        if (tok.value == "__builtin_convertvector") {
-            advance(); // consume '__builtin_convertvector'
-            check_and_consume(TokenType::LEFT_PAREN);
-            auto source_expr = parse_assignment_expression();
-            check_and_consume(TokenType::COMMA);
-            auto parse_decl = DeclarationParser(this);
-            auto target_type = parse_decl.parse_declaration();
-            if (target_type == nullptr) {
-                error_custloc("Error parsing type in __builtin_convertvector", tok.loc);
-                return nullptr;
-            }
-            retain_type_specifier_decl_if_needed(parse_decl);
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_builtin_convertvector_expression(
-                std::move(source_expr), target_type, tok.loc);
-        }
-        // Handle __builtin_va_arg(ap, type) - second arg is a type name
-        if (tok.value == "__builtin_va_arg") {
-            advance(); // consume '__builtin_va_arg'
-            check_and_consume(TokenType::LEFT_PAREN);
-            auto va_list_expr = parse_assignment_expression();
-            check_and_consume(TokenType::COMMA);
-            auto parse_decl = DeclarationParser(this);
-            auto arg_type = parse_decl.parse_declaration();
-            if (arg_type == nullptr) {
-                error_custloc("Error parsing type in __builtin_va_arg", tok.loc);
-                return nullptr;
-            }
-            retain_type_specifier_decl_if_needed(parse_decl);
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_va_arg_expression(std::move(va_list_expr), arg_type, tok.loc);
-        }
-        // Handle __builtin_types_compatible_p(type1, type2)
-        if (tok.value == "__builtin_types_compatible_p") {
-            advance(); // consume '__builtin_types_compatible_p'
-            check_and_consume(TokenType::LEFT_PAREN);
-            auto parse_decl1 = DeclarationParser(this);
-            auto type1 = parse_decl1.parse_declaration();
-            if (type1 == nullptr) {
-                error_custloc("Error parsing first type in __builtin_types_compatible_p", tok.loc);
-                return nullptr;
-            }
-            retain_type_specifier_decl_if_needed(parse_decl1);
-            check_and_consume(TokenType::COMMA);
-            auto parse_decl2 = DeclarationParser(this);
-            auto type2 = parse_decl2.parse_declaration();
-            if (type2 == nullptr) {
-                error_custloc("Error parsing second type in __builtin_types_compatible_p", tok.loc);
-                return nullptr;
-            }
-            retain_type_specifier_decl_if_needed(parse_decl2);
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_builtin_types_compatible_expression(type1, type2, tok.loc);
-        }
-        // Handle __builtin_choose_expr(const_expr, expr1, expr2)
-        if (tok.value == "__builtin_choose_expr") {
-            advance(); // consume '__builtin_choose_expr'
-            check_and_consume(TokenType::LEFT_PAREN);
-            auto const_expr = parse_assignment_expression();
-            check_and_consume(TokenType::COMMA);
-            auto expr1 = parse_assignment_expression();
-            check_and_consume(TokenType::COMMA);
-            auto expr2 = parse_assignment_expression();
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_builtin_choose_expression(
-                std::move(const_expr), std::move(expr1), std::move(expr2), tok.loc);
-        }
-        // Handle __builtin_offsetof(type, member)
-        if (tok.value == "__builtin_offsetof") {
-            advance(); // consume '__builtin_offsetof'
-            check_and_consume(TokenType::LEFT_PAREN);
-            auto parse_decl = DeclarationParser(this);
-            auto offset_type = parse_decl.parse_declaration();
-            if (offset_type == nullptr) {
-                error_custloc("Error parsing type in __builtin_offsetof", tok.loc);
-                return nullptr;
-            }
-            retain_type_specifier_decl_if_needed(parse_decl);
-            check_and_consume(TokenType::COMMA);
-            // Parse member designator: field, field[N], field.sub, field[N].sub, etc.
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc("Expected member name in __builtin_offsetof", current_token().loc);
-                return nullptr;
-            }
-            std::string member_name = current_token().value;
-            advance();
-            std::vector<OffsetOfComponent> designator_path;
-            // Parse optional designator path extensions: [N] and .field
-            while (gentle_check(TokenType::LEFT_BRACKET) || gentle_check(TokenType::DOT)
-                   || gentle_check(TokenType::ARROW)) {
-                if (gentle_check_and_consume(TokenType::LEFT_BRACKET)) {
-                    auto idx_expr = parse_assignment_expression();
-                    auto idx_val = try_evaluate_with_consteval_compat(
-                        idx_expr.get(), ConstEvalMode::c_ice());
-                    OffsetOfComponent comp;
-                    if (idx_val.has_value()) {
-                        comp.array_index = *idx_val;
-                    } else {
-                        comp.array_index_expr = std::move(idx_expr);
-                    }
-                    designator_path.push_back(std::move(comp));
-                    check_and_consume(TokenType::RIGHT_BRACKET);
-                } else {
-                    advance(); // consume . or ->
-                    if (!gentle_check(TokenType::IDENTIFIER)) {
-                        error_custloc("Expected member name after field access in __builtin_offsetof", current_token().loc);
-                        return nullptr;
-                    }
-                    OffsetOfComponent comp;
-                    comp.field_name = current_token().value;
-                    designator_path.push_back(std::move(comp));
-                    advance();
-                }
-            }
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_offsetof_expression(
-                offset_type, member_name, std::move(designator_path), tok.loc);
-        }
-        // Handle __builtin_available(...) as a compatibility parse builtin.
-        // We currently treat availability checks as always true.
-        if (tok.value == "__builtin_available") {
-            advance(); // consume '__builtin_available'
-            if (!gentle_check(TokenType::LEFT_PAREN)) {
-                error_custloc("Expected '(' after __builtin_available", tok.loc);
-                return collect_->collect_error_expression("invalid __builtin_available invocation", tok.loc);
-            }
-            advance(); // consume '('
-            int depth = 1;
-            while (depth > 0) {
-                if (gentle_check(TokenType::Eof)) {
-                    error_custloc("Unterminated __builtin_available invocation", tok.loc);
-                    return collect_->collect_error_expression("unterminated __builtin_available", tok.loc);
-                }
-                if (gentle_check(TokenType::LEFT_PAREN)) {
-                    depth++;
-                } else if (gentle_check(TokenType::RIGHT_PAREN)) {
-                    depth--;
-                }
-                advance();
-            }
-            return collect_->collect_integer_literal("1", type_ctx->get_builtin(BuiltinTypes::Int), tok.loc);
-        }
-        std::string name = tok.value;
-        advance();
-        return collect_unqualified_id_expression_after_name(
-            std::move(name),
-            tok.loc);
-    }
-    diag_engine->report_error("unexpected token \"" + tok.value +
-          "\" in parse_primary_expression", tok.loc);
-    if (!gentle_check(TokenType::Eof)) advance();
-    return collect_->collect_error_expression("unexpected token", tok.loc);
+    return operand.syntax;
 }
-std::unique_ptr<Expr> Parser::parse_postfix_expression() {
-    // Check for compound literal: (type-name) { initializer-list }
-    // This is a postfix-expression in the C grammar
-    std::unique_ptr<Expr> expr = nullptr;
-    Token start_tok = current_token();
 
-    bool should_try_compound_literal = false;
-    if (gentle_check(TokenType::LEFT_PAREN)) {
-        if (is_cxx_mode_active()) {
-            auto parenthesized_type =
-                classify_cxx_parenthesized_type_id_for_lookahead();
-            switch (parenthesized_type.kind) {
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    TypeId:
-                    should_try_compound_literal =
-                        parenthesized_type.followed_by_left_brace;
-                    if (should_try_compound_literal) {
-                        bump_cast_disambiguation_fast_accept();
-                    } else {
-                        bump_cast_disambiguation_fast_reject();
-                    }
-                    break;
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    NoMatch:
-                    bump_cast_disambiguation_fast_reject();
-                    break;
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    Inconclusive:
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    Error:
-                    bump_cast_disambiguation_inconclusive_fallback();
-                    should_try_compound_literal =
-                        probe_parenthesized_type_name_syntax() !=
-                        tentative_syntax_probe::Result::NoMatch;
-                    break;
-            }
-        } else {
-            should_try_compound_literal =
-                probe_parenthesized_type_name_syntax() !=
-                tentative_syntax_probe::Result::NoMatch;
-        }
+Parser::ParsedExpr Parser::retain_replayed_fold_operand_semantics(
+    size_t operand_cursor,
+    size_t operand_last_consumed_raw_end,
+    size_t operand_end_cursor,
+    size_t restore_cursor,
+    size_t restore_last_consumed_raw_end,
+    SrcLoc ellipsis_loc,
+    std::vector<collect::Session::ParameterPackIdentity>* packs) {
+    cursor_ = operand_cursor;
+    last_consumed_raw_end_ = operand_last_consumed_raw_end;
+    auto capture_scope =
+        collect_session_.begin_parameter_pack_pattern_capture();
+    ParsedExpr operand = parse_cast_expression();
+    std::vector<collect::Session::ParameterPackIdentity> retained_packs =
+        collect_session_.finish_parameter_pack_pattern_capture(capture_scope);
+    if (cursor_ != operand_end_cursor) {
+        diagnose(DiagnosticLevel::Error,
+                 "could not retain fold expression operand",
+                 ellipsis_loc);
     }
-
-    if (should_try_compound_literal) {
-        TentativeParsingAction tentative(*this);
-        try {
-            advance(); // consume '('
-            // __extension__ after ( is an expression prefix, not a type specifier
-            if (current_token().type != TokenType::EXTENSION_KW && isTokenDeclarationSpec(current_token())) {
-                DeclarationParser parse_decl(this);
-                auto new_type = parse_decl.parse_declaration();
-                if (new_type &&
-                    parse_decl.name.empty() &&
-                    gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
-                    gentle_check(TokenType::LEFT_BRACE)) {
-                    retain_type_specifier_decl_if_needed(parse_decl);
-                    auto init_list = parse_init_list();
-                    expr = collect_->collect_compound_literal_expression(
-                        new_type, std::move(init_list), start_tok.loc);
-                    tentative.commit();
-                }
-            }
-        } catch (const ParseError&) {
-        } catch (const FatalErrorLimitReached&) {
-        }
+    if (packs) {
+        *packs = std::move(retained_packs);
     }
+    cursor_ = restore_cursor;
+    last_consumed_raw_end_ = restore_last_consumed_raw_end;
+    return operand;
+}
 
-    if (!expr) {
-        expr = parse_primary_expression();
-    }
-    auto base_requires_template_keyword =
-        [&](QualType base_type, bool is_arrow) -> bool {
-            return analyze_cpp_member_access_base(base_type, is_arrow)
-                .requires_template_keyword();
-        };
-    struct ParsedMemberAccessName {
-        std::string name;
-        SrcLoc loc;
-    };
-    auto parse_member_access_name =
-        [&](std::string_view access_operator) -> ParsedMemberAccessName {
-            if (is_cxx_mode_active() &&
-                gentle_check(TokenType::OPERATOR_KW)) {
-                SrcLoc member_loc = current_token().loc;
-                auto operator_name = try_parse_cpp_operator_function_id_name();
-                if (!operator_name) {
-                    error(
-                        "Expected member name after '" +
-                        std::string(access_operator) + "'");
-                }
-                return ParsedMemberAccessName{
-                    std::move(*operator_name),
-                    member_loc};
-            }
-
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error(
-                    "Expected member name after '" +
-                    std::string(access_operator) + "'");
-            }
-            ParsedMemberAccessName parsed{
-                current_token().value,
-                current_token().loc};
-            advance();
-            return parsed;
-        };
-    auto unqualified_var_ref_names_template = [&](const VarRef* ref) {
-        if (!ref || ref->has_cpp_qualified_info() || !collect_) {
-            return false;
-        }
-        auto scope = collect_->collect_current_scope();
-        if (!scope || ref->get_name().empty()) {
-            return false;
-        }
-        auto lookup = LookupEngine::lookup_unqualified_template_binding_result(
-            ref->get_name(),
-            scope,
-            /*allow_enclosing_lookup=*/true,
-            LookupNamespace::Ordinary);
-        if (!lookup.binding ||
-            (!lookup.binding->template_decl &&
-             !lookup.binding->has_template_overload_set())) {
-            return false;
-        }
-        if (ref->symref) {
-            auto ordinary_lookup =
-                LookupEngine::lookup_unqualified_ordinary_result(
-                    ref->get_name(),
-                    scope,
-                    /*look_parents=*/true,
-                    LookupEngine::OrdinaryFilter::Any);
-            if ((ordinary_lookup.found() || ordinary_lookup.blocked) &&
-                ordinary_lookup.scope_depth < lookup.scope_depth) {
-                return false;
-            }
-        }
-        return true;
-    };
-    auto member_expr_may_name_template = [](const MemberExpr* member) {
-        // Concrete data-member access has a resolved type. Method-template
-        // overload sets are intentionally left typeless here so the explicit
-        // template-id suffix can be parsed and resolved by Collect.
-        return member && !member->member_type;
-    };
-    auto can_tentatively_parse_explicit_template_suffix =
-        [&](const VarRef* callee_ref,
-            const MemberExpr* member_callee,
-            const UnresolvedMemberExpr* unresolved_member_callee,
-            const UnresolvedLookupExpr* unresolved_lookup_callee) {
-        if (unresolved_member_callee || unresolved_lookup_callee) {
-            return true;
-        }
-        if (member_expr_may_name_template(member_callee)) {
-            return true;
-        }
-        return callee_ref && !callee_ref->symref;
-    };
-    while (true) {
-        SrcLoc loc = expr->location;
-        if (is_cxx_mode_active() &&
-            gentle_check(TokenType::LESS_THAN)) {
-            auto* callee_ref = dyn_cast<VarRef>(expr.get());
-            auto* member_callee = dyn_cast<MemberExpr>(expr.get());
-            auto* unresolved_member_callee =
-                dyn_cast<UnresolvedMemberExpr>(expr.get());
-            auto* unresolved_lookup_callee =
-                dyn_cast<UnresolvedLookupExpr>(expr.get());
-            if (callee_ref || member_callee ||
-                unresolved_member_callee || unresolved_lookup_callee) {
-                size_t explicit_suffix_probe_offset = 0;
-                bool has_complete_template_suffix =
-                    skip_template_argument_list_for_expression_probe(
-                        explicit_suffix_probe_offset);
-                bool parse_known_unqualified_template =
-                    unqualified_var_ref_names_template(callee_ref) &&
-                    has_complete_template_suffix;
-                if (parse_known_unqualified_template) {
-                    auto explicit_template_args =
-                        parse_cpp_template_argument_list();
-                    if (lambda_template_requires_clause_depth_ > 0 &&
-                        is_lambda_declarator_parameter_clause_ahead()) {
-                        expr = collect_->collect_explicit_template_id_expression(
-                            std::move(expr),
-                            std::move(explicit_template_args),
-                            loc);
-                        continue;
-                    }
-                    if (gentle_check(TokenType::LEFT_PAREN)) {
-                        advance();
-                        std::vector<std::unique_ptr<Expr>> args;
-                        if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                            do {
-                                auto arg = parse_call_argument_expression();
-                                args.push_back(std::move(arg));
-                            } while (gentle_check_and_consume(TokenType::COMMA));
-                        }
-                        check_and_consume(TokenType::RIGHT_PAREN);
-                        expr = collect_->collect_explicit_function_template_call(
-                            std::move(expr),
-                            std::move(explicit_template_args),
-                            std::move(args),
-                            loc);
-                        continue;
-                    }
-                    expr = collect_->collect_explicit_template_id_expression(
-                        std::move(expr),
-                        std::move(explicit_template_args),
-                        loc);
-                    continue;
-                }
-                if (!can_tentatively_parse_explicit_template_suffix(
-                        callee_ref,
-                        member_callee,
-                        unresolved_member_callee,
-                        unresolved_lookup_callee)) {
-                    break;
-                }
-                if (!has_complete_template_suffix) {
-                    bump_postfix_template_suffix_fast_reject();
-                    break;
-                }
-                TentativeParsingAction tentative(*this);
-                try {
-                    auto explicit_template_args =
-                        parse_cpp_template_argument_list();
-                    if (lambda_template_requires_clause_depth_ > 0 &&
-                        is_lambda_declarator_parameter_clause_ahead()) {
-                        tentative.commit();
-                        expr = collect_->collect_explicit_template_id_expression(
-                            std::move(expr),
-                            std::move(explicit_template_args),
-                            loc);
-                        continue;
-                    }
-                    if (gentle_check(TokenType::LEFT_PAREN)) {
-                        tentative.commit();
-                        advance();
-                        std::vector<std::unique_ptr<Expr>> args;
-                        if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                            do {
-                                auto arg = parse_call_argument_expression();
-                                args.push_back(std::move(arg));
-                            } while (gentle_check_and_consume(TokenType::COMMA));
-                        }
-                        check_and_consume(TokenType::RIGHT_PAREN);
-                        expr = collect_->collect_explicit_function_template_call(
-                            std::move(expr),
-                            std::move(explicit_template_args),
-                            std::move(args),
-                            loc);
-                        continue;
-                    }
-                    tentative.commit();
-                    expr = collect_->collect_explicit_template_id_expression(
-                        std::move(expr),
-                        std::move(explicit_template_args),
-                        loc);
-                    continue;
-                } catch (const ParseError&) {
-                } catch (const FatalErrorLimitReached&) {
-                    throw;
-                }
-            }
-        }
-        if (lambda_template_requires_clause_depth_ > 0 &&
-            is_lambda_declarator_parameter_clause_ahead()) {
+Parser::ParsedExpr Parser::parse_binary_expression(PrecLevel min_prec) {
+    ParsedExpr lhs = parse_cast_expression();
+    while (!at_end()) {
+        if (constraint_expression_replay_end_ != SIZE_MAX &&
+            current_raw_index() >= constraint_expression_replay_end_) {
             break;
         }
-        if (template_head_requires_clause_depth_ > 0 &&
-            gentle_check(TokenType::LEFT_BRACKET) &&
-            peek_token().type == TokenType::LEFT_BRACKET) {
+        if (at_template_argument_expression_close()) {
             break;
         }
-        if (gentle_check(TokenType::LEFT_PAREN)) {
-            advance();
-            std::vector<std::unique_ptr<Expr>> args;
-            if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                do {
-                    auto arg = parse_call_argument_expression();
-                    args.push_back(std::move(arg));
-                } while (gentle_check_and_consume(TokenType::COMMA));
-            }
-            check_and_consume(TokenType::RIGHT_PAREN);
-            expr = collect_->collect_function_call(std::move(expr), std::move(args), loc);
-        } else if (gentle_check(TokenType::LEFT_BRACKET)) {
-            advance();
-            auto index = parse_expression();
-            check_and_consume(TokenType::RIGHT_BRACKET);
-            expr = collect_->collect_array_subscript(std::move(expr), std::move(index), loc);
-        } else if (gentle_check_and_consume(TokenType::DOT)) {
-            if (is_cxx_mode_active() &&
-                gentle_check(TokenType::BITWISE_NOT)) {
-                expr = parse_cpp_postfix_pseudo_destructor_expression(
-                    std::move(expr),
-                    false,
-                    loc);
-                continue;
-            }
-            // Member access: expr.member
-            QualType base_type = expr ? expr->get_type() : QualType();
-            bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
-            auto member_name = parse_member_access_name(".");
-            if (saw_template_keyword) {
-                if (!gentle_check(TokenType::LESS_THAN)) {
-                    error_custloc(
-                        "expected template-id after 'template' keyword",
-                        member_name.loc);
-                }
-            }
-            if (!saw_template_keyword &&
-                gentle_check(TokenType::LESS_THAN) &&
-                base_requires_template_keyword(base_type, false)) {
-                diagnose_missing_cpp_template_keyword(
-                    member_name.name,
-                    member_name.loc);
-            }
-            bool allow_overloaded_method_set =
-                gentle_check(TokenType::LEFT_PAREN) ||
-                gentle_check(TokenType::LESS_THAN);
-            expr = collect_->collect_member_expression(
-                std::move(expr),
-                member_name.name,
-                false,
-                loc,
-                allow_overloaded_method_set,
-                /*suppress_virtual_dispatch=*/false,
-                saw_template_keyword);
-        } else if (gentle_check_and_consume(TokenType::ARROW)) {
-            if (is_cxx_mode_active() &&
-                gentle_check(TokenType::BITWISE_NOT)) {
-                expr = parse_cpp_postfix_pseudo_destructor_expression(
-                    std::move(expr),
-                    true,
-                    loc);
-                continue;
-            }
-            // Pointer member access: ptr->member
-            QualType base_type = expr ? expr->get_type() : QualType();
-            bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
-            auto member_name = parse_member_access_name("->");
-            if (saw_template_keyword) {
-                if (!gentle_check(TokenType::LESS_THAN)) {
-                    error_custloc(
-                        "expected template-id after 'template' keyword",
-                        member_name.loc);
-                }
-            }
-            if (!saw_template_keyword &&
-                gentle_check(TokenType::LESS_THAN) &&
-                base_requires_template_keyword(base_type, true)) {
-                diagnose_missing_cpp_template_keyword(
-                    member_name.name,
-                    member_name.loc);
-            }
-            bool allow_overloaded_method_set =
-                gentle_check(TokenType::LEFT_PAREN) ||
-                gentle_check(TokenType::LESS_THAN);
-            expr = collect_->collect_member_expression(
-                std::move(expr),
-                member_name.name,
-                true,
-                loc,
-                allow_overloaded_method_set,
-                /*suppress_virtual_dispatch=*/false,
-                saw_template_keyword);
-        } else if (gentle_check(TokenType::INCREMENT)) {
-            expr = collect_->collect_unary_operation(UnaryOpTypes::INCREMENT_POSTFIX, std::move(expr), loc);
-            advance();
-        }  else if (gentle_check(TokenType::DECREMENT)) {
-            expr = collect_->collect_unary_operation(UnaryOpTypes::DECREMENT_POSTFIX, std::move(expr), loc);
-            advance();
-        }
-        else {
+        PrecLevel prec = get_prec(current().type);
+        if (prec < min_prec || current().type == TokenType::QUESTION ||
+            current().type == TokenType::COMMA ||
+            is_assignment_token(current().type)) {
             break;
         }
-    }
-    return expr;
-
-}
-
-std::unique_ptr<Expr> Parser::parse_cpp_postfix_pseudo_destructor_expression(
-    std::unique_ptr<Expr> base,
-    bool is_arrow,
-    SrcLoc operator_loc) {
-    check_and_consume(TokenType::BITWISE_NOT);
-
-    DeclarationParser parse_decl(this);
-    auto destroyed_base_type = parse_decl.parse_declaration(false);
-    if (!destroyed_base_type || !parse_decl.name.empty()) {
-        error_custloc(
-            "expected type-name after '~' in pseudo-destructor expression",
-            current_token().loc);
-    }
-    QualType destroyed_type(
-        destroyed_base_type,
-        parse_decl.qualifiers);
-    retain_type_specifier_decl_if_needed(parse_decl);
-
-    check_and_consume(TokenType::LEFT_PAREN);
-    check_and_consume(TokenType::RIGHT_PAREN);
-    return collect_->collect_cpp_pseudo_destructor_expression(
-        std::move(base),
-        destroyed_type,
-        is_arrow,
-        operator_loc);
-}
-
-std::unique_ptr<Expr> Parser::parse_unary_expression() {
-    Token tok = current_token();
-    if (tok.type == TokenType::BITWISE_XOR) {
-        if (auto block_expr = parse_block_literal_expression()) {
-            return block_expr;
-        }
-    }
-    if (is_cxx_mode_active()) {
-        bool saw_global_scope = false;
-        bool has_scope_resolution =
-            gentle_check(TokenType::SCOPE_RESOLUTION) ||
-            (gentle_check(TokenType::COLON) &&
-             peek_token().type == TokenType::COLON);
-        if (has_scope_resolution) {
-            TokenType token_after_scope = gentle_check(TokenType::SCOPE_RESOLUTION)
-                ? peek_token().type
-                : peek_token(2).type;
-            if (token_after_scope == TokenType::NEW ||
-                token_after_scope == TokenType::DELETE) {
-                consume_cpp_scope_resolution();
-                saw_global_scope = true;
-                tok = current_token();
+        size_t begin = tree_.node(lhs.syntax).tokens.begin;
+        Token op = current();
+        BinaryOperator sem_op = binary_operator_for(op.type);
+        consume();
+        PrecLevel rhs_min = is_right_associative(op.type) ? prec : next_prec_level(prec);
+        std::optional<bool> constraint_short_circuit;
+        if (requires_expression_template_context_depth_ > 0 &&
+            collect_session_.in_template_instantiation() &&
+            (sem_op == BinaryOperator::LogicalAnd ||
+             sem_op == BinaryOperator::LogicalOr)) {
+            int64_t lhs_value = 0;
+            if (collect_session_.try_evaluate_required_integer_constant(
+                    lhs.sem, lhs_value, op.loc) &&
+                ((sem_op == BinaryOperator::LogicalAnd && lhs_value == 0) ||
+                 (sem_op == BinaryOperator::LogicalOr && lhs_value != 0))) {
+                constraint_short_circuit = lhs_value != 0;
             }
         }
-        if (tok.type == TokenType::NEW) {
-            return parse_cpp_new_expression(saw_global_scope);
-        }
-        if (tok.type == TokenType::DELETE) {
-            return parse_cpp_delete_expression(saw_global_scope);
-        }
-    }
 
-    // Handle __extension__ as a no-op prefix — parse a cast-expression so that
-    // patterns like (__extension__ (Type)(expr)) work correctly.
-    if (tok.type == TokenType::EXTENSION_KW) {
-        advance(); // consume __extension__
-        return parse_cast_expression();
-    }
+        ParsedExpr rhs;
+        if (constraint_short_circuit.has_value()) {
 
-    // Handle _Alignof / __alignof__ operator
-    // Grammar: _Alignof ( type-name ) | __alignof__ ( type-name ) | __alignof__ ( expression )
-    if (tok.type == TokenType::ALIGNOF) {
-        advance(); // consume '_Alignof' / '__alignof__'
-        check_and_consume(TokenType::LEFT_PAREN);
+            size_t diagnostic_watermark = diagnostics_.size();
+            bool saved_substitution_failure =
+                constraint_substitution_failure_;
+            collect::Session::TemplateReplayOutcome* replay_outcome =
+                collect_session_.current_template_replay_outcome();
+            std::optional<collect::Session::TemplateReplayOutcome>
+                saved_replay_outcome;
+            if (replay_outcome) {
+                saved_replay_outcome = *replay_outcome;
+            }
+            collect_session_.begin_speculative_parse();
+            rhs = parse_expression(rhs_min);
+            collect_session_.rollback_speculative_parse();
+            constraint_substitution_failure_ = saved_substitution_failure;
+            if (replay_outcome) {
+                *replay_outcome = *saved_replay_outcome;
+            }
+            diagnostics_.resize(diagnostic_watermark);
+            rhs.sem = collect_session_.make_boolean_literal(
+                *constraint_short_circuit,
+                *constraint_short_circuit ? "true" : "false",
+                op.loc);
+        } else {
+            rhs = parse_expression(rhs_min);
+        }
+        std::vector<NodeId> children{lhs.syntax, rhs.syntax};
+        NodeId syntax = make_node(NodeKind::BinaryExpr,
+                                  begin,
+                                  tree_.node(rhs.syntax).tokens.end,
+                                  children,
+                                  text_payload(op.value),
+                                  NodeFlagNone,
+                                  static_cast<uint16_t>(sem_op));
+        collect::ExprResult sem =
+            collect_session_.collect_binary_expr(sem_op, std::move(lhs.sem), std::move(rhs.sem), op.loc);
+        lhs = ParsedExpr{syntax, std::move(sem)};
+    }
+    return lhs;
+}
+
+Parser::ParsedExpr Parser::parse_cast_expression() {
+    if (check(TokenType::LEFT_PAREN)) {
+        if (peek(1).type == TokenType::LEFT_BRACE) {
+
+            return parse_postfix_suffixes(parse_statement_expression());
+        }
+        size_t begin = current_raw_index();
+        Token lparen = current();
         {
-            TentativeParsingAction tentative(*this);
-            try {
-                if (current_token().type != TokenType::EXTENSION_KW) {
-                    auto parse_decl = DeclarationParser(this);
-                    auto type = parse_decl.parse_declaration();
-                    if (type &&
-                        parse_decl.name.empty() &&
-                        gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
-                        !gentle_check(TokenType::LEFT_BRACE)) {
-                        retain_type_specifier_decl_if_needed(parse_decl);
+            RevertingTentativeParsingAction tentative(*this);
+            consume();
+
+            std::optional<collect::ObjCBridgeKind> bridge_kind;
+            if (lang_opts_.is_objc() &&
+                current().type == TokenType::IDENTIFIER) {
+                if (current().value == "__bridge") {
+                    bridge_kind = collect::ObjCBridgeKind::Bridge;
+                } else if (current().value == "__bridge_retained") {
+                    bridge_kind = collect::ObjCBridgeKind::BridgeRetained;
+                } else if (current().value == "__bridge_transfer") {
+                    bridge_kind = collect::ObjCBridgeKind::BridgeTransfer;
+                }
+                if (bridge_kind.has_value()) {
+                    consume();
+                }
+            }
+            if (bridge_kind.has_value()) {
+                cir::TypeId type{};
+                NodeId type_syntax = parse_type_name(&type);
+                if (!match(TokenType::RIGHT_PAREN) || !type.valid()) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected a type in the bridged cast",
+                             current_loc());
+                }
+                tentative.commit();
+                ParsedExpr operand = parse_cast_expression();
+                NodeId syntax = make_node(
+                    NodeKind::CastExpr, begin,
+                    tree_.node(operand.syntax).tokens.end,
+                    {type_syntax, operand.syntax},
+                    text_payload(collect_session_.file().format_type(type)),
+                    NodeFlagNone,
+                    static_cast<uint16_t>(CastOperator::CStyle));
+                collect::ExprResult sem =
+                    collect_session_.collect_objc_bridge_cast(
+                        *bridge_kind, type, std::move(operand.sem),
+                        lparen.loc);
+                return {syntax, std::move(sem)};
+            }
+            if (current().type != TokenType::EXTENSION_KW && is_type_start(current().type)) {
+                cir::TypeId type{};
+                StorageClass storage_class = StorageClass::None;
+                bool cast_type_originates_from_template_parameter = false;
+                NodeId type_syntax =
+                    parse_type_name(&type,
+                                    nullptr,
+                                    &storage_class,
+                                    nullptr,
+                                    nullptr,
+                                    &cast_type_originates_from_template_parameter);
+                cir::TypeId resolved_cast_type = type.valid()
+                    ? collect_session_.file().resolved_type(type)
+                    : cir::TypeId{};
+                bool has_valid_cast_type =
+                    collect_session_.file().valid(resolved_cast_type) &&
+                    collect_session_.file().type(resolved_cast_type).kind !=
+                        cir::TypeKind::Unknown;
+                if (match(TokenType::RIGHT_PAREN) && has_valid_cast_type) {
+                    bool invalid_type_name_storage =
+                        storage_class != StorageClass::None;
+                    if (invalid_type_name_storage) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "storage class specifier is not allowed in a cast type name",
+                                 tree_.node(type_syntax).loc);
+                    }
+                    if (check(TokenType::LEFT_BRACE)) {
                         tentative.commit();
-                        return collect_->collect_alignof_type(type, tok.loc);
+                        ParsedExpr init = parse_init_list_expression();
+                        NodeId syntax = make_node(NodeKind::CompoundLiteralExpr,
+                                                  begin,
+                                                  tree_.node(init.syntax).tokens.end,
+                                                  {type_syntax, init.syntax});
+                        collect::ExprResult sem =
+                            collect_session_.collect_compound_literal_expr(type,
+                                                                           std::move(init.sem),
+                                                                           lparen.loc);
+
+                        return parse_postfix_suffixes({syntax, std::move(sem)});
+                    }
+                    bool can_start_cast_operand =
+                        token_can_start_cast_operand(current().type);
+                    if (lang_opts_.is_cxx_mode() &&
+                        current().type == TokenType::SCOPE_RESOLUTION) {
+                        can_start_cast_operand = true;
+                    }
+                    if (lang_opts_.is_objc() &&
+                        (current().type == TokenType::AT ||
+                         (current().type == TokenType::LEFT_BRACKET &&
+                          !lang_opts_.is_cxx_mode()))) {
+
+                        can_start_cast_operand = true;
+                    }
+                    if (current().type == TokenType::LOGICAL_AND &&
+                        peek(1).type != TokenType::IDENTIFIER) {
+
+                        can_start_cast_operand = false;
+                    }
+                    if (can_start_cast_operand) {
+                        tentative.commit();
+                        ParsedExpr operand = parse_cast_expression();
+                        NodeId syntax = make_node(NodeKind::CastExpr,
+                                                  begin,
+                                                  tree_.node(operand.syntax).tokens.end,
+                                                  {type_syntax, operand.syntax},
+                                                  text_payload(collect_session_.file().format_type(type)),
+                                                  NodeFlagNone,
+                                                  static_cast<uint16_t>(CastOperator::CStyle));
+                        collect::ExprResult sem =
+                            collect_session_.collect_cast_expr(type, std::move(operand.sem), lparen.loc);
+                        sem.type_originates_from_template_parameter =
+                            sem.type_originates_from_template_parameter ||
+                            cast_type_originates_from_template_parameter;
+                        sem.has_error = sem.has_error || invalid_type_name_storage;
+                        return {syntax, std::move(sem)};
                     }
                 }
-            } catch (const ParseError&) {
-            } catch (const FatalErrorLimitReached&) {
             }
-        }
-
-        // GCC extension: __alignof__(expression)
-        Collect::UnevaluatedContextScope unevaluated_scope(
-            collect_.get(), "_Alignof");
-        auto expr = parse_assignment_expression();
-        check_and_consume(TokenType::RIGHT_PAREN);
-        return collect_->collect_alignof_expression(std::move(expr), tok.loc);
-    }
-
-    if (is_cxx_mode_active() && tok.type == TokenType::NOEXCEPT_KW) {
-        advance(); // consume 'noexcept'
-        check_and_consume(TokenType::LEFT_PAREN);
-        Collect::UnevaluatedContextScope unevaluated_scope(
-            collect_.get(), "noexcept");
-        auto expr = parse_expression();
-        check_and_consume(TokenType::RIGHT_PAREN);
-        return collect_->collect_cpp_noexcept_expression(
-            std::move(expr),
-            tok.loc);
-    }
-
-    // Handle sizeof operator
-    // Grammar: sizeof unary-expression | sizeof ( type-name )
-    if (tok.type == TokenType::SIZEOF) {
-        advance(); // consume 'sizeof'
-
-        if (gentle_check(TokenType::ELLIPSIS)) {
-            advance(); // consume '...'
-            check_and_consume(TokenType::LEFT_PAREN);
-            Token pack_tok = current_token();
-            check_and_consume(TokenType::IDENTIFIER);
-            check_and_consume(TokenType::RIGHT_PAREN);
-
-            const auto* parameter_pack =
-                find_active_template_parameter_pack(pack_tok.value);
-            if (!parameter_pack) {
-                error_custloc(
-                    "identifier '" + pack_tok.value +
-                        "' is not a template parameter pack",
-                    pack_tok.loc);
-                return collect_->collect_error_expression(
-                    "invalid sizeof... operand",
-                    tok.loc);
-            }
-            return collect_->collect_sizeof_pack_expression(
-                pack_tok.value,
-                parameter_pack,
-                tok.loc);
-        }
-
-        // Check if we have sizeof(type-name) rather than sizeof unary-expression.
-        if (gentle_check(TokenType::LEFT_PAREN) &&
-            probe_parenthesized_type_name_syntax() !=
-                tentative_syntax_probe::Result::NoMatch) {
-            {
-                TentativeParsingAction tentative(*this);
-                try {
-                    advance(); // consume '('
-                    // __extension__ after ( is an expression prefix, not a type specifier
-                    if (current_token().type != TokenType::EXTENSION_KW &&
-                        isTokenDeclarationSpec(current_token())) {
-                        auto parse_decl = DeclarationParser(this);
-                        auto type = parse_decl.parse_declaration();
-                        if (type &&
-                            parse_decl.name.empty() &&
-                            gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
-                            !gentle_check(TokenType::LEFT_BRACE)) {
-                            retain_type_specifier_decl_if_needed(parse_decl);
-                            tentative.commit();
-                            return collect_->collect_sizeof_type(type, tok.loc);
-                        }
-                    }
-                } catch (const ParseError&) {
-                } catch (const FatalErrorLimitReached&) {
-                }
-            }
-
-            // Not a type-name form (or it's a compound literal) — parse as
-            // sizeof unary-expression so postfix ops like -> are included.
-            // e.g., sizeof ((Stab_Sym*)0)->n_value
-            Collect::UnevaluatedContextScope unevaluated_scope(
-                collect_.get(), "sizeof");
-            auto expr = parse_unary_expression();
-            return collect_->collect_sizeof_expression(std::move(expr), tok.loc);
-        } else {
-            // sizeof unary-expression (without parentheses)
-            // e.g., sizeof x, sizeof *p, sizeof arr[0]
-            Collect::UnevaluatedContextScope unevaluated_scope(
-                collect_.get(), "sizeof");
-            auto expr = parse_unary_expression();
-            return collect_->collect_sizeof_expression(std::move(expr), tok.loc);
-        }
-    }
-
-    // Handle labels-as-values: &&label
-    if (tok.type == TokenType::LOGICAL_AND) {
-        advance(); // consume '&&'
-        if (!gentle_check(TokenType::IDENTIFIER)) {
-            error("expected label after '&&'");
-            return nullptr;
-        }
-        std::string label = resolve_local_label_name(current_token().value);
-        advance();
-        return collect_->collect_label_address_expression(label, tok.loc);
-    }
-
-    // Handle __real__ and __imag__ operators
-    if (tok.type == TokenType::REAL_PART || tok.type == TokenType::IMAG_PART) {
-        UnaryOpTypes uop = (tok.type == TokenType::REAL_PART) ? UnaryOpTypes::REAL_PART : UnaryOpTypes::IMAG_PART;
-        advance();
-        auto exp = parse_unary_expression();
-        return collect_->collect_unary_operation(uop, std::move(exp), tok.loc);
-    }
-
-    if (is_cxx_mode_active() && tok.type == TokenType::BITWISE_AND) {
-        auto consume_scope_resolution = [&](size_t& offset) -> bool {
-            Token sep = peek_token_shortcut(offset);
-            if (sep.type == TokenType::SCOPE_RESOLUTION) {
-                ++offset;
-                return true;
-            }
-            if (sep.type == TokenType::COLON &&
-                peek_token_shortcut(offset + 1).type == TokenType::COLON) {
-                offset += 2;
-                return true;
-            }
-            return false;
-        };
-
-        size_t offset = 1; // token after '&'
-        bool saw_scope_resolution = false;
-        std::vector<std::string> qualified_components;
-
-        if (consume_scope_resolution(offset)) {
-            saw_scope_resolution = true;
-        }
-        if (peek_token_shortcut(offset).type == TokenType::IDENTIFIER) {
-            qualified_components.push_back(peek_token_shortcut(offset).value);
-            ++offset;
-            while (consume_scope_resolution(offset)) {
-                saw_scope_resolution = true;
-                if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
-                    qualified_components.clear();
-                    break;
-                }
-                qualified_components.push_back(peek_token_shortcut(offset).value);
-                ++offset;
-            }
-        }
-
-        if (saw_scope_resolution && qualified_components.size() >= 2) {
-            const std::string& owner_candidate =
-                qualified_components[qualified_components.size() - 2];
-            auto owner_type_raw = collect_->collect_lookup_tag_type(owner_candidate, true);
-            if (owner_type_raw &&
-                canonical_type_kind(owner_type_raw) == TypeKind::Object) {
-                std::string member_name = qualified_components.back();
-
-                advance(); // consume '&'
-                size_t tokens_after_amp = offset - 1;
-                for (size_t i = 0; i < tokens_after_amp; ++i) {
-                    advance();
-                }
-                return collect_->collect_member_pointer_literal_expression(
-                    owner_candidate,
-                    member_name,
-                    tok.loc);
-            }
-        }
-    }
-
-    // Handle other unary operators
-    if (is_unary_operator_token(tok.type)) {
-        UnaryOpTypes uop = string2uop(tok.value);
-        if (uop == UnaryOpTypes::DECREMENT) uop = UnaryOpTypes::DECREMENT_PREFIX;
-        if (uop == UnaryOpTypes::INCREMENT) uop = UnaryOpTypes::INCREMENT_PREFIX;
-        advance();
-        // C11 6.5.3: unary-operator cast-expression (not unary-expression)
-        // This allows *(uint16_t *)buf to parse the cast correctly
-        auto exp = parse_cast_expression();
-        auto uast = collect_->collect_unary_operation(uop, std::move(exp), tok.loc);
-        return std::move(uast);
-    }
-    return parse_postfix_expression();
-}
-std::unique_ptr<Expr> Parser::parse_cast_expression() {
-    Token t = current_token();
-    bool should_try_cast = false;
-    if (gentle_check(TokenType::LEFT_PAREN)) {
-        if (is_cxx_mode_active()) {
-            auto parenthesized_type =
-                classify_cxx_parenthesized_type_id_for_lookahead();
-            switch (parenthesized_type.kind) {
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    TypeId:
-                    should_try_cast =
-                        parenthesized_type.followed_by_cast_operand;
-                    if (should_try_cast) {
-                        bump_cast_disambiguation_fast_accept();
-                    } else {
-                        bump_cast_disambiguation_fast_reject();
-                    }
-                    break;
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    NoMatch:
-                    bump_cast_disambiguation_fast_reject();
-                    break;
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    Inconclusive:
-                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
-                    Error:
-                    bump_cast_disambiguation_inconclusive_fallback();
-                    should_try_cast =
-                        probe_parenthesized_type_name_syntax() !=
-                        tentative_syntax_probe::Result::NoMatch;
-                    break;
-            }
-        } else {
-            should_try_cast =
-                probe_parenthesized_type_name_syntax() !=
-                tentative_syntax_probe::Result::NoMatch;
-        }
-    }
-
-    if (should_try_cast) {
-        size_t direct_start_idx = get_token_idx();
-        auto direct_split_state = tok_mgnt.get_split_token_state();
-        auto restore_direct_cast = [&]() {
-            set_token_idx(direct_start_idx);
-            tok_mgnt.set_split_token_state(direct_split_state);
-        };
-        try {
-            advance(); // consume '('
-            auto direct_type =
-                try_parse_cpp_direct_simple_type_id(
-                    CppDirectTypeIdContext::Cast);
-            if (direct_type &&
-                gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
-                token_can_start_cast_operand(current_token().type) &&
-                !gentle_check(TokenType::LEFT_BRACE)) {
-                bump_cast_direct_type_id_parse();
-                auto exp = parse_cast_expression();
-                return collect_->collect_explicit_cast(
-                    std::move(exp),
-                    direct_type->type,
-                    t.loc);
-            }
-            restore_direct_cast();
-            bump_cast_direct_type_id_fallback();
-        } catch (const FatalErrorLimitReached&) {
-            throw;
-        } catch (const ParseError&) {
-            restore_direct_cast();
-            bump_cast_direct_type_id_fallback();
-        }
-
-        TentativeParsingAction tentative(*this);
-        try {
-            advance(); // consume '('
-            // __extension__ after ( is an expression prefix, not a type specifier
-            if (current_token().type != TokenType::EXTENSION_KW && isTokenDeclarationSpec(current_token())) {
-                auto parse_decl = DeclarationParser(this);
-                auto new_type = parse_decl.parse_declaration();
-                if (new_type &&
-                    parse_decl.name.empty() &&
-                    parse_decl.str_class == StorageClass::NONE &&
-                    gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
-                    token_can_start_cast_operand(current_token().type) &&
-                    !gentle_check(TokenType::LEFT_BRACE)) {
-                    retain_type_specifier_decl_if_needed(parse_decl);
-                    auto exp = parse_cast_expression();
-                    auto cast_expr = collect_->collect_explicit_cast(std::move(exp), new_type, t.loc);
-                    tentative.commit();
-                    return cast_expr;
-                }
-            }
-        } catch (const ParseError&) {
-        } catch (const FatalErrorLimitReached&) {
         }
     }
 
     return parse_unary_expression();
 }
-bool Parser::is_init_designator_start() {
-    if (gentle_check(TokenType::DOT) || gentle_check(TokenType::LEFT_BRACKET)) {
+
+Parser::ParsedExpr Parser::parse_unary_expression() {
+
+    bool force_global_allocation = false;
+    size_t globally_qualified_begin = current_raw_index();
+    if (check(TokenType::SCOPE_RESOLUTION) &&
+        (peek(1).type == TokenType::NEW ||
+         peek(1).type == TokenType::DELETE)) {
+        force_global_allocation = true;
+        consume();
+    }
+    switch (current().type) {
+        case TokenType::EXTENSION_KW:
+            consume();
+            return parse_cast_expression();
+        case TokenType::CO_AWAIT_KW: {
+
+            size_t begin = current_raw_index();
+            Token await_token = current();
+            consume();
+            ParsedExpr operand = parse_cast_expression();
+            NodeId syntax = make_node(NodeKind::AwaitExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {operand.syntax},
+                                      text_payload("co_await"));
+            collect::ExprResult sem = collect_session_.collect_await_expr(
+                std::move(operand.sem), await_token.loc);
+            return {syntax, std::move(sem)};
+        }
+        case TokenType::LOGICAL_AND:
+            if (is_identifier_token(peek(1).type)) {
+                size_t begin = current_raw_index();
+                Token op = current();
+                consume();
+                NodeId label = parse_name_node(NodeKind::Name);
+                std::string label_name = node_text(tree_.node(label));
+                NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                          begin,
+                                          last_consumed_raw_end(),
+                                          {label},
+                                          text_payload("&&"),
+                                          NodeFlagNone,
+                                          static_cast<uint16_t>(UnaryOperator::LabelAddress));
+                collect::ExprResult sem =
+                    collect_session_.collect_label_address_expr(label_name, op.loc);
+                return {syntax, std::move(sem)};
+            }
+            return parse_postfix_expression();
+        case TokenType::BITWISE_XOR:
+
+            return parse_postfix_expression();
+        case TokenType::REFLECT: {
+
+            size_t begin = current_raw_index();
+            Token reflect_token = current();
+            consume();
+            auto finish = [&](collect::ExprResult sem) -> ParsedExpr {
+                return {make_node(NodeKind::ReflectExpr,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  {},
+                                  text_payload("^^"),
+                                  sem.has_error ? NodeFlagHasError
+                                                : NodeFlagNone),
+                        std::move(sem)};
+            };
+            if (check(TokenType::SCOPE_RESOLUTION) &&
+                !is_identifier_token(peek(1).type)) {
+                consume();
+                return finish(
+                    collect_session_.collect_reflect_global_namespace_expr(
+                        reflect_token.loc));
+            }
+
+            bool name_path = false;
+            {
+                size_t probe = 0;
+                bool probe_global = false;
+                if (current().type == TokenType::SCOPE_RESOLUTION &&
+                    is_identifier_token(peek(1).type)) {
+                    probe_global = true;
+                    probe = 1;
+                }
+                if (is_identifier_token(peek(probe).type)) {
+                    std::vector<std::string_view> qualifiers;
+                    size_t index = probe;
+                    while (peek(index + 1).type ==
+                               TokenType::SCOPE_RESOLUTION &&
+                           is_identifier_token(peek(index + 2).type)) {
+                        qualifiers.push_back(peek(index).value);
+                        index += 2;
+                    }
+                    cir::TypeRef probed =
+                        collect_session_.peek_qualified_type_ref(
+                            probe_global, qualifiers, peek(index).value);
+                    name_path = !probed.type.valid();
+
+                    if (name_path &&
+                        peek(index + 1).type == TokenType::LESS_THAN &&
+                        collect_session_.template_info_for_name(
+                            peek(index).value)) {
+                        name_path = false;
+                    }
+                    if (name_path &&
+                        peek(index + 1).type == TokenType::ELLIPSIS &&
+                        peek(index + 2).type == TokenType::LEFT_BRACKET) {
+                        name_path = false;
+                    }
+                }
+            }
+            if (!name_path) {
+                DeclarationParser type_parser(*this);
+                cir::TypeRef reflected =
+                    type_parser.parse_declaration(false, true);
+                if (!reflected.type.valid()) {
+                    collect::ExprResult sem;
+                    sem.has_error = true;
+                    return finish(std::move(sem));
+                }
+                while (match(TokenType::MULTIPLY)) {
+                    reflected = collect_session_.type_ref(
+                        collect_session_.pointer_type(reflected));
+                }
+                return finish(collect_session_.collect_reflect_type_expr(
+                    reflected, reflect_token.loc));
+            }
+            bool global_qualifier = false;
+            if (check(TokenType::SCOPE_RESOLUTION)) {
+                consume();
+                global_qualifier = true;
+            }
+            std::vector<std::string> path;
+            path.push_back(std::string(current().value));
+            consume();
+            while (check(TokenType::SCOPE_RESOLUTION) &&
+                   is_identifier_token(peek(1).type)) {
+                consume();
+                path.push_back(std::string(current().value));
+                consume();
+            }
+            return finish(collect_session_.collect_reflect_name_expr(
+                global_qualifier, path, reflect_token.loc));
+        }
+        case TokenType::NEW: {
+            size_t begin = force_global_allocation
+                ? globally_qualified_begin
+                : current_raw_index();
+            Token new_token = current();
+            consume();
+
+            auto matching_right_paren = [&](size_t left_offset) {
+                int depth = 0;
+                for (size_t offset = left_offset; offset < 4096; ++offset) {
+                    TokenType type = peek(offset).type;
+                    if (type == TokenType::Eof) {
+                        break;
+                    }
+                    if (type == TokenType::LEFT_PAREN) {
+                        ++depth;
+                    } else if (type == TokenType::RIGHT_PAREN &&
+                               --depth == 0) {
+                        return offset;
+                    }
+                }
+                return size_t{0};
+            };
+            auto starts_type_at = [&](size_t offset) {
+                const Token& token = peek(offset);
+                if (is_identifier_token(token.type)) {
+                    return collect_session_.is_type_name(token.value);
+                }
+                if (token.type == TokenType::SCOPE_RESOLUTION) {
+                    return true;
+                }
+                return is_type_start(token.type);
+            };
+            bool has_placement = false;
+            if (check(TokenType::LEFT_PAREN)) {
+                size_t right = matching_right_paren(0);
+                if (right != 0) {
+                    TokenType after = peek(right + 1).type;
+                    if (after == TokenType::LEFT_PAREN) {
+
+                        TokenType nested = peek(right + 2).type;
+                        has_placement = starts_type_at(right + 2);
+                    } else {
+                        has_placement = starts_type_at(right + 1);
+                    }
+                }
+            }
+
+            collect::Session::NewExpressionInput input;
+            input.force_global = force_global_allocation;
+            std::vector<NodeId> children;
+            if (has_placement) {
+                consume();
+                ParsedExpressionList placements =
+                    parse_expression_list(TokenType::RIGHT_PAREN);
+                children.insert(children.end(),
+                                placements.syntax.begin(),
+                                placements.syntax.end());
+                input.placement_arguments = std::move(placements.sem);
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' after new placement arguments",
+                             current_loc());
+                }
+            }
+
+            cir::TypeId allocated{};
+            const collect::Session::TemplateInfo* deduced_new_template =
+                nullptr;
+            SrcLoc deduced_new_template_loc{};
+            if (check(TokenType::LEFT_PAREN)) {
+                consume();
+                DeclarationParser type_parser(
+                    *this,
+                    TypeParseContext::type_only(
+                        TypeParseContext::Origin::NewTypeId));
+                allocated = type_parser.parse_declaration(true, true).type;
+                deduced_new_template =
+                    type_parser.deduced_class_template_info;
+                deduced_new_template_loc =
+                    type_parser.deduced_class_template_loc;
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' after parenthesized new type-id",
+                             current_loc());
+                }
+            } else {
+                DeclarationParser type_parser(
+                    *this,
+                    TypeParseContext::type_only(
+                        TypeParseContext::Origin::NewTypeId));
+                cir::TypeRef base =
+                    type_parser.parse_declaration(false, true);
+                allocated = base.type;
+                deduced_new_template =
+                    type_parser.deduced_class_template_info;
+                deduced_new_template_loc =
+                    type_parser.deduced_class_template_loc;
+                while (match(TokenType::MULTIPLY)) {
+                    allocated = collect_session_.pointer_type(
+                        collect_session_.type_ref(allocated));
+                }
+
+                struct ParsedNewExtent {
+                    bool incomplete = false;
+                    bool runtime = false;
+                    uint64_t constant = 0;
+                    collect::ExprResult expression;
+                    NodeId syntax = InvalidNodeId;
+                };
+                std::vector<ParsedNewExtent> extents;
+                while (match(TokenType::LEFT_BRACKET)) {
+                    ParsedNewExtent extent;
+                    if (check(TokenType::RIGHT_BRACKET)) {
+                        extent.incomplete = true;
+                    } else {
+                        ParsedExpr bound = parse_expression();
+                        extent.syntax = bound.syntax;
+                        int64_t constant = 0;
+                        if (collect_session_.try_evaluate_integer_constant(
+                                bound.sem, constant)) {
+                            if (constant < 0) {
+                                diagnose(DiagnosticLevel::Error,
+                                         "new array bound is negative",
+                                         tree_.node(bound.syntax).loc);
+                            }
+                            extent.constant = constant < 0
+                                ? 0
+                                : static_cast<uint64_t>(constant);
+                        } else {
+                            extent.runtime = true;
+                            bound.sem = collect_session_.require_value(
+                                std::move(bound.sem),
+                                collect::UseContext::RValue,
+                                tree_.node(bound.syntax).loc);
+                            extent.expression = std::move(bound.sem);
+                        }
+                    }
+                    if (!match(TokenType::RIGHT_BRACKET)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected ']' after new array bound",
+                                 current_loc());
+                    }
+                    if (!extents.empty() &&
+                        (extent.incomplete || extent.runtime ||
+                         extent.constant == 0)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "trailing new array bounds must be positive "
+                                 "constant expressions",
+                                 current_loc());
+                    }
+                    if (extent.syntax != InvalidNodeId) {
+                        children.push_back(extent.syntax);
+                    }
+                    extents.push_back(std::move(extent));
+                }
+                if (!extents.empty()) {
+                    input.is_array = true;
+                    for (size_t i = extents.size(); i-- > 0;) {
+                        ParsedNewExtent& extent = extents[i];
+                        if (i == 0 && extent.runtime) {
+                            input.bound_fragment = std::move(
+                                extent.expression.fragment);
+                            input.runtime_outer_bound =
+                                extent.expression.value;
+                            allocated = collect_session_.array_type(
+                                collect_session_.type_ref(allocated),
+                                cir::ArraySizeKind::Variable,
+                                std::nullopt,
+                                input.runtime_outer_bound);
+                        } else if (extent.incomplete) {
+                            allocated = collect_session_.array_type(
+                                collect_session_.type_ref(allocated),
+                                std::nullopt);
+                        } else {
+                            allocated = collect_session_.array_type(
+                                collect_session_.type_ref(allocated),
+                                static_cast<size_t>(extent.constant));
+                        }
+                    }
+                }
+            }
+            std::vector<NodeId> argument_nodes;
+            if (match(TokenType::LEFT_PAREN)) {
+                input.initializer_present = true;
+                input.initializer_is_parenthesized = true;
+                ParsedExpressionList arguments =
+                    parse_expression_list(TokenType::RIGHT_PAREN);
+                argument_nodes = std::move(arguments.syntax);
+                input.initializer_arguments = std::move(arguments.sem);
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' after new initializer",
+                             current_loc());
+                }
+            } else if (check(TokenType::LEFT_BRACE)) {
+                input.initializer_present = true;
+                input.initializer_is_braced = true;
+                ParsedExpr initializer = parse_init_list_expression();
+                argument_nodes.push_back(initializer.syntax);
+                input.initializer_arguments.push_back(std::move(initializer.sem));
+            }
+            if (deduced_new_template) {
+                if (input.is_array) {
+                    diagnose(DiagnosticLevel::Error,
+                             "deduced class type cannot be used as a new array element type",
+                             deduced_new_template_loc.isInvalid()
+                                 ? new_token.loc
+                                 : deduced_new_template_loc);
+                    allocated = {};
+                } else {
+                    std::vector<collect::ExprResult> deduction_arguments;
+                    const collect::ExprResult* braced_initializer = nullptr;
+                    if (input.initializer_is_braced &&
+                        !input.initializer_arguments.empty()) {
+                        braced_initializer =
+                            &input.initializer_arguments.front();
+                        if (braced_initializer->init_list) {
+                            for (const collect::InitElementInput& element :
+                                 braced_initializer->init_list->elements) {
+                                if (element.designators.empty()) {
+                                    deduction_arguments.push_back(
+                                        element.value);
+                                }
+                            }
+                        }
+                    } else {
+                        deduction_arguments = input.initializer_arguments;
+                    }
+                    allocated = deduce_class_template_initialization_type(
+                        *deduced_new_template,
+                        deduction_arguments,
+                        deduced_new_template_loc.isInvalid()
+                            ? new_token.loc
+                            : deduced_new_template_loc,
+                        CtadInitializationKind::Direct,
+                        braced_initializer);
+                }
+            }
+            input.allocated_type = allocated;
+            children.insert(children.end(), argument_nodes.begin(),
+                            argument_nodes.end());
+            collect::ExprResult sem =
+                collect_session_.collect_new_expr(std::move(input),
+                                                  new_token.loc);
+            return {make_node(NodeKind::UnaryExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              text_payload("new"),
+                              sem.has_error ? NodeFlagHasError : NodeFlagNone),
+                    std::move(sem)};
+        }
+        case TokenType::DELETE: {
+            size_t begin = force_global_allocation
+                ? globally_qualified_begin
+                : current_raw_index();
+            Token delete_token = current();
+            consume();
+            bool is_array = false;
+            if (match(TokenType::LEFT_BRACKET)) {
+                is_array = true;
+                if (!match(TokenType::RIGHT_BRACKET)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ']' in array delete",
+                             current_loc());
+                }
+            }
+            ParsedExpr operand = parse_cast_expression();
+            collect::Session::DeleteExpressionInput input;
+            input.pointer = std::move(operand.sem);
+            input.force_global = force_global_allocation;
+            input.is_array = is_array;
+            collect::ExprResult sem =
+                collect_session_.collect_delete_expr(std::move(input),
+                                                     delete_token.loc);
+            return {make_node(NodeKind::UnaryExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              {operand.syntax},
+                              text_payload("delete"),
+                              sem.has_error ? NodeFlagHasError : NodeFlagNone),
+                    std::move(sem)};
+        }
+        case TokenType::INCREMENT:
+        case TokenType::DECREMENT:
+        case TokenType::PLUS:
+        case TokenType::NEGATE:
+        case TokenType::LOGICAL_NOT:
+        case TokenType::BITWISE_NOT:
+        case TokenType::MULTIPLY:
+        case TokenType::BITWISE_AND: {
+            size_t begin = current_raw_index();
+            Token op = current();
+            UnaryOperator sem_op = unary_operator_for(op.type);
+            consume();
+            ParsedExpr operand = parse_cast_expression();
+            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                      begin,
+                                      tree_.node(operand.syntax).tokens.end,
+                                      {operand.syntax},
+                                      text_payload(op.value),
+                                      NodeFlagNone,
+                                      static_cast<uint16_t>(sem_op));
+            collect::ExprResult sem =
+                collect_session_.collect_unary_expr(sem_op, std::move(operand.sem), op.loc);
+            return {syntax, std::move(sem)};
+        }
+        case TokenType::NOEXCEPT_KW: {
+
+            if (!lang_opts_.is_cxx_mode()) {
+                break;
+            }
+            size_t begin = current_raw_index();
+            SrcLoc loc = current().loc;
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after 'noexcept'",
+                         current_loc());
+            }
+            bool potentially_throwing = false;
+            bool operand_dependent = false;
+            bool operand_error = false;
+            collect::ExprResult operand_sem;
+            {
+                RevertingTentativeParsingAction tentative(
+                    *this, TentativeMode::ParserOnly);
+                collect_session_.begin_unevaluated_operand();
+                uint64_t taint_before = collect_session_.pattern_taint();
+                ParsedExpr operand = parse_expression();
+                potentially_throwing =
+                    collect_session_.expression_potentially_throws(
+                        operand.sem, &operand_dependent);
+                operand_dependent = operand_dependent ||
+                    collect_session_.expr_is_value_dependent(operand.sem) ||
+                    collect_session_.pattern_taint() != taint_before;
+                operand_error = operand.sem.has_error;
+                operand_sem = std::move(operand.sem);
+                collect_session_.end_unevaluated_operand();
+                tentative.revert();
+            }
+            int depth = 1;
+            while (!at_end() && depth > 0) {
+                TokenType type = current().type;
+                consume();
+                if (type == TokenType::LEFT_PAREN) ++depth;
+                if (type == TokenType::RIGHT_PAREN) --depth;
+            }
+            if (operand_error &&
+                (!operand_dependent ||
+                 !operand_sem.template_value_expr.valid())) {
+                diagnose(DiagnosticLevel::Error,
+                         "noexcept operand is ill-formed",
+                         loc);
+            }
+            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {},
+                                      text_payload("noexcept"));
+            collect::ExprResult sem = collect_session_.collect_noexcept_expr(
+                std::move(operand_sem),
+                potentially_throwing,
+                operand_dependent,
+                loc);
+            return {syntax, std::move(sem)};
+        }
+        case TokenType::SIZEOF: {
+            size_t begin = current_raw_index();
+            Token op = current();
+            consume();
+            if (match(TokenType::ELLIPSIS)) {
+                std::vector<NodeId> children;
+                if (!match(TokenType::LEFT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected '(' after sizeof...",
+                             current_loc());
+                }
+                std::string pack_name;
+                SrcLoc pack_loc = current_loc();
+                if (is_identifier_token(current().type)) {
+                    pack_name = current().value;
+                    children.push_back(parse_name_node(NodeKind::Name));
+                } else {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected parameter pack name in sizeof...",
+                             current_loc());
+                }
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' after sizeof... operand",
+                             current_loc());
+                }
+                NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                          begin,
+                                          last_consumed_raw_end(),
+                                          children,
+                                          text_payload("sizeof..."),
+                                          NodeFlagNone,
+                                          static_cast<uint16_t>(
+                                              UnaryOperator::SizeofExpr));
+                collect::ExprResult sem = collect_session_.collect_sizeof_pack(
+                    pack_name,
+                    pack_loc);
+                return {syntax, std::move(sem)};
+            }
+            if (check(TokenType::LEFT_PAREN)) {
+                {
+                    RevertingTentativeParsingAction tentative(*this);
+                    consume();
+                    if (is_type_start(current().type)) {
+                        cir::TypeId type{};
+                        cir::Fragment vla_bounds;
+                        NodeId type_syntax =
+                            parse_type_name(&type, nullptr, nullptr, nullptr, &vla_bounds);
+                        if (match(TokenType::RIGHT_PAREN) && type.valid() && !check(TokenType::LEFT_BRACE)) {
+                            tentative.commit();
+                            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                                      begin,
+                                                      last_consumed_raw_end(),
+                                                      {type_syntax},
+                                                      text_payload(op.value),
+                                                      NodeFlagNone,
+                                                      static_cast<uint16_t>(UnaryOperator::SizeofType));
+                            collect::ExprResult sem = collect_session_.collect_sizeof_type(
+                                type, op.loc, std::move(vla_bounds));
+                            return {syntax, std::move(sem)};
+                        }
+                    }
+                }
+
+                collect_session_.begin_unevaluated_operand();
+                ParsedExpr operand = parse_cast_expression();
+                collect_session_.end_unevaluated_operand();
+                NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                          begin,
+                                          tree_.node(operand.syntax).tokens.end,
+                                          {operand.syntax},
+                                          text_payload(op.value),
+                                          NodeFlagNone,
+                                          static_cast<uint16_t>(UnaryOperator::SizeofExpr));
+                collect::ExprResult sem =
+                    collect_session_.collect_unary_expr(UnaryOperator::SizeofExpr, std::move(operand.sem), op.loc);
+                return {syntax, std::move(sem)};
+            }
+
+            collect_session_.begin_unevaluated_operand();
+            ParsedExpr operand = parse_unary_expression();
+            collect_session_.end_unevaluated_operand();
+            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                      begin,
+                                      tree_.node(operand.syntax).tokens.end,
+                                      {operand.syntax},
+                                      text_payload(op.value),
+                                      NodeFlagNone,
+                                      static_cast<uint16_t>(UnaryOperator::SizeofExpr));
+            collect::ExprResult sem =
+                collect_session_.collect_unary_expr(UnaryOperator::SizeofExpr, std::move(operand.sem), op.loc);
+            return {syntax, std::move(sem)};
+        }
+        case TokenType::ALIGNOF: {
+            size_t begin = current_raw_index();
+            Token op = current();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error, "expected '(' after alignof", current_loc());
+                collect::ExprResult sem;
+                sem.has_error = true;
+                return {make_node(NodeKind::Error, begin, last_consumed_raw_end(), {}, {}, NodeFlagHasError),
+                        std::move(sem)};
+            }
+            {
+                RevertingTentativeParsingAction tentative(*this);
+                if (is_type_start(current().type)) {
+                    cir::TypeId type{};
+                    NodeId type_syntax = parse_type_name(&type);
+                    if (match(TokenType::RIGHT_PAREN) && type.valid()) {
+                        tentative.commit();
+                        NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                                  begin,
+                                                  last_consumed_raw_end(),
+                                                  {type_syntax},
+                                                  text_payload(op.value),
+                                                  NodeFlagNone,
+                                                  static_cast<uint16_t>(UnaryOperator::AlignofType));
+                        collect::ExprResult sem = collect_session_.collect_alignof_type(type, op.loc);
+                        return {syntax, std::move(sem)};
+                    }
+                }
+            }
+            collect_session_.begin_unevaluated_operand();
+            ParsedExpr operand = parse_assignment_expression();
+            collect_session_.end_unevaluated_operand();
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error, "expected ')' after alignof expression", current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {operand.syntax},
+                                      text_payload(op.value),
+                                      NodeFlagNone,
+                                      static_cast<uint16_t>(UnaryOperator::AlignofExpr));
+            collect::ExprResult sem =
+                collect_session_.collect_unary_expr(UnaryOperator::AlignofExpr, std::move(operand.sem), op.loc);
+            return {syntax, std::move(sem)};
+        }
+        case TokenType::TYPEID_KW: {
+            size_t begin = current_raw_index();
+            Token op = current();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after typeid",
+                         current_loc());
+                collect::ExprResult sem;
+                sem.has_error = true;
+                return {make_node(NodeKind::Error,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  {},
+                                  {},
+                                  NodeFlagHasError),
+                        std::move(sem)};
+            }
+
+            {
+                RevertingTentativeParsingAction tentative(*this);
+                if (is_type_start(current().type)) {
+                    cir::TypeId type{};
+                    NodeId type_syntax = parse_type_name(&type);
+                    if (match(TokenType::RIGHT_PAREN) && type.valid()) {
+                        tentative.commit();
+                        NodeId syntax = make_node(
+                            NodeKind::UnaryExpr,
+                            begin,
+                            last_consumed_raw_end(),
+                            {type_syntax},
+                            text_payload(op.value),
+                            NodeFlagNone,
+                            static_cast<uint16_t>(UnaryOperator::TypeidType));
+                        collect::ExprResult sem =
+                            collect_session_.collect_typeid_type(type, op.loc);
+                        return parse_postfix_suffixes(
+                            ParsedExpr{syntax, std::move(sem)});
+                    }
+                }
+            }
+
+            ParsedExpr operand;
+            bool committed_probe = false;
+            {
+                RevertingTentativeParsingAction tentative(*this);
+                collect_session_.begin_typeid_probe_operand();
+                ParsedExpr probe = parse_expression();
+                collect_session_.end_typeid_probe_operand();
+                bool closed = match(TokenType::RIGHT_PAREN);
+                if (closed &&
+                    !collect_session_.typeid_operand_is_potentially_evaluated(
+                        probe.sem)) {
+                    tentative.commit();
+                    operand = std::move(probe);
+                    committed_probe = true;
+                }
+            }
+            if (!committed_probe) {
+                operand = parse_expression();
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' after typeid expression",
+                             current_loc());
+                }
+            }
+            NodeId syntax = make_node(
+                NodeKind::UnaryExpr,
+                begin,
+                last_consumed_raw_end(),
+                {operand.syntax},
+                text_payload(op.value),
+                NodeFlagNone,
+                static_cast<uint16_t>(UnaryOperator::TypeidExpr));
+            collect::ExprResult sem = collect_session_.collect_typeid_expr(
+                std::move(operand.sem), op.loc);
+            return parse_postfix_suffixes(
+                ParsedExpr{syntax, std::move(sem)});
+        }
+        case TokenType::REAL_PART:
+        case TokenType::IMAG_PART: {
+            size_t begin = current_raw_index();
+            Token op = current();
+            consume();
+            ParsedExpr operand = parse_cast_expression();
+            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                      begin,
+                                      tree_.node(operand.syntax).tokens.end,
+                                      {operand.syntax},
+                                      text_payload(op.value),
+                                      NodeFlagDeferred);
+            collect::ExprResult sem = collect_session_.collect_complex_part_expr(
+                std::move(operand.sem), op.type == TokenType::IMAG_PART, op.loc);
+            return {syntax, std::move(sem)};
+        }
+        default:
+            return parse_postfix_expression();
+    }
+    return parse_postfix_expression();
+}
+
+std::optional<Parser::ParsedExpr> Parser::parse_cxx_named_cast_expression() {
+    if (!lang_opts_.is_cxx_mode() ||
+        current().type != TokenType::IDENTIFIER ||
+        peek(1).type != TokenType::LESS_THAN) {
+        return std::nullopt;
+    }
+    std::optional<CxxNamedCastInfo> cast_kind =
+        cxx_named_cast_kind(current().value);
+    if (!cast_kind.has_value()) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    Token cast_token = current();
+    consume();
+    consume();
+
+    cir::TypeId type{};
+    StorageClass storage_class = StorageClass::None;
+    bool cast_type_originates_from_template_parameter = false;
+    NodeId type_syntax =
+        parse_type_name(&type,
+                        nullptr,
+                        &storage_class,
+                        nullptr,
+                        nullptr,
+                        &cast_type_originates_from_template_parameter,
+                        TypeParseContext::type_only(
+                            TypeParseContext::Origin::NamedCastTypeId));
+    bool invalid_type_name_storage = storage_class != StorageClass::None;
+    if (invalid_type_name_storage) {
+        diagnose(DiagnosticLevel::Error,
+                 "storage class specifier is not allowed in a C++ cast type name",
+                 tree_.node(type_syntax).loc);
+    }
+    bool closed = false;
+    if (match(TokenType::GREATER_THAN)) {
+        closed = true;
+    } else if (check(TokenType::RIGHT_SHIFT) && pending_template_closes_ > 0) {
+        --pending_template_closes_;
+        consume();
+        closed = true;
+    }
+    if (!closed) {
+        pending_template_closes_ = 0;
+        diagnose(DiagnosticLevel::Error,
+                 "expected '>' after C++ cast type",
+                 current_loc());
+    }
+    if (!match(TokenType::LEFT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected '(' after C++ cast type",
+                 current_loc());
+    }
+    ParsedExpr operand = parse_expression();
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ')' after C++ cast operand",
+                 current_loc());
+    }
+    NodeId syntax = make_node(NodeKind::CastExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              {type_syntax, operand.syntax},
+                              text_payload(std::string(cast_token.value) +
+                                           "<" +
+                                           collect_session_.file().format_type(type) +
+                                           ">"),
+                              invalid_type_name_storage ? NodeFlagHasError
+                                                        : NodeFlagNone,
+                              static_cast<uint16_t>(cast_kind->syntax_kind));
+    collect::ExprResult sem =
+        collect_session_.collect_cpp_named_cast(cast_kind->collect_kind,
+                                                type,
+                                                std::move(operand.sem),
+                                                cast_token.loc);
+    sem.type_originates_from_template_parameter =
+        sem.type_originates_from_template_parameter ||
+        cast_type_originates_from_template_parameter;
+    sem.has_error = sem.has_error || invalid_type_name_storage;
+    return ParsedExpr{syntax, std::move(sem)};
+}
+
+collect::ExprResult Parser::replay_default_member_initializer(
+    cir::EntityId field,
+    cir::InstId object_place,
+    SrcLoc loc) {
+    collect::ExprResult result;
+    if (!lang_opts_.is_cxx_mode() || !field.valid() ||
+        !collect_session_.file().valid(field)) {
+        return result;
+    }
+    const cir::RecordFieldFact* fact =
+        collect_session_.file().field_fact(field);
+    if (!fact || !fact->has_default_member_initializer ||
+        fact->default_member_initializer_end <=
+            fact->default_member_initializer_begin) {
+        return result;
+    }
+    if (std::find(active_default_member_initializer_replays_.begin(),
+                  active_default_member_initializer_replays_.end(),
+                  field) !=
+        active_default_member_initializer_replays_.end()) {
+        collect_session_.file().add_error(
+            "recursive default member initializer dependency", loc);
+        result.has_error = true;
+        return result;
+    }
+    active_default_member_initializer_replays_.push_back(field);
+    struct ReplayExit {
+        Parser* parser = nullptr;
+        collect::Session* session = nullptr;
+        collect::Session::CompleteClassInitializerScope object_scope;
+        bool entered_context = false;
+        ~ReplayExit() {
+            if (!parser || !session) {
+                return;
+            }
+            session->finish_complete_class_initializer(object_scope);
+            if (entered_context) {
+                session->leave_scope();
+            }
+            parser->active_default_member_initializer_replays_.pop_back();
+        }
+    } replay_exit;
+    replay_exit.parser = this;
+    replay_exit.session = &collect_session_;
+
+    cir::DeclContextId context =
+        fact->default_member_initializer_context;
+    if (context.valid() && collect_session_.file().valid(context)) {
+        collect::ScopeFlags flags = collect::ScopeFlags::None;
+        switch (collect_session_.file().decl_context(context).kind) {
+        case cir::DeclContextKind::TranslationUnit:
+            flags = collect::ScopeFlags::FileScope;
+            break;
+        case cir::DeclContextKind::Namespace:
+            flags = collect::ScopeFlags::NamespaceScope |
+                    collect::ScopeFlags::FileScope;
+            break;
+        case cir::DeclContextKind::Record:
+            flags = collect::ScopeFlags::RecordScope;
+            break;
+        case cir::DeclContextKind::Enum:
+            flags = collect::ScopeFlags::EnumScope;
+            break;
+        case cir::DeclContextKind::Function:
+            flags = collect::ScopeFlags::FunctionScope;
+            break;
+        case cir::DeclContextKind::Prototype:
+            flags = collect::ScopeFlags::PrototypeScope;
+            break;
+        case cir::DeclContextKind::TemplateParameter:
+            flags = collect::ScopeFlags::TemplateParameterScope;
+            break;
+        case cir::DeclContextKind::Block:
+            flags = collect::ScopeFlags::BlockScope;
+            break;
+        case cir::DeclContextKind::Invalid:
+            break;
+        }
+        if (flags != collect::ScopeFlags::None) {
+            collect::ScopeEnterResult entered =
+                collect_session_.enter_existing_context(context, flags);
+            replay_exit.entered_context =
+                entered.scope != collect::InvalidScopeId;
+        }
+    }
+    cir::EntityId record = collect_session_.file().entity(field).parent;
+    replay_exit.object_scope =
+        collect_session_.begin_complete_class_initializer(record,
+                                                          object_place);
+    collect::Session::LookupGenerationCeilingScope ceiling(
+        collect_session_,
+        fact->default_member_initializer_lookup_generation != 0
+            ? fact->default_member_initializer_lookup_generation
+            : collect_session_.lookup_generation());
+    size_t saved_cursor = cursor_;
+    size_t saved_last_end = last_consumed_raw_end_;
+    int saved_template_closes = pending_template_closes_;
+    cursor_ = fact->default_member_initializer_begin;
+    pending_template_closes_ = 0;
+    ParsedExpr replayed = fact->default_member_initializer_braced
+        ? parse_init_list_expression()
+        : parse_expression(PrecLevel::ASSIGNMENT);
+    cursor_ = saved_cursor;
+    last_consumed_raw_end_ = saved_last_end;
+    pending_template_closes_ = saved_template_closes;
+    return std::move(replayed.sem);
+}
+
+collect::ExprResult Parser::replay_default_argument(cir::EntityId selected,
+                                                    size_t parameter_index,
+                                                    SrcLoc loc) {
+    collect::ExprResult result;
+    if (!lang_opts_.is_cxx_mode() || !selected.valid() ||
+        !collect_session_.file().valid(selected)) {
+        return result;
+    }
+
+    TemplateReplayGuardScope replay_guard(collect_session_, loc);
+    if (!replay_guard.active) {
+        result.has_error = true;
+        return result;
+    }
+    collect::Session::DefaultArgumentReplayInfo replay_info =
+        collect_session_.prepare_default_argument_replay(selected,
+                                                         parameter_index,
+                                                         loc);
+    const collect::ParamInput::DefaultArgument* default_argument =
+        replay_info.argument;
+    if (!default_argument) {
+        return result;
+    }
+
+    const collect::Session::TemplateInfo* selected_template_info =
+        replay_info.template_info;
+    SrcLoc selected_template_point =
+        replay_info.point_of_instantiation.isInvalid()
+            ? loc
+            : replay_info.point_of_instantiation;
+    uint64_t selected_template_point_generation =
+        replay_info.point_lookup_generation;
+    auto scope_flags_for_context = [&](cir::DeclContextId context) {
+        if (!context.valid() || !collect_session_.file().valid(context)) {
+            return collect::ScopeFlags::None;
+        }
+        switch (collect_session_.file().decl_context(context).kind) {
+        case cir::DeclContextKind::TranslationUnit:
+            return collect::ScopeFlags::FileScope;
+        case cir::DeclContextKind::Namespace:
+            return collect::ScopeFlags::NamespaceScope |
+                   collect::ScopeFlags::FileScope;
+        case cir::DeclContextKind::Record:
+            return collect::ScopeFlags::RecordScope;
+        case cir::DeclContextKind::Enum:
+            return collect::ScopeFlags::EnumScope;
+        case cir::DeclContextKind::Function:
+            return collect::ScopeFlags::FunctionScope;
+        case cir::DeclContextKind::Prototype:
+            return collect::ScopeFlags::PrototypeScope;
+        case cir::DeclContextKind::TemplateParameter:
+            return collect::ScopeFlags::TemplateParameterScope;
+        case cir::DeclContextKind::Block:
+            return collect::ScopeFlags::BlockScope;
+        case cir::DeclContextKind::Invalid:
+            return collect::ScopeFlags::None;
+        }
+        return collect::ScopeFlags::None;
+    };
+    cir::DeclContextId replay_context =
+        replay_info.declaration_context.valid()
+            ? replay_info.declaration_context
+            : default_argument->declaration_context;
+    collect::ScopeFlags default_scope_flags =
+        scope_flags_for_context(replay_context);
+    size_t saved_cursor = cursor_;
+    size_t saved_last_end = last_consumed_raw_end_;
+    int saved_template_closes = pending_template_closes_;
+    cursor_ = default_argument->token_begin;
+    pending_template_closes_ = 0;
+    auto restore_default_argument_parse_state = [&] {
+        cursor_ = saved_cursor;
+        last_consumed_raw_end_ = saved_last_end;
+        pending_template_closes_ = saved_template_closes;
+    };
+    struct DefaultTemplateInstantiationScopeExit {
+        collect::Session* session = nullptr;
+        collect::Session::DefaultArgumentInstantiationScope scope;
+        ~DefaultTemplateInstantiationScopeExit() {
+            if (session) {
+                session->finish_default_argument_instantiation(
+                    std::move(scope));
+            }
+        }
+    } default_template_scope;
+    if (selected_template_info) {
+        default_template_scope.scope =
+            collect_session_.begin_default_argument_instantiation(
+                *selected_template_info,
+                replay_info.arguments,
+                selected_template_point,
+                selected_template_point_generation);
+        if (!default_template_scope.scope.active) {
+            restore_default_argument_parse_state();
+            return result;
+        }
+        default_template_scope.session = &collect_session_;
+    }
+    collect::Session::LookupGenerationCeilingScope ceiling(
+        collect_session_, default_argument->lookup_generation);
+    struct DefaultArgumentScopeExit {
+        collect::Session* session = nullptr;
+        ~DefaultArgumentScopeExit() {
+            if (session) {
+                session->leave_scope();
+            }
+        }
+    } default_argument_scope;
+    bool should_enter_default_context =
+        replay_context.valid() &&
+        default_scope_flags != collect::ScopeFlags::None;
+    if (should_enter_default_context && selected_template_info &&
+        collect_session_.file().valid(replay_context)) {
+        cir::DeclContextKind context_kind =
+            collect_session_.file()
+                .decl_context(replay_context)
+                .kind;
+        should_enter_default_context =
+            context_kind != cir::DeclContextKind::TemplateParameter &&
+            context_kind != cir::DeclContextKind::Prototype;
+    }
+    if (should_enter_default_context) {
+        collect::ScopeEnterResult entered =
+            collect_session_.enter_existing_context(
+                replay_context,
+                default_scope_flags);
+        if (entered.scope != collect::InvalidScopeId) {
+            default_argument_scope.session = &collect_session_;
+        }
+    }
+    cir::EntityId declaration_record =
+        collect_session_.enclosing_record_for_context(replay_context);
+    cir::EntityId caller_record{};
+    if (declaration_record.valid()) {
+        caller_record =
+            collect_session_.override_member_access_record(declaration_record);
+    }
+    cir::EntityId caller_function =
+        collect_session_.override_member_access_function(selected);
+    collect_session_.set_in_default_argument_replay(true, loc);
+    ParsedExpr default_expr = parse_assignment_expression();
+    collect_session_.set_in_default_argument_replay(false);
+
+    const cir::Entity& selected_entity =
+        collect_session_.file().entity(selected);
+    cir::TypeId selected_type =
+        collect_session_.file().resolved_type(selected_entity.type);
+    const auto* selected_payload =
+        collect_session_.file().valid(selected_type)
+            ? std::get_if<cir::FunctionTypePayload>(
+                  &collect_session_.file().type_payload(selected_type))
+            : nullptr;
+    const cir::RecordMethodFact* selected_method =
+        collect_session_.file().method_fact(selected);
+    size_t hidden_parameters =
+        selected_method && !selected_method->is_static ? 1 : 0;
+    size_t payload_parameter_index = hidden_parameters + parameter_index;
+    if (selected_payload &&
+        payload_parameter_index < selected_payload->parameters.size()) {
+        default_expr.sem =
+            collect_session_.initialize_default_argument(
+                std::move(default_expr.sem),
+                selected_payload->parameters[payload_parameter_index].type,
+                default_argument->loc);
+    }
+    collect_session_.override_member_access_function(caller_function);
+    if (declaration_record.valid()) {
+        collect_session_.override_member_access_record(caller_record);
+    }
+    restore_default_argument_parse_state();
+    return default_expr.sem;
+}
+
+void Parser::append_default_call_arguments(collect::ExprResult& callee,
+                                           std::vector<collect::ExprResult>& args,
+                                           SrcLoc loc) {
+    if (!lang_opts_.is_cxx_mode() ||
+        callee.category != collect::ValueCategory::FunctionDesignator) {
+        return;
+    }
+    bool type_dependent_call =
+        collect_session_.expr_is_dependent(callee);
+    for (const collect::ExprResult& argument : args) {
+        type_dependent_call =
+            type_dependent_call ||
+            collect_session_.expr_is_dependent(argument);
+    }
+    auto template_argument_is_dependent =
+        [&](const cir::TemplateArgument& argument) {
+            return argument.is_dependent ||
+                (argument.kind == cir::TemplateArgumentKind::Type &&
+                 argument.type.type.valid() &&
+                 collect_session_.is_dependent_type(argument.type.type)) ||
+                (argument.kind == cir::TemplateArgumentKind::Value &&
+                 (argument.dependent_value_expr.valid() ||
+                  (argument.value_type.type.valid() &&
+                   collect_session_.is_dependent_type(
+                       argument.value_type.type)))) ||
+                (argument.kind == cir::TemplateArgumentKind::Template &&
+                 !argument.template_entity.valid());
+        };
+    for (const cir::TemplateArgument& argument :
+         callee.explicit_template_arguments) {
+        type_dependent_call =
+            type_dependent_call ||
+            template_argument_is_dependent(argument);
+    }
+    for (const collect::CandidateExplicitTemplateArguments& candidate :
+         callee.candidate_explicit_template_arguments) {
+        if (!candidate.viable) {
+            continue;
+        }
+        for (const cir::TemplateArgument& argument :
+             candidate.arguments) {
+            type_dependent_call =
+                type_dependent_call ||
+                template_argument_is_dependent(argument);
+        }
+    }
+    if (type_dependent_call) {
+
+        return;
+    }
+    auto candidate_can_use_defaults = [&](cir::EntityId candidate) {
+        if (!candidate.valid() || !collect_session_.file().valid(candidate)) {
+            return false;
+        }
+        cir::EntityKind kind =
+            collect_session_.file().entity(candidate).kind;
+        if (kind != cir::EntityKind::Function &&
+            kind != cir::EntityKind::Method) {
+            return false;
+        }
+        const cir::RecordMethodFact* method_fact =
+            collect_session_.file().method_fact(candidate);
+        size_t hidden_parameters =
+            method_fact && !method_fact->is_static ? 1 : 0;
+        return collect_session_.callable_can_use_default_arguments(
+            candidate, args.size(), hidden_parameters);
+    };
+    bool may_use_defaults = false;
+    if (callee.candidates.empty()) {
+        may_use_defaults = candidate_can_use_defaults(callee.entity);
+    } else {
+        for (cir::EntityId candidate : callee.candidates) {
+            may_use_defaults =
+                may_use_defaults || candidate_can_use_defaults(candidate);
+        }
+    }
+    if (!may_use_defaults) {
+        return;
+    }
+
+    cir::EntityId selected =
+        collect_session_.resolve_call_overload(callee, args, loc);
+    if (!selected.valid() || !collect_session_.file().valid(selected)) {
+        return;
+    }
+    cir::EntityKind selected_kind =
+        collect_session_.file().entity(selected).kind;
+    if (selected_kind != cir::EntityKind::Function &&
+        selected_kind != cir::EntityKind::Method) {
+        return;
+    }
+    callee.entity = selected;
+    callee.type = collect_session_.file().entity(selected).type;
+    callee.candidates.clear();
+
+    const auto* payload = std::get_if<cir::FunctionTypePayload>(
+        &collect_session_.file().type_payload(
+            collect_session_.file().resolved_type(
+                collect_session_.file().entity(selected).type)));
+    if (!payload || payload->is_variadic) {
+        return;
+    }
+    const cir::RecordMethodFact* method_fact =
+        collect_session_.file().method_fact(selected);
+    size_t hidden_parameters =
+        method_fact && !method_fact->is_static ? 1 : 0;
+    if (hidden_parameters > payload->parameters.size()) {
+        return;
+    }
+    size_t visible_parameters =
+        payload->parameters.size() - hidden_parameters;
+    while (args.size() < visible_parameters) {
+        if (!collect_session_.callable_default_argument(selected,
+                                                        args.size())) {
+            break;
+        }
+        args.push_back(
+            routed_default_argument_replay(selected, args.size(), loc));
+    }
+}
+
+collect::ExprResult Parser::routed_default_argument_replay(
+    cir::EntityId selected,
+    size_t parameter_index,
+    SrcLoc loc) {
+    cir::EntityId route = module_pattern_identity(selected);
+    if (!route.valid()) {
+        route = selected;
+    }
+    if (Parser* owner = module_unit_parser_for(route)) {
+        collect::Session::ModuleVisibilityOverride visibility(
+            collect_session_,
+            collect_session_.file().entity(route).origin_unit);
+        return owner->replay_default_argument(selected, parameter_index,
+                                              loc);
+    }
+    return replay_default_argument(selected, parameter_index, loc);
+}
+
+Parser::ParsedExpr Parser::parse_postfix_expression() {
+    ParsedExpr expr;
+    if (std::optional<ParsedExpr> named_cast = parse_cxx_named_cast_expression()) {
+        expr = std::move(*named_cast);
+    } else {
+        expr = parse_primary_expression();
+    }
+
+    return parse_postfix_suffixes(std::move(expr));
+}
+
+Parser::ParsedExpressionList
+Parser::parse_expression_list(TokenType terminator) {
+    ParsedExpressionList result;
+    while (!at_end() && !check(terminator)) {
+        std::optional<PackExpansionPattern> pack_pattern =
+            lang_opts_.is_cxx_mode()
+                ? try_parse_expression_pack_expansion(terminator)
+                : std::nullopt;
+        if (pack_pattern.has_value()) {
+            result.syntax.push_back(pack_pattern->syntax);
+            result.has_dependent_pack_expansion =
+                expand_expression_pack(*pack_pattern, result.sem) ||
+                result.has_dependent_pack_expansion;
+        } else {
+            bool nested_dependent_pack_expansion = false;
+            ParsedExpr argument = check(TokenType::LEFT_BRACE)
+                ? parse_init_list_expression(
+                      &nested_dependent_pack_expansion)
+                : parse_assignment_expression();
+            result.syntax.push_back(argument.syntax);
+            result.sem.push_back(std::move(argument.sem));
+            result.has_dependent_pack_expansion =
+                result.has_dependent_pack_expansion ||
+                nested_dependent_pack_expansion;
+        }
+        if (!match(TokenType::COMMA)) {
+            break;
+        }
+    }
+    return result;
+}
+
+Parser::ParsedExpr Parser::parse_postfix_suffixes(ParsedExpr expr) {
+    while (!at_end()) {
+        if (constraint_expression_replay_end_ != SIZE_MAX &&
+            current_raw_index() >= constraint_expression_replay_end_) {
+            break;
+        }
+        if (declaration_attributes_terminate_template_head_constraint()) {
+            break;
+        }
+        if (match(TokenType::LEFT_PAREN)) {
+            size_t begin = tree_.node(expr.syntax).tokens.begin;
+            SrcLoc loc = last_consumed_loc();
+            std::vector<NodeId> children{expr.syntax};
+            ParsedExpressionList arguments =
+                parse_expression_list(TokenType::RIGHT_PAREN);
+            children.insert(children.end(), arguments.syntax.begin(),
+                            arguments.syntax.end());
+            std::vector<collect::ExprResult> sem_args =
+                std::move(arguments.sem);
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error, "expected ')' after call arguments", current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::CallExpr, begin, last_consumed_raw_end(), children);
+            if (lang_opts_.is_cxx_mode() &&
+                expr.sem.category == collect::ValueCategory::Type &&
+                !expr.sem.type.valid() && expr.sem.entity.valid()) {
+                const collect::Session::TemplateInfo* placeholder =
+                    collect_session_.template_info(expr.sem.entity);
+                if (placeholder &&
+                    (placeholder->is_class_template ||
+                     placeholder->is_alias_template)) {
+                    cir::TypeId deduced =
+                        deduce_class_template_initialization_type(
+                            *placeholder,
+                            sem_args,
+                            loc,
+                            CtadInitializationKind::Direct);
+                    collect::ExprResult sem;
+                    if (deduced.valid()) {
+                        (void)collect_session_.require_complete_class_type(
+                            deduced,
+                            loc,
+                            cir::InstantiationDemandKind::CompleteClass);
+                        sem = collect_session_.collect_functional_cast(
+                            deduced, std::move(sem_args), loc);
+                    } else {
+                        sem.has_error = true;
+                    }
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                    continue;
+                }
+            }
+            if (lang_opts_.is_cxx_mode() &&
+                expr.sem.category == collect::ValueCategory::Type &&
+                expr.sem.type.valid()) {
+
+                collect::ExprResult sem =
+                    collect_session_.collect_functional_cast(
+                        expr.sem.type, std::move(sem_args), loc);
+                expr = ParsedExpr{syntax, std::move(sem)};
+                continue;
+            }
+
+            if (lang_opts_.is_cxx_mode()) {
+                std::vector<const collect::Session::TemplateInfo*> placeholders;
+                std::vector<cir::EntityId> others;
+                std::string template_name;
+
+                std::vector<cir::EntityId> pot;
+                if (expr.sem.candidates.empty()) {
+                    if (expr.sem.entity.valid()) {
+                        pot.push_back(expr.sem.entity);
+                    }
+                } else {
+                    pot = expr.sem.candidates;
+                }
+                if (!expr.sem.qualified_name &&
+                    !expr.sem.suppress_argument_dependent_lookup &&
+                    !expr.sem.name.empty()) {
+                    collect_session_.add_adl_candidates(expr.sem.name,
+                                                        sem_args,
+                                                        pot);
+                }
+                auto sort_candidate = [&](cir::EntityId candidate) {
+                    if (!candidate.valid()) {
+                        return;
+                    }
+                    const collect::Session::TemplateInfo* info =
+                        collect_session_.template_info(candidate);
+                    if (info &&
+                        !info->is_class_template &&
+                        !info->is_alias_template &&
+                        !info->is_variable_template &&
+                        !info->is_concept) {
+                        placeholders.push_back(info);
+                        template_name = info->name;
+                    } else {
+                        others.push_back(candidate);
+                    }
+                };
+                for (cir::EntityId candidate : pot) {
+                    sort_candidate(candidate);
+                }
+                if (!placeholders.empty()) {
+                    std::vector<cir::EntityId> mixed = std::move(others);
+                    auto mark_template_call_dependent = [&] {
+                        expr.sem.type =
+                            collect_session_.file().dependent_type(
+                                "dependent function template call");
+                        expr.sem.category =
+                            collect::ValueCategory::Dependent;
+                        expr.sem.unresolved_unqualified_name = false;
+                        expr.sem.has_error = false;
+                    };
+                    auto argument_is_unresolved_template_designator =
+                        [&](const collect::ExprResult& argument) {
+                            if (argument.category !=
+                                collect::ValueCategory::FunctionDesignator) {
+                                return false;
+                            }
+                            if (argument.entity.valid() &&
+                                collect_session_.template_info(
+                                    argument.entity)) {
+                                return true;
+                            }
+                            return std::any_of(
+                                argument.candidates.begin(),
+                                argument.candidates.end(),
+                                [&](cir::EntityId designator) {
+                                    return collect_session_.template_info(
+                                               designator) != nullptr;
+                                });
+                        };
+                    bool call_has_dependent_argument = std::any_of(
+                        expr.sem.explicit_template_arguments.begin(),
+                        expr.sem.explicit_template_arguments.end(),
+                        [&](const collect::Session::TemplateArgument& argument) {
+                            return template_argument_is_dependent(
+                                collect_session_, argument);
+                        });
+                    for (const collect::CandidateExplicitTemplateArguments&
+                             candidate :
+                         expr.sem.candidate_explicit_template_arguments) {
+                        if (!candidate.viable) {
+                            continue;
+                        }
+                        call_has_dependent_argument =
+                            call_has_dependent_argument ||
+                            std::any_of(
+                                candidate.arguments.begin(),
+                                candidate.arguments.end(),
+                                [&](const collect::Session::TemplateArgument&
+                                        argument) {
+                                    return template_argument_is_dependent(
+                                        collect_session_, argument);
+                                });
+                    }
+                    for (const collect::ExprResult& argument : sem_args) {
+
+                        bool unresolved_function_template_designator =
+                            argument_is_unresolved_template_designator(
+                                argument);
+                        if (argument.category ==
+                                collect::ValueCategory::Dependent ||
+                            (!unresolved_function_template_designator &&
+                             (collect_session_.expr_is_dependent(argument) ||
+                              (argument.type.valid() &&
+                               collect_session_.type_contains_type_param(
+                                   argument.type))))) {
+                            call_has_dependent_argument = true;
+                            break;
+                        }
+                    }
+                    if (call_has_dependent_argument) {
+                        mark_template_call_dependent();
+                    } else {
+                        bool deduction_remains_dependent = false;
+                        for (const collect::Session::TemplateInfo* info :
+                             placeholders) {
+
+                            ConstraintSubstitutionFailureIsolation
+                                candidate_failure(*this);
+                            std::vector<collect::Session::TemplateArgument>
+                                deduced;
+                            collect::Session::TemplateArgumentBindings
+                                deduced_bindings;
+                            const std::vector<
+                                collect::Session::TemplateArgument>*
+                                explicit_arguments = nullptr;
+                            if (expr.sem
+                                    .has_explicit_template_arguments) {
+                                explicit_arguments =
+                                    &expr.sem
+                                         .explicit_template_arguments;
+                                auto candidate_arguments =
+                                    std::find_if(
+                                        expr.sem
+                                            .candidate_explicit_template_arguments
+                                            .begin(),
+                                        expr.sem
+                                            .candidate_explicit_template_arguments
+                                            .end(),
+                                        [&](const collect::
+                                                CandidateExplicitTemplateArguments&
+                                                candidate) {
+                                            return candidate
+                                                       .template_entity ==
+                                                info->entity;
+                                        });
+                                if (candidate_arguments !=
+                                    expr.sem
+                                        .candidate_explicit_template_arguments
+                                        .end()) {
+                                    if (!candidate_arguments->viable) {
+                                        continue;
+                                    }
+                                    explicit_arguments =
+                                        &candidate_arguments->arguments;
+                                }
+                            }
+                            collect::Session::PatternInstantiationCallbacks
+                                callbacks;
+                            configure_pattern_instantiation_callbacks(
+                                callbacks, loc);
+                            if (!collect_session_.deduce_template_arguments(
+                                    *info,
+                                    sem_args,
+                                    deduced,
+                                    explicit_arguments,
+                                    &callbacks,
+                                    &deduced_bindings)) {
+                                continue;
+                            }
+                            // Defaults can bind a member-template parameter
+                            // to an enclosing class-template parameter even
+                            // when the call has no written arguments. Such a
+                            // candidate cannot participate in definition-time
+                            // overload resolution: its SFINAE surface changes
+                            // with the enclosing specialization.
+                            if (std::any_of(
+                                    deduced.begin(),
+                                    deduced.end(),
+                                    [&](const collect::Session::
+                                            TemplateArgument& argument) {
+                                        return template_argument_is_dependent(
+                                            collect_session_, argument);
+                                    })) {
+                                deduction_remains_dependent = true;
+                                continue;
+                            }
+
+                            cir::TypeId pattern_resolved =
+                                collect_session_.file().resolved_type(
+                                    info->pattern_type);
+                            const auto* pattern_function =
+                                collect_session_.file().valid(
+                                    pattern_resolved) &&
+                                        collect_session_.file().type(
+                                            pattern_resolved).kind ==
+                                            cir::TypeKind::Function
+                                    ? std::get_if<cir::FunctionTypePayload>(
+                                          &collect_session_.file()
+                                               .type_payload(pattern_resolved))
+                                    : nullptr;
+                            if (pattern_function &&
+                                (collect_session_.is_dependent_type(
+                                     pattern_function->return_type.type) ||
+                                 collect_session_
+                                     .type_contains_dependent_alias_specialization(
+                                         pattern_function->return_type.type))) {
+                                // This probe only decides whether the candidate
+                                // signature remains dependent. A class in the
+                                // substituted return type is not otherwise
+                                // required to be complete, and the candidate
+                                // might never be selected by overload
+                                // resolution.
+                                callbacks.materialize_type_template_definition =
+                                    false;
+                                cir::TypeId substituted_pattern_type =
+                                    collect_session_.substitute_pattern_type(
+                                        info->pattern_type,
+                                        deduced_bindings,
+                                        callbacks);
+                                cir::TypeId substituted_resolved =
+                                    collect_session_.file().resolved_type(
+                                        substituted_pattern_type);
+                                const auto* substituted_function =
+                                    substituted_pattern_type.valid() &&
+                                            collect_session_.file().valid(
+                                                substituted_resolved) &&
+                                            collect_session_.file().type(
+                                                substituted_resolved).kind ==
+                                                cir::TypeKind::Function
+                                        ? std::get_if<
+                                              cir::FunctionTypePayload>(
+                                              &collect_session_.file()
+                                                   .type_payload(
+                                                       substituted_resolved))
+                                        : nullptr;
+                                if (substituted_function &&
+                                    (collect_session_.is_dependent_type(
+                                         substituted_function->return_type
+                                             .type) ||
+                                     collect_session_
+                                         .type_contains_dependent_alias_specialization(
+                                             substituted_function->return_type
+                                                 .type))) {
+                                    deduction_remains_dependent = true;
+                                    continue;
+                                }
+                            }
+                            if (!check_template_associated_constraints(
+                                    *info,
+                                    deduced,
+                                    loc,
+                                    callbacks.point_lookup_generation,
+                                    /*diagnose_unsatisfied=*/false,
+                                    &deduced_bindings)) {
+                                continue;
+                            }
+                            cir::EntityId instantiated =
+                                form_function_template_candidate(
+                                    *info,
+                                    deduced_bindings,
+                                    loc,
+                                    callbacks.point_lookup_generation);
+                            if (instantiated.valid()) {
+                                mixed.push_back(instantiated);
+                            }
+                        }
+                        if (deduction_remains_dependent) {
+                            mark_template_call_dependent();
+                        } else if (mixed.empty()) {
+
+                            std::string message =
+                                "no matching function for call to '" +
+                                template_name +
+                                "': template argument deduction failed";
+                            if (expr.sem.has_explicit_template_arguments) {
+                                for (const collect::Session::TemplateInfo*
+                                         info : placeholders) {
+                                    const auto* candidate_arguments =
+                                        &expr.sem
+                                             .explicit_template_arguments;
+                                    auto candidate = std::find_if(
+                                        expr.sem
+                                            .candidate_explicit_template_arguments
+                                            .begin(),
+                                        expr.sem
+                                            .candidate_explicit_template_arguments
+                                            .end(),
+                                        [&](const collect::
+                                                CandidateExplicitTemplateArguments&
+                                                entry) {
+                                            return entry.template_entity ==
+                                                info->entity;
+                                        });
+                                    if (candidate !=
+                                        expr.sem
+                                            .candidate_explicit_template_arguments
+                                            .end()) {
+                                        if (!candidate->viable) {
+                                            continue;
+                                        }
+                                        candidate_arguments =
+                                            &candidate->arguments;
+                                    }
+                                    collect::Session::TemplateArgumentBindings
+                                        bindings;
+                                    collect::Session::
+                                        TemplateArgumentBindingFailure failure;
+                                    if (!collect_session_
+                                             .bind_explicit_template_arguments_prefix_to_parameters(
+                                                 info->parameters,
+                                                 *candidate_arguments,
+                                                 bindings,
+                                                 &failure,
+                                                 collect::Session::
+                                                     TemplateArgumentBindingMode::
+                                                         FunctionExplicitPrefix)) {
+                                        message =
+                                            format_template_argument_binding_failure(
+                                                *info,
+                                                failure);
+                                        break;
+                                    }
+                                }
+                            }
+                            diagnose(DiagnosticLevel::Error,
+                                     std::move(message),
+                                     loc);
+                            collect::ExprResult error_sem;
+                            error_sem.has_error = true;
+                            expr = ParsedExpr{syntax, std::move(error_sem)};
+                            continue;
+                        } else {
+                            if (!expr.sem.entity.valid()) {
+
+                                expr.sem.fragment = {};
+                                expr.sem.value = {};
+                            }
+                            expr.sem.entity = mixed.back();
+                            expr.sem.type =
+                                collect_session_.file().entity(mixed.back())
+                                    .type;
+                            expr.sem.category =
+                                collect::ValueCategory::FunctionDesignator;
+                            expr.sem.candidates =
+                                mixed.size() > 1
+                                    ? std::move(mixed)
+                                    : std::vector<cir::EntityId>{};
+                        }
+                    }
+                } else if (!others.empty() &&
+                           (expr.sem.category ==
+                                collect::ValueCategory::FunctionDesignator ||
+                            expr.sem.unresolved_unqualified_name)) {
+
+                    if (!expr.sem.entity.valid()) {
+                        expr.sem.fragment = {};
+                        expr.sem.value = {};
+                    }
+                    expr.sem.entity = others.back();
+                    expr.sem.type = collect_session_.file()
+                                            .entity(others.back())
+                                            .type;
+                    expr.sem.category =
+                        collect::ValueCategory::FunctionDesignator;
+                    expr.sem.candidates = others.size() > 1
+                        ? std::move(others)
+                        : std::vector<cir::EntityId>{};
+                }
+            }
+            append_default_call_arguments(expr.sem, sem_args, loc);
+            collect::ExprResult sem =
+                collect_session_.collect_call_expr(std::move(expr.sem), std::move(sem_args), loc);
+            expr = ParsedExpr{syntax, std::move(sem)};
+            continue;
+        }
+        if (lang_opts_.is_cxx_mode() &&
+            expr.sem.category == collect::ValueCategory::Type &&
+            check(TokenType::LEFT_BRACE)) {
+            size_t begin = tree_.node(expr.syntax).tokens.begin;
+            SrcLoc loc = current_loc();
+            ParsedExpr initializer = parse_init_list_expression();
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {expr.syntax, initializer.syntax});
+            std::vector<collect::ExprResult> args;
+            args.push_back(std::move(initializer.sem));
+            cir::TypeId target_type = expr.sem.type;
+            if (!target_type.valid() && lang_opts_.is_cxx_mode() &&
+                expr.sem.entity.valid()) {
+                const collect::Session::TemplateInfo* placeholder =
+                    collect_session_.template_info(expr.sem.entity);
+                if (placeholder &&
+                    (placeholder->is_class_template ||
+                     placeholder->is_alias_template)) {
+                    std::vector<collect::ExprResult> deduction_arguments;
+                    if (args.front().init_list) {
+                        for (const collect::InitElementInput& element :
+                             args.front().init_list->elements) {
+                            if (element.designators.empty()) {
+                                deduction_arguments.push_back(element.value);
+                            }
+                        }
+                    }
+                    target_type = deduce_class_template_initialization_type(
+                        *placeholder,
+                        deduction_arguments,
+                        loc,
+                        CtadInitializationKind::Direct,
+                        &args.front());
+                    if (target_type.valid()) {
+                        (void)collect_session_.require_complete_class_type(
+                            target_type,
+                            loc,
+                            cir::InstantiationDemandKind::CompleteClass);
+                    }
+                }
+            }
+            collect::ExprResult sem =
+                collect_session_.collect_functional_cast(target_type,
+                                                         std::move(args),
+                                                         loc,
+                                                         collect::InitListSyntax::Braced);
+            expr = ParsedExpr{syntax, std::move(sem)};
+            continue;
+        }
+        if (match(TokenType::LEFT_BRACKET)) {
+            size_t begin = tree_.node(expr.syntax).tokens.begin;
+            SrcLoc loc = last_consumed_loc();
+            ParsedExpr index = parse_expression();
+            if (!match(TokenType::RIGHT_BRACKET)) {
+                diagnose(DiagnosticLevel::Error, "expected ']' after array subscript", current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::ArraySubscriptExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {expr.syntax, index.syntax});
+            collect::ExprResult sem =
+                collect_session_.collect_array_subscript_expr(std::move(expr.sem),
+                                                              std::move(index.sem),
+                                                              loc);
+            expr = ParsedExpr{syntax, std::move(sem)};
+            continue;
+        }
+        if (check(TokenType::DOT) || check(TokenType::ARROW)) {
+            bool is_arrow = check(TokenType::ARROW);
+            Token op = current();
+            size_t begin = tree_.node(expr.syntax).tokens.begin;
+            consume();
+            bool has_template_keyword = false;
+            if (lang_opts_.is_cxx_mode() && check(TokenType::TEMPLATE)) {
+                has_template_keyword = true;
+                consume();
+            }
+            auto parse_explicit_destructor_call =
+                [&](cir::TypeId qualifier_type,
+                    bool is_qualified) -> bool {
+                    if (!lang_opts_.is_cxx_mode() ||
+                        !match(TokenType::BITWISE_NOT)) {
+                        return false;
+                    }
+                    SrcLoc destructor_loc = last_consumed_loc();
+                    size_t destructor_begin = last_consumed_raw_index();
+                    if (has_template_keyword) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "template disambiguator cannot precede a destructor name",
+                                 destructor_loc);
+                    }
+                    if (!is_identifier_token(current().type)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected type name after '~'",
+                                 current_loc());
+                        return true;
+                    }
+                    Token type_name = current();
+                    consume();
+                    cir::TypeId named_type{};
+                    if (check(TokenType::LESS_THAN)) {
+                        const collect::Session::TemplateInfo* info =
+                            collect_session_.template_info_for_name(
+                                type_name.value);
+                        if (info && info->is_class_template) {
+                            cir::EntityId specialization =
+                                instantiate_template(*info, type_name.loc);
+                            if (specialization.valid() &&
+                                collect_session_.file().valid(
+                                    specialization)) {
+                                named_type = collect_session_.file()
+                                    .entity(specialization).type;
+                            }
+                        } else {
+                            diagnose(DiagnosticLevel::Error,
+                                     "destructor template-id does not name a class template",
+                                     type_name.loc);
+                            (void)parse_dependent_expression_template_argument_list(
+                                type_name.loc);
+                        }
+                    } else {
+                        named_type = collect_session_.lookup_type_name(
+                            type_name.value);
+                    }
+                    if (!named_type.valid() && qualifier_type.valid()) {
+                        cir::EntityId record = collect_session_.file()
+                            .record_entity(qualifier_type);
+                        if (record.valid() &&
+                            collect_session_.file().entity(record).name.valid() &&
+                            collect_session_.file().name(
+                                collect_session_.file().entity(record).name) ==
+                                type_name.value) {
+                            named_type = qualifier_type;
+                        }
+                    }
+                    if (!named_type.valid()) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "unknown type name in explicit destructor call",
+                                 type_name.loc);
+                    }
+                    bool syntax_error = false;
+                    if (!match(TokenType::LEFT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected '(' after destructor name",
+                                 current_loc());
+                        syntax_error = true;
+                    } else if (!check(TokenType::RIGHT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "destructor call cannot have arguments",
+                                 current_loc());
+                        syntax_error = true;
+                        int depth = 1;
+                        while (!at_end() && depth > 0) {
+                            TokenType type = current().type;
+                            consume();
+                            if (type == TokenType::LEFT_PAREN) ++depth;
+                            if (type == TokenType::RIGHT_PAREN) --depth;
+                        }
+                    } else {
+                        consume();
+                    }
+                    collect::ExprResult sem =
+                        collect_session_.collect_explicit_destructor_call(
+                            std::move(expr.sem), named_type, qualifier_type,
+                            is_arrow, is_qualified, destructor_loc);
+                    sem.has_error = sem.has_error || syntax_error ||
+                        !named_type.valid();
+                    NodeId name = make_node(
+                        NodeKind::Name, destructor_begin,
+                        last_consumed_raw_end(), {},
+                        text_payload("~" + std::string(type_name.value)),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone);
+                    NodeId syntax = make_node(
+                        NodeKind::CallExpr, begin, last_consumed_raw_end(),
+                        {expr.syntax, name},
+                        text_payload(std::string(op.value) +
+                                     "~" + std::string(type_name.value)),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone,
+                        is_arrow ? 1 : 0);
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                    return true;
+                };
+            if (parse_explicit_destructor_call({}, false)) {
+                continue;
+            }
+            if (lang_opts_.is_cxx_mode() &&
+                check(TokenType::OPERATOR_KW)) {
+                size_t member_begin = current_raw_index();
+                if (starts_conversion_function_id()) {
+                    ParsedConversionFunctionId conversion_id =
+                        *parse_conversion_function_id();
+                    bool has_error = conversion_id.has_error;
+                    if (has_template_keyword) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "template disambiguator cannot precede a conversion-function-id",
+                            conversion_id.loc);
+                        has_error = true;
+                    }
+                    collect::ExprResult sem = collect_session_
+                        .collect_conversion_function_id_access_expr(
+                            std::move(expr.sem),
+                            conversion_id.target_type,
+                            is_arrow,
+                            op.loc);
+                    sem.has_error = sem.has_error || has_error;
+                    sem.unparenthesized_id_or_member = true;
+                    NodeId member = make_node(
+                        NodeKind::Name,
+                        member_begin,
+                        last_consumed_raw_end(),
+                        conversion_id.type_syntax != InvalidNodeId
+                            ? std::vector<NodeId>{conversion_id.type_syntax}
+                            : std::vector<NodeId>{},
+                        text_payload(conversion_id.name),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone);
+                    NodeId syntax = make_node(
+                        NodeKind::MemberExpr,
+                        begin,
+                        last_consumed_raw_end(),
+                        {expr.syntax, member},
+                        text_payload(std::string(op.value) +
+                                     conversion_id.name),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone,
+                        is_arrow ? 1 : 0);
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                    continue;
+                }
+                ParsedOperatorFunctionId operator_id =
+                    *parse_operator_function_id();
+                collect::ExprResult sem;
+                bool has_error = operator_id.has_error;
+                if (has_template_keyword &&
+                    !check(TokenType::LESS_THAN)) {
+                    diagnose(
+                        DiagnosticLevel::Error,
+                        "template disambiguator requires a template argument list",
+                        operator_id.loc);
+                    has_error = true;
+                }
+
+                if (check(TokenType::LESS_THAN)) {
+                    const collect::Session::TemplateInfo* info =
+                        collect_session_.member_template_info_for_access(
+                            expr.sem, operator_id.name, is_arrow);
+                    if (info) {
+                        std::vector<collect::Session::TemplateArgument>
+                            arguments;
+                        cir::DeclContextId context =
+                            info->entity.valid() &&
+                                    collect_session_.file().valid(info->entity)
+                                ? collect_session_.file()
+                                      .entity(info->entity)
+                                      .semantic_context
+                                : cir::DeclContextId{};
+                        std::vector<const collect::Session::TemplateInfo*>
+                            candidates =
+                                collect_session_.function_template_infos_for_name(
+                                    context,
+                                    operator_id.name,
+                                    /*include_parents=*/false);
+                        std::vector<
+                            collect::CandidateExplicitTemplateArguments>
+                            candidate_arguments;
+                        bool parsed =
+                            parse_function_template_argument_list_for_candidates(
+                                *info,
+                                candidates,
+                                arguments,
+                                candidate_arguments,
+                                operator_id.loc);
+                        std::vector<cir::EntityId> candidate_entities;
+                        for (const auto* candidate : candidates) {
+                            auto replayed = candidate
+                                ? std::find_if(
+                                      candidate_arguments.begin(),
+                                      candidate_arguments.end(),
+                                      [&](const collect::
+                                              CandidateExplicitTemplateArguments&
+                                              entry) {
+                                          return entry.template_entity ==
+                                              candidate->entity;
+                                      })
+                                : candidate_arguments.end();
+                            if (candidate && candidate->entity.valid() &&
+                                (replayed == candidate_arguments.end() ||
+                                 replayed->viable)) {
+                                candidate_entities.push_back(
+                                    candidate->entity);
+                            }
+                        }
+                        sem = collect_session_
+                                  .collect_resolved_member_function_access_expr(
+                                      std::move(expr.sem),
+                                      std::move(candidate_entities),
+                                      operator_id.name,
+                                      is_arrow,
+                                      op.loc);
+                        sem.has_explicit_template_arguments = true;
+                        sem.explicit_template_arguments =
+                            std::move(arguments);
+                        sem.candidate_explicit_template_arguments =
+                            std::move(candidate_arguments);
+                        sem.has_error = sem.has_error || has_error || !parsed;
+                    } else if (collect_session_.expr_is_dependent(expr.sem)) {
+                        if (!has_template_keyword) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "missing 'template' disambiguator before dependent template name",
+                                operator_id.loc);
+                            has_error = true;
+                        }
+                        bool parsed =
+                            parse_dependent_expression_template_argument_list(
+                                operator_id.loc);
+                        collect::ExprResult dependent = std::move(expr.sem);
+                        dependent.type = collect_session_.file().dependent_type(
+                            "dependent member operator template-id");
+                        dependent.name = operator_id.name;
+                        dependent.category =
+                            collect::ValueCategory::Dependent;
+                        dependent.has_error =
+                            dependent.has_error || has_error || !parsed;
+                        sem = collect_session_.make_dependent_expr(
+                            std::move(dependent), operator_id.loc);
+                    } else {
+                        diagnose(DiagnosticLevel::Error,
+                                 "operator template-id names a non-template member",
+                                 operator_id.loc);
+                        (void)parse_dependent_expression_template_argument_list(
+                            operator_id.loc);
+                        sem = collect_session_.collect_member_access_expr(
+                            std::move(expr.sem),
+                            operator_id.name,
+                            is_arrow,
+                            op.loc);
+                        sem.has_error = true;
+                    }
+                } else {
+                    sem = collect_session_.collect_member_access_expr(
+                        std::move(expr.sem),
+                        operator_id.name,
+                        is_arrow,
+                        op.loc);
+                    sem.has_error = sem.has_error || has_error;
+                }
+                sem.unparenthesized_id_or_member = true;
+                NodeId member = make_node(
+                    NodeKind::Name,
+                    member_begin,
+                    last_consumed_raw_end(),
+                    {},
+                    text_payload(operator_id.name),
+                    sem.has_error ? NodeFlagHasError : NodeFlagNone);
+                NodeId syntax = make_node(
+                    NodeKind::MemberExpr,
+                    begin,
+                    last_consumed_raw_end(),
+                    {expr.syntax, member},
+                    text_payload(std::string(op.value) + operator_id.name),
+                    sem.has_error ? NodeFlagHasError : NodeFlagNone,
+                    is_arrow ? 1 : 0);
+                expr = ParsedExpr{syntax, std::move(sem)};
+                continue;
+            }
+            if (!is_identifier_token(current().type)) {
+                diagnose(DiagnosticLevel::Error, "expected member name", current_loc());
+                break;
+            }
+            auto finish_invalid_template_member =
+                [&](Token terminal,
+                    size_t member_begin,
+                    std::string message,
+                    bool consume_template_arguments) {
+                    if (!expr.sem.has_error) {
+                        diagnose(DiagnosticLevel::Error,
+                                 std::move(message),
+                                 terminal.loc);
+                    }
+                    consume();
+                    if (consume_template_arguments) {
+                        (void)parse_dependent_expression_template_argument_list(
+                            terminal.loc);
+                    }
+                    collect::ExprResult sem = std::move(expr.sem);
+                    sem.type = collect_session_.file().unknown_type();
+                    sem.name = std::string(terminal.value);
+                    sem.category = collect::ValueCategory::Dependent;
+                    sem.qualified_name = true;
+                    sem.has_error = true;
+                    sem.unparenthesized_id_or_member = true;
+                    NodeId member = make_node(
+                        NodeKind::Name, member_begin, last_consumed_raw_end(),
+                        {}, text_payload(std::string(terminal.value)),
+                        NodeFlagHasError);
+                    NodeId syntax = make_node(
+                        NodeKind::MemberExpr, begin, last_consumed_raw_end(),
+                        {expr.syntax, member},
+                        text_payload(std::string(op.value) + std::string(terminal.value)),
+                        NodeFlagHasError,
+                        is_arrow ? 1 : 0);
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                };
+            if (has_template_keyword &&
+                peek(1).type != TokenType::LESS_THAN) {
+                size_t member_begin = current_raw_index();
+                Token terminal = current();
+                finish_invalid_template_member(
+                    terminal,
+                    member_begin,
+                    "template disambiguator requires a template argument list",
+                    /*consume_template_arguments=*/false);
+                continue;
+            }
+            if (lang_opts_.is_cxx_mode() &&
+                peek(1).type == TokenType::LESS_THAN) {
+                size_t member_begin = current_raw_index();
+                Token terminal = current();
+                const collect::Session::TemplateInfo* info =
+                    collect_session_.member_template_info_for_access(
+                        expr.sem, terminal.value, is_arrow);
+                if (info) {
+                    consume();
+                    std::vector<collect::Session::TemplateArgument> arguments;
+                    cir::DeclContextId context =
+                        info->entity.valid() &&
+                                collect_session_.file().valid(info->entity)
+                            ? collect_session_.file()
+                                  .entity(info->entity)
+                                  .semantic_context
+                            : cir::DeclContextId{};
+                    std::vector<const collect::Session::TemplateInfo*>
+                        candidates =
+                            collect_session_.function_template_infos_for_name(
+                                context,
+                                terminal.value,
+                                /*include_parents=*/false);
+                    std::vector<
+                        collect::CandidateExplicitTemplateArguments>
+                        candidate_arguments;
+                    bool parsed =
+                        parse_function_template_argument_list_for_candidates(
+                            *info,
+                            candidates,
+                            arguments,
+                            candidate_arguments,
+                            terminal.loc);
+                    std::vector<cir::EntityId> candidate_entities;
+                    for (const auto* candidate : candidates) {
+                        auto replayed = candidate
+                            ? std::find_if(
+                                  candidate_arguments.begin(),
+                                  candidate_arguments.end(),
+                                  [&](const collect::
+                                          CandidateExplicitTemplateArguments&
+                                          entry) {
+                                      return entry.template_entity ==
+                                          candidate->entity;
+                                  })
+                            : candidate_arguments.end();
+                        if (candidate && candidate->entity.valid() &&
+                            (replayed == candidate_arguments.end() ||
+                             replayed->viable)) {
+                            candidate_entities.push_back(
+                                candidate->entity);
+                        }
+                    }
+                    collect::ExprResult sem =
+                        collect_session_
+                            .collect_resolved_member_function_access_expr(
+                                std::move(expr.sem),
+                                std::move(candidate_entities),
+                                terminal.value, is_arrow, op.loc);
+                    sem.has_explicit_template_arguments = true;
+                    sem.explicit_template_arguments = std::move(arguments);
+                    sem.candidate_explicit_template_arguments =
+                        std::move(candidate_arguments);
+                    sem.has_error = sem.has_error || !parsed;
+                    sem.unparenthesized_id_or_member = true;
+                    NodeId member = make_node(
+                        NodeKind::Name, member_begin, last_consumed_raw_end(), {},
+                        text_payload(std::string(terminal.value)),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone);
+                    NodeId syntax = make_node(
+                        NodeKind::MemberExpr, begin, last_consumed_raw_end(),
+                        {expr.syntax, member},
+                        text_payload(std::string(op.value) + std::string(terminal.value)),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone,
+                        is_arrow ? 1 : 0);
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                    continue;
+                }
+                if (has_template_keyword &&
+                    collect_session_.expr_is_dependent(expr.sem)) {
+                    consume();
+                    bool parsed =
+                        parse_dependent_expression_template_argument_list(
+                            terminal.loc);
+                    collect::ExprResult dependent = std::move(expr.sem);
+                    dependent.type = collect_session_.file().dependent_type(
+                        "dependent member template-id");
+                    dependent.name = std::string(terminal.value);
+                    dependent.category = collect::ValueCategory::Dependent;
+                    dependent.has_error = dependent.has_error || !parsed;
+                    collect::ExprResult sem =
+                        collect_session_.make_dependent_expr(
+                            std::move(dependent), terminal.loc);
+                    sem.unparenthesized_id_or_member = true;
+                    NodeId member = make_node(
+                        NodeKind::Name, member_begin, last_consumed_raw_end(), {},
+                        text_payload(std::string(terminal.value)),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone);
+                    NodeId syntax = make_node(
+                        NodeKind::MemberExpr, begin, last_consumed_raw_end(),
+                        {expr.syntax, member},
+                        text_payload(std::string(op.value) + std::string(terminal.value)),
+                        sem.has_error ? NodeFlagHasError : NodeFlagNone,
+                        is_arrow ? 1 : 0);
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                    continue;
+                }
+                if (has_template_keyword) {
+                    finish_invalid_template_member(
+                        terminal,
+                        member_begin,
+                        "template disambiguator names a non-template",
+                        /*consume_template_arguments=*/true);
+                    continue;
+                }
+                if (!has_template_keyword &&
+                    collect_session_.expr_is_dependent(expr.sem) &&
+                    template_id_precedes_call(0)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "missing 'template' disambiguator before dependent template name",
+                             terminal.loc);
+                    consume();
+                    bool parsed =
+                        parse_dependent_expression_template_argument_list(
+                            terminal.loc);
+                    (void)parsed;
+                    collect::ExprResult dependent = std::move(expr.sem);
+                    dependent.type = collect_session_.file().dependent_type(
+                        "dependent member template-id");
+                    dependent.name = std::string(terminal.value);
+                    dependent.category = collect::ValueCategory::Dependent;
+                    dependent.has_error = true;
+                    collect::ExprResult sem =
+                        collect_session_.make_dependent_expr(
+                            std::move(dependent), terminal.loc);
+                    sem.unparenthesized_id_or_member = true;
+                    NodeId member = make_node(
+                        NodeKind::Name, member_begin, last_consumed_raw_end(), {},
+                        text_payload(std::string(terminal.value)),
+                        NodeFlagHasError);
+                    NodeId syntax = make_node(
+                        NodeKind::MemberExpr, begin, last_consumed_raw_end(),
+                        {expr.syntax, member},
+                        text_payload(std::string(op.value) + std::string(terminal.value)),
+                        NodeFlagHasError,
+                        is_arrow ? 1 : 0);
+                    expr = ParsedExpr{syntax, std::move(sem)};
+                    continue;
+                }
+            }
+
+            if (lang_opts_.is_cxx_mode() &&
+                ((peek(1).type == TokenType::SCOPE_RESOLUTION &&
+                  peek(2).type == TokenType::BITWISE_NOT) ||
+                 (peek(1).type == TokenType::LESS_THAN &&
+                  template_id_precedes_scope(0)))) {
+                cir::TypeId qualifier_type =
+                    collect_session_.lookup_type_name(current().value);
+                if (peek(1).type == TokenType::LESS_THAN) {
+                    ParsedNestedName nested = parse_nested_name_specifier();
+                    qualifier_type = nested.scope.entity.valid()
+                        ? collect_session_.file()
+                              .entity(nested.scope.entity).type
+                        : cir::TypeId{};
+                } else if (qualifier_type.valid()) {
+                    consume();
+                    consume();
+                }
+                if (qualifier_type.valid() &&
+                    parse_explicit_destructor_call(qualifier_type, true)) {
+                    continue;
+                }
+            }
+            if (lang_opts_.is_cxx_mode() &&
+                peek(1).type == TokenType::SCOPE_RESOLUTION &&
+                peek(2).type != TokenType::MULTIPLY) {
+                ParsedNestedName nested = parse_nested_name_specifier();
+                std::string member_name = "<member>";
+                collect::ExprResult sem;
+                cir::TypeId qualifier_type =
+                    nested.scope.entity.valid()
+                        ? collect_session_.file()
+                              .entity(nested.scope.entity).type
+                        : nested.scope.dependent_type.type;
+                if (parse_explicit_destructor_call(qualifier_type, true)) {
+                    continue;
+                }
+                if (check(TokenType::OPERATOR_KW)) {
+                    if (starts_conversion_function_id()) {
+                        ParsedConversionFunctionId conversion_id =
+                            *parse_conversion_function_id();
+                        member_name = conversion_id.name;
+                        sem = collect_session_
+                            .collect_conversion_function_id_access_expr(
+                                std::move(expr.sem),
+                                conversion_id.target_type,
+                                is_arrow,
+                                op.loc,
+                                qualifier_type);
+                        sem.has_error = sem.has_error || nested.has_error ||
+                                        conversion_id.has_error;
+                        sem.unparenthesized_id_or_member = true;
+                    } else {
+                        ParsedOperatorFunctionId operator_id =
+                            *parse_operator_function_id();
+                        member_name = std::move(operator_id.name);
+                        const collect::Session::TemplateInfo* info = nullptr;
+                        if (check(TokenType::LESS_THAN) &&
+                            qualifier_type.valid()) {
+                            cir::EntityId qualifier_record =
+                                collect_session_.file().record_entity(
+                                    qualifier_type);
+                            if (qualifier_record.valid() &&
+                                collect_session_.file().valid(
+                                    qualifier_record)) {
+                                info =
+                                    collect_session_.template_info_in_context(
+                                        collect_session_.file()
+                                            .entity(qualifier_record)
+                                            .semantic_context,
+                                        member_name,
+                                        /*include_parents=*/false);
+                            }
+                        }
+                        std::vector<collect::Session::TemplateArgument>
+                            arguments;
+                        std::vector<
+                            collect::CandidateExplicitTemplateArguments>
+                            candidate_arguments;
+                        bool parsed_arguments = true;
+                        bool template_lookup_error = false;
+                        if (info) {
+                            cir::DeclContextId context =
+                                info->entity.valid() &&
+                                        collect_session_.file().valid(
+                                            info->entity)
+                                    ? collect_session_.file()
+                                          .entity(info->entity)
+                                          .semantic_context
+                                    : cir::DeclContextId{};
+                            std::vector<const collect::Session::TemplateInfo*>
+                                candidates = collect_session_
+                                    .function_template_infos_for_name(
+                                        context,
+                                        member_name,
+                                        /*include_parents=*/false);
+                            parsed_arguments =
+                                parse_function_template_argument_list_for_candidates(
+                                    *info,
+                                    candidates,
+                                    arguments,
+                                    candidate_arguments,
+                                    operator_id.loc);
+                        } else if (check(TokenType::LESS_THAN)) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "operator template-id names a non-template member",
+                                operator_id.loc);
+                            parsed_arguments =
+                                parse_dependent_expression_template_argument_list(
+                                    operator_id.loc);
+                            template_lookup_error = true;
+                        }
+                        sem = collect_session_
+                            .collect_qualified_member_access_expr(
+                                std::move(expr.sem), qualifier_type,
+                                member_name, is_arrow, op.loc);
+                        sem.has_error =
+                            sem.has_error || nested.has_error ||
+                            operator_id.has_error || !parsed_arguments ||
+                            template_lookup_error;
+                        if (info) {
+                            sem.has_explicit_template_arguments = true;
+                            sem.explicit_template_arguments =
+                                std::move(arguments);
+                            sem.candidate_explicit_template_arguments =
+                                std::move(candidate_arguments);
+                            auto rejected = [&](cir::EntityId entity) {
+                                auto found = std::find_if(
+                                    sem.candidate_explicit_template_arguments
+                                        .begin(),
+                                    sem.candidate_explicit_template_arguments
+                                        .end(),
+                                    [&](const collect::
+                                            CandidateExplicitTemplateArguments&
+                                            entry) {
+                                        return entry.template_entity ==
+                                            entity;
+                                    });
+                                return found !=
+                                        sem.candidate_explicit_template_arguments
+                                            .end() &&
+                                    !found->viable;
+                            };
+                            std::erase_if(sem.candidates, rejected);
+                            if (rejected(sem.entity) &&
+                                !sem.candidates.empty()) {
+                                sem.entity = sem.candidates.back();
+                                sem.type = collect_session_.file()
+                                               .entity(sem.entity)
+                                               .type;
+                            }
+                        }
+                        sem.unparenthesized_id_or_member = true;
+                    }
+                } else if (!is_identifier_token(current().type)) {
+                    diagnose(DiagnosticLevel::Error, "expected member name",
+                             current_loc());
+                    sem.has_error = true;
+                } else {
+                    Token terminal = current();
+                    consume();
+                    member_name = std::string(terminal.value);
+                    sem = collect_session_.collect_qualified_member_access_expr(
+                        std::move(expr.sem), qualifier_type, member_name,
+                        is_arrow, op.loc);
+                    sem.has_error = sem.has_error || nested.has_error;
+                    if (sem.entity.valid()) {
+                        materialize_deferred_static_data_member_expr(sem);
+                    }
+                    if (sem.has_error &&
+                        sem.type_originates_from_template_parameter &&
+                        in_constraint_substitution_failure_context()) {
+                        note_constraint_substitution_failure();
+                    }
+                    sem.unparenthesized_id_or_member = true;
+                }
+                NodeId qualified_syntax = make_node(
+                    NodeKind::MemberExpr, begin, last_consumed_raw_end(),
+                    {expr.syntax}, text_payload(std::string(op.value) + member_name),
+                    sem.has_error ? NodeFlagHasError : NodeFlagNone,
+                    is_arrow ? 1 : 0);
+                expr = ParsedExpr{qualified_syntax, std::move(sem)};
+                continue;
+            }
+            NodeId member = parse_name_node(NodeKind::Name);
+            std::string member_name = node_text(tree_.node(member));
+            NodeId syntax = make_node(NodeKind::MemberExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {expr.syntax, member},
+                                      text_payload(op.value),
+                                      NodeFlagNone,
+                                      is_arrow ? 1 : 0);
+            collect::ExprResult sem =
+                collect_session_.collect_member_access_expr(std::move(expr.sem),
+                                                            member_name,
+                                                            is_arrow,
+                                                            op.loc);
+            if (sem.entity.valid()) {
+                materialize_deferred_static_data_member_expr(sem);
+            }
+            if (sem.has_error && sem.type_originates_from_template_parameter &&
+                in_constraint_substitution_failure_context()) {
+                note_constraint_substitution_failure();
+            }
+            sem.unparenthesized_id_or_member = true;
+            expr = ParsedExpr{syntax, std::move(sem)};
+            continue;
+        }
+        if (check(TokenType::INCREMENT) || check(TokenType::DECREMENT)) {
+            bool is_increment = check(TokenType::INCREMENT);
+            Token op = current();
+            size_t begin = tree_.node(expr.syntax).tokens.begin;
+            consume();
+            UnaryOperator sem_op = is_increment
+                ? UnaryOperator::PostfixIncrement
+                : UnaryOperator::PostfixDecrement;
+            NodeId syntax = make_node(NodeKind::UnaryExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {expr.syntax},
+                                      text_payload(op.value),
+                                      NodeFlagNone,
+                                      static_cast<uint16_t>(sem_op));
+            collect::ExprResult sem =
+                collect_session_.collect_unary_expr(sem_op, std::move(expr.sem), op.loc);
+            expr = ParsedExpr{syntax, std::move(sem)};
+            continue;
+        }
+        break;
+    }
+    return expr;
+}
+
+Parser::ParsedExpr Parser::parse_statement_expression() {
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    match(TokenType::LEFT_PAREN);
+    collect_session_.enter_statement_expression();
+    ParsedStmt body = parse_compound_statement();
+    collect_session_.leave_statement_expression();
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error, "expected ')' after statement expression", current_loc());
+    }
+    NodeId syntax = make_node(NodeKind::StmtExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              {body.syntax},
+                              text_payload("({})"));
+    collect::ExprResult sem =
+        collect_session_.collect_statement_expr(std::move(body.sem), loc);
+    return {syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_block_literal_expression() {
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+    std::vector<NodeId> children;
+
+    std::vector<collect::ParamInput> params;
+    if (check(TokenType::LEFT_PAREN)) {
+        consume();
+        if (check(TokenType::VOID) && peek(1).type == TokenType::RIGHT_PAREN) {
+            consume();
+        } else {
+            while (!at_end() && !check(TokenType::RIGHT_PAREN)) {
+                DeclarationParser param_parser(*this);
+                cir::TypeRef param_type = param_parser.parse_declaration(true, true);
+                collect::ParamInput param;
+                param.name = param_parser.name;
+                param.type = param_type;
+                param.loc = current_loc();
+                params.push_back(std::move(param));
+                if (!match(TokenType::COMMA)) {
+                    break;
+                }
+            }
+        }
+        if (!match(TokenType::RIGHT_PAREN)) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected ')' after block literal parameters", current_loc());
+        }
+    }
+
+    std::vector<std::string> body_identifiers;
+    if (check(TokenType::LEFT_BRACE)) {
+        size_t offset = 1;
+        int depth = 1;
+        while (depth > 0) {
+            const Token& token = peek(offset);
+            if (token.type == TokenType::Eof) {
+                break;
+            }
+            if (token.type == TokenType::LEFT_BRACE) {
+                ++depth;
+            } else if (token.type == TokenType::RIGHT_BRACE) {
+                --depth;
+            } else if (token.type == TokenType::IDENTIFIER) {
+                body_identifiers.push_back(std::string(token.value));
+            }
+            ++offset;
+        }
+    } else {
+        diagnose(DiagnosticLevel::Error, "expected block literal body", current_loc());
+    }
+
+    collect::BlockLiteralStart start =
+        collect_session_.begin_block_literal(std::move(params),
+                                             body_identifiers,
+                                             loc);
+    ParsedStmt body = parse_compound_statement();
+    children.push_back(body.syntax);
+    collect::ExprResult sem =
+        collect_session_.finish_block_literal(std::move(start),
+                                              std::move(body.sem),
+                                              loc);
+
+    NodeId syntax = make_node(NodeKind::BlockExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              TextPayload{"block"});
+    return {syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_lambda_expression() {
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+
+    collect::LambdaCaptureDefault capture_default =
+        collect::LambdaCaptureDefault::None;
+    std::vector<collect::LambdaCaptureItem> captures;
+    auto skip_capture_item = [&] {
+        int depth = 0;
+        while (!at_end()) {
+            if (depth == 0 && (check(TokenType::COMMA) ||
+                               check(TokenType::RIGHT_BRACKET))) {
+                break;
+            }
+            if (check(TokenType::LEFT_BRACKET) ||
+                check(TokenType::LEFT_PAREN) ||
+                check(TokenType::LEFT_BRACE)) {
+                ++depth;
+            } else if (check(TokenType::RIGHT_BRACKET) ||
+                       check(TokenType::RIGHT_PAREN) ||
+                       check(TokenType::RIGHT_BRACE)) {
+                --depth;
+            }
+            consume();
+        }
+    };
+    if (!check(TokenType::RIGHT_BRACKET)) {
+        if (check(TokenType::ASSIGN) &&
+            (peek(1).type == TokenType::COMMA ||
+             peek(1).type == TokenType::RIGHT_BRACKET)) {
+            capture_default = collect::LambdaCaptureDefault::ByCopy;
+            consume();
+            match(TokenType::COMMA);
+        } else if (check(TokenType::BITWISE_AND) &&
+                   (peek(1).type == TokenType::COMMA ||
+                    peek(1).type == TokenType::RIGHT_BRACKET)) {
+            capture_default = collect::LambdaCaptureDefault::ByRef;
+            consume();
+            match(TokenType::COMMA);
+        }
+        bool saw_this_capture = false;
+        while (!at_end() && !check(TokenType::RIGHT_BRACKET)) {
+            SrcLoc item_loc = current_loc();
+            if (check(TokenType::THIS_KW) ||
+                (check(TokenType::MULTIPLY) &&
+                 peek(1).type == TokenType::THIS_KW)) {
+                bool star_this = match(TokenType::MULTIPLY);
+                consume();
+                if (saw_this_capture) {
+                    diagnose(DiagnosticLevel::Error,
+                             "'this' appears more than once in the capture "
+                             "list",
+                             item_loc);
+                } else {
+                    saw_this_capture = true;
+                    collect::LambdaCaptureItem item;
+                    item.is_this = !star_this;
+                    item.is_star_this = star_this;
+                    item.loc = item_loc;
+                    captures.push_back(std::move(item));
+                }
+            } else if (check(TokenType::ELLIPSIS) ||
+                       (check(TokenType::BITWISE_AND) &&
+                        peek(1).type == TokenType::ELLIPSIS)) {
+
+                bool by_ref = match(TokenType::BITWISE_AND);
+                consume();
+                if (!check(TokenType::IDENTIFIER)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected a capture name in the lambda-introducer",
+                             current_loc());
+                    skip_capture_item();
+                } else {
+                    std::string name(current().value);
+                    consume();
+                    bool duplicate = false;
+                    for (const collect::LambdaCaptureItem& prior : captures) {
+                        if (!prior.name.empty() && prior.name == name) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "'" + name +
+                                         "' appears more than once in the "
+                                         "capture list",
+                                     item_loc);
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!match(TokenType::ASSIGN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "an init-capture pack requires an "
+                                 "'= pattern' initializer",
+                                 current_loc());
+                        skip_capture_item();
+                    } else {
+                        std::optional<PackExpansionPattern> pattern =
+                            try_parse_pack_expansion_pattern(
+                                [&] {
+                                    (void)parse_expression(
+                                        PrecLevel::ASSIGNMENT);
+                                },
+                                /*expect_trailing_ellipsis=*/false);
+                        if (!pattern.has_value() ||
+                            !pattern->has_pack_names()) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "init-capture pack initializer does not "
+                                     "contain an unexpanded pack",
+                                     item_loc);
+                            (void)parse_expression(PrecLevel::ASSIGNMENT);
+                        } else {
+                            collect::LambdaCaptureItem item;
+                            item.name = std::move(name);
+                            item.by_ref = by_ref;
+                            item.is_pack = true;
+                            item.is_init_pack = true;
+                            item.loc = item_loc;
+                            bool arity_dependent = false;
+                            std::optional<size_t> element_count =
+                                resolve_pack_expansion_element_count(
+                                    *pattern, &arity_dependent);
+                            if (arity_dependent) {
+
+                                parse_pack_expansion_pattern_deferred([&] {
+                                    item.init =
+                                        parse_expression(PrecLevel::ASSIGNMENT)
+                                            .sem;
+                                });
+                            } else {
+                                replay_pack_expansion_elements(
+                                    *pattern,
+                                    element_count.value_or(0),
+                                    [&](size_t) {
+                                        item.pack_inits.push_back(
+                                            parse_expression(
+                                                PrecLevel::ASSIGNMENT)
+                                                .sem);
+                                    });
+                            }
+                            if (!duplicate) {
+                                captures.push_back(std::move(item));
+                            }
+                        }
+                    }
+                }
+            } else {
+                bool by_ref = match(TokenType::BITWISE_AND);
+                if (!check(TokenType::IDENTIFIER)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected a capture name in the lambda-introducer",
+                             current_loc());
+                    skip_capture_item();
+                } else {
+                    std::string name(current().value);
+                    consume();
+                    bool duplicate = false;
+                    for (const collect::LambdaCaptureItem& prior : captures) {
+                        if (!prior.name.empty() && prior.name == name) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "'" + name +
+                                         "' appears more than once in the "
+                                         "capture list",
+                                     item_loc);
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (check(TokenType::ELLIPSIS)) {
+                        consume();
+                        if (!duplicate) {
+                            collect::LambdaCaptureItem item;
+                            item.name = std::move(name);
+                            item.by_ref = by_ref;
+                            item.is_pack = true;
+                            item.loc = item_loc;
+                            captures.push_back(std::move(item));
+                        }
+                    } else if (check(TokenType::ASSIGN)) {
+
+                        consume();
+                        ParsedExpr init =
+                            parse_expression(PrecLevel::ASSIGNMENT);
+                        if (!duplicate) {
+                            collect::LambdaCaptureItem item;
+                            item.name = std::move(name);
+                            item.by_ref = by_ref;
+                            item.init = std::move(init.sem);
+                            item.loc = item_loc;
+                            captures.push_back(std::move(item));
+                        }
+                    } else if (check(TokenType::LEFT_BRACE) ||
+                               check(TokenType::LEFT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "brace- and paren-initialized init-captures "
+                                 "are not supported yet",
+                                 current_loc());
+                        skip_capture_item();
+                    } else if (capture_default ==
+                                   collect::LambdaCaptureDefault::ByCopy &&
+                               !by_ref) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "'" + name +
+                                     "' is already captured by the "
+                                     "by-copy capture default",
+                                 item_loc);
+                    } else if (capture_default ==
+                                   collect::LambdaCaptureDefault::ByRef &&
+                               by_ref) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "'&" + name +
+                                     "' is redundant with the by-reference "
+                                     "capture default",
+                                 item_loc);
+                    } else if (!duplicate) {
+                        collect::LambdaCaptureItem item;
+                        item.name = std::move(name);
+                        item.by_ref = by_ref;
+                        item.loc = item_loc;
+                        captures.push_back(std::move(item));
+                    }
+                }
+            }
+            if (!match(TokenType::COMMA)) {
+                break;
+            }
+        }
+    }
+    if (!match(TokenType::RIGHT_BRACKET)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ']' to close the lambda capture list",
+                 current_loc());
+    }
+
+    collect::LambdaSpecifiers specifiers;
+    auto parse_lambda_attributes = [&] {
+        ParsedAttributes attrs = try_parse_standard_or_gnu_attributes();
+        specifiers.attrs.append(std::move(attrs.attrs));
+    };
+    parse_lambda_attributes();
+
+    collect::Session::TemplateInfo template_info;
+    std::optional<collect::Session::InstantiationScope> template_header_scope;
+    if (check(TokenType::LESS_THAN)) {
+        if (parse_cxx_template_head(template_info,
+                                    loc,
+                                    /*parameter_depth=*/0,
+                                    /*lambda_template_head=*/true)) {
+            template_header_scope.emplace(
+                collect_session_.begin_template_header(template_info, loc));
+        }
+        parse_lambda_attributes();
+    }
+
+    DeclarationParser lambda_invention(*this);
+    lambda_invention.abbreviated_template_target = &template_info;
+
+    std::vector<ParsedParam> parsed_params;
+    bool entered_prototype_scope = false;
+    if (match(TokenType::LEFT_PAREN)) {
+        collect_session_.enter_scope(collect::ScopeFlags::PrototypeScope);
+        entered_prototype_scope = true;
+
+        parsed_params = parse_parameter_list(
+            /*instantiate_default_arguments=*/true,
+            TypeParseContext::type_only(
+                TypeParseContext::Origin::LambdaParameter),
+            /*is_variadic_out=*/nullptr,
+            [&](ParsedParam& param, uint32_t parameter_index) {
+                ParsedDeclarator parameter;
+                parameter.type = param.type;
+                parameter.type_ref = param.type_ref;
+                parameter.loc = param.loc;
+                rewrite_abbreviated_function_parameter(
+                    lambda_invention,
+                    parameter,
+                    param.is_parameter_pack,
+                    parameter_index,
+                    param.abbreviated_type_constraints,
+                    param.loc);
+                param.type = parameter.type;
+                param.type_ref = parameter.type_ref;
+                if (param.name != "<anonymous>" &&
+                    !param.is_parameter_pack_expansion_sentinel) {
+                    param.prototype_entity =
+                        collect_session_.bind_prototype_parameter(
+                            param.name,
+                            param.type_ref,
+                            param.loc,
+                            param.type_originates_from_template_parameter);
+                }
+            });
+    }
+
+    while (true) {
+        if (check(TokenType::MUTABLE_KW)) {
+            consume();
+            specifiers.is_mutable = true;
+            continue;
+        }
+        if (check(TokenType::STATIC)) {
+            consume();
+            specifiers.is_static = true;
+            continue;
+        }
+        if (check(TokenType::CONSTEXPR_KW)) {
+            consume();
+            specifiers.is_constexpr = true;
+            continue;
+        }
+        if (check(TokenType::CONSTEVAL_KW)) {
+            consume();
+            specifiers.is_consteval = true;
+            continue;
+        }
+        if (check(TokenType::NOEXCEPT_KW)) {
+            consume();
+            specifiers.exception_spec =
+                cir::FunctionExceptionSpecKind::NonThrowing;
+            if (match(TokenType::LEFT_PAREN)) {
+                ParsedExpr operand = parse_conditional_expression();
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' after lambda noexcept specifier",
+                             current_loc());
+                }
+                specifiers.exception_spec =
+                    collect_session_.evaluate_noexcept_spec(
+                        operand.sem, last_consumed_loc());
+            }
+            continue;
+        }
+        if (check(TokenType::ATTRIBUTE_KW) ||
+            (check(TokenType::LEFT_BRACKET) &&
+             peek(1).type == TokenType::LEFT_BRACKET)) {
+            parse_lambda_attributes();
+            continue;
+        }
+        break;
+    }
+    if (specifiers.is_constexpr && specifiers.is_consteval) {
+        diagnose(DiagnosticLevel::Error,
+                 "a lambda cannot be both 'constexpr' and 'consteval'",
+                 loc);
+        specifiers.is_consteval = false;
+    }
+
+    cir::TypeId trailing_return{};
+    if (match(TokenType::ARROW)) {
+        parse_type_name(
+            &trailing_return,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            TypeParseContext::type_only(
+                TypeParseContext::Origin::TrailingReturnType));
+        if (!trailing_return.valid()) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected trailing return type after '->'",
+                     current_loc());
+        }
+    }
+    bool is_generic = !template_info.parameters.empty();
+    if (match(TokenType::REQUIRES_KW)) {
+        SrcLoc requires_loc = last_consumed_loc();
+        size_t constraint_begin = 0;
+        size_t constraint_end = 0;
+        collect::Session::NormalizedConstraint normal_form;
+        bool valid = parse_and_validate_constraint_expression(
+            requires_loc,
+            constraint_begin,
+            constraint_end,
+            nullptr,
+            &normal_form);
+        if (!is_generic) {
+            diagnose(DiagnosticLevel::Error,
+                     "a requires-clause on a lambda requires a generic lambda",
+                     requires_loc);
+        } else if (valid) {
+            record_trailing_function_requires_clause(
+                template_info,
+                constraint_begin,
+                constraint_end,
+                std::move(normal_form));
+        }
+    }
+    if (entered_prototype_scope) {
+        collect_session_.leave_scope();
+    }
+    if (template_header_scope) {
+        collect_session_.finish_template_header(
+            std::move(*template_header_scope));
+        template_header_scope.reset();
+    }
+
+    record_function_constraint_parameters(template_info, parsed_params);
+
+    std::vector<collect::ParamInput> params =
+        param_inputs_from_parsed_params(parsed_params,
+                                        /*move_runtime_fragments=*/true);
+
+    if (is_generic) {
+        collect::LambdaClosureStart start =
+            collect_session_.begin_generic_lambda_closure(std::move(params),
+                                                          trailing_return,
+                                                          specifiers,
+                                                          capture_default,
+                                                          std::move(captures),
+                                                          template_info,
+                                                          loc);
+        if (module_replay_unit_.valid()) {
+
+            collect_session_.file().entity_mut(start.call_operator)
+                .origin_unit = module_replay_unit_;
+            collect_session_.file().entity_mut(start.record.entity)
+                .origin_unit = module_replay_unit_;
+        }
+        std::vector<NodeId> children;
+        if (!check(TokenType::LEFT_BRACE)) {
+            diagnose(DiagnosticLevel::Error, "expected lambda body",
+                     current_loc());
+            collect::ExprResult sem =
+                collect_session_.finish_generic_lambda_closure(
+                    std::move(start), std::move(template_info),
+                    last_consumed_loc());
+            sem.has_error = true;
+            NodeId syntax = make_node(NodeKind::LambdaExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      children,
+                                      TextPayload{"lambda"},
+                                      NodeFlagHasError);
+            return {syntax, std::move(sem)};
+        }
+
+        PendingMemberBody body;
+        body.method_index = 0;
+        body.body_begin = current_raw_index();
+        body.body_end = skip_balanced_until_semicolon_or_brace();
+        body.params = parsed_params;
+
+        validate_member_template_body(template_info,
+                                      start.call_operator,
+                                      body,
+                                      loc);
+        if (!template_info.has_definition) {
+            start.has_error = true;
+        }
+        uint64_t body_key = static_cast<uint64_t>(start.call_operator.index);
+        member_template_bodies_[body_key] = body;
+        collect_session_.track_speculative_rollback(
+            [this, body_key] { member_template_bodies_.erase(body_key); });
+        collect::ExprResult sem =
+            collect_session_.finish_generic_lambda_closure(
+                std::move(start), std::move(template_info),
+                last_consumed_loc());
+        NodeId syntax = make_node(NodeKind::LambdaExpr,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  children,
+                                  TextPayload{"lambda"});
+        return {syntax, std::move(sem)};
+    }
+
+    collect::LambdaClosureStart start =
+        collect_session_.begin_lambda_closure(std::move(params),
+                                              trailing_return,
+                                              specifiers,
+                                              capture_default,
+                                              std::move(captures),
+                                              loc);
+
+    std::vector<NodeId> children;
+    if (check(TokenType::LEFT_BRACE)) {
+        ParsedStmt body = parse_compound_statement();
+        children.push_back(body.syntax);
+        collect::ExprResult sem =
+            collect_session_.finish_lambda_closure(std::move(start),
+                                                   std::move(body.sem),
+                                                   last_consumed_loc());
+        NodeId syntax = make_node(NodeKind::LambdaExpr,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  children,
+                                  TextPayload{"lambda"});
+        return {syntax, std::move(sem)};
+    }
+
+    diagnose(DiagnosticLevel::Error, "expected lambda body", current_loc());
+    collect::StmtResult empty_body;
+    collect::ExprResult sem =
+        collect_session_.finish_lambda_closure(std::move(start),
+                                               std::move(empty_body),
+                                               loc);
+    sem.has_error = true;
+    NodeId syntax = make_node(NodeKind::LambdaExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              TextPayload{"lambda"},
+                              NodeFlagHasError);
+    return {syntax, std::move(sem)};
+}
+
+bool Parser::is_init_designator_start() const {
+    if (check(TokenType::DOT) ||
+        (check(TokenType::IDENTIFIER) &&
+         peek(1).type == TokenType::COLON)) {
         return true;
     }
-    if (current_token().type == TokenType::IDENTIFIER && peek_token().type == TokenType::COLON) {
+    if (!check(TokenType::LEFT_BRACKET)) {
+        return false;
+    }
+    if (!lang_opts_.is_cxx_mode()) {
         return true;
+    }
+
+    int bracket_depth = 0;
+    int paren_depth = 0;
+    int brace_depth = 0;
+    for (size_t offset = 0; offset < 4096; ++offset) {
+        TokenType type = peek(offset).type;
+        if (type == TokenType::LEFT_BRACKET) {
+            ++bracket_depth;
+        } else if (type == TokenType::RIGHT_BRACKET) {
+            --bracket_depth;
+            if (bracket_depth == 0 &&
+                paren_depth == 0 && brace_depth == 0) {
+                TokenType next = peek(offset + 1).type;
+                return next == TokenType::ASSIGN ||
+                       next == TokenType::DOT ||
+                       next == TokenType::LEFT_BRACKET;
+            }
+        } else if (type == TokenType::LEFT_PAREN) {
+            ++paren_depth;
+        } else if (type == TokenType::RIGHT_PAREN) {
+            if (paren_depth > 0) {
+                --paren_depth;
+            }
+        } else if (type == TokenType::LEFT_BRACE) {
+            ++brace_depth;
+        } else if (type == TokenType::RIGHT_BRACE) {
+            if (brace_depth > 0) {
+                --brace_depth;
+            }
+        } else if (type == TokenType::Eof ||
+                   type == TokenType::SEMICOLON) {
+            break;
+        }
     }
     return false;
 }
 
-std::vector<Designator> Parser::parse_designator_list() {
-    std::vector<Designator> designators;
-    while (true) {
-        if (gentle_check(TokenType::DOT)) {
-            check_and_consume(TokenType::DOT);
-            Token field_tok = current_token();
-            check_and_consume(TokenType::IDENTIFIER);
-            designators.push_back(Designator::field(field_tok.value, field_tok.loc));
-            continue;
-        }
-        if (gentle_check(TokenType::LEFT_BRACKET)) {
-            Token bracket_tok = current_token();
-            check_and_consume(TokenType::LEFT_BRACKET);
-            auto start_expr = parse_assignment_expression();
-            if (gentle_check(TokenType::ELLIPSIS)) {
-                check_and_consume(TokenType::ELLIPSIS);
-                auto end_expr = parse_assignment_expression();
-                check_and_consume(TokenType::RIGHT_BRACKET);
-                designators.push_back(Designator::range_designator(std::move(start_expr), std::move(end_expr), bracket_tok.loc));
-            } else {
-                check_and_consume(TokenType::RIGHT_BRACKET);
-                designators.push_back(Designator::index_designator(std::move(start_expr), bracket_tok.loc));
+Parser::ParsedDesignatorList Parser::parse_designator_list() {
+    ParsedDesignatorList designators;
+    while (is_init_designator_start()) {
+        size_t begin = current_raw_index();
+        SrcLoc loc = current_loc();
+        if (match(TokenType::DOT)) {
+            if (!is_identifier_token(current().type)) {
+                diagnose(DiagnosticLevel::Error, "expected field name in initializer designator", current_loc());
+                break;
             }
+            NodeId field = parse_name_node(NodeKind::Name);
+            designators.syntax.push_back(make_node(NodeKind::Designator,
+                                                   begin,
+                                                   last_consumed_raw_end(),
+                                                   {field},
+                                                   text_payload(".")));
+            collect::InitDesignator sem;
+            sem.kind = collect::InitDesignatorKind::Field;
+            sem.field_name = node_text(tree_.node(field));
+            sem.loc = loc;
+            designators.sem.push_back(std::move(sem));
             continue;
         }
-        if (current_token().type == TokenType::IDENTIFIER && peek_token().type == TokenType::COLON) {
-            Token field_tok = current_token();
-            check_and_consume(TokenType::IDENTIFIER);
-            check_and_consume(TokenType::COLON);
-            designators.push_back(Designator::field(field_tok.value, field_tok.loc));
+        if (match(TokenType::LEFT_BRACKET)) {
+            ParsedExpr start = parse_assignment_expression();
+            std::vector<NodeId> children{start.syntax};
+            std::string spelling = "[]";
+            collect::InitDesignator sem;
+            sem.kind = collect::InitDesignatorKind::Index;
+            sem.index = std::move(start.sem);
+            sem.loc = loc;
+            if (match(TokenType::ELLIPSIS)) {
+                ParsedExpr end = parse_assignment_expression();
+                children.push_back(end.syntax);
+                spelling = "[...]";
+                sem.kind = collect::InitDesignatorKind::Range;
+                sem.range_end = std::move(end.sem);
+            }
+            if (!match(TokenType::RIGHT_BRACKET)) {
+                diagnose(DiagnosticLevel::Error, "expected ']' after initializer designator", current_loc());
+            }
+            designators.syntax.push_back(make_node(NodeKind::Designator,
+                                                   begin,
+                                                   last_consumed_raw_end(),
+                                                   children,
+                                                   text_payload(std::move(spelling))));
+            designators.sem.push_back(std::move(sem));
+            continue;
+        }
+
+        NodeId field = parse_name_node(NodeKind::Name);
+        if (!match(TokenType::COLON)) {
+            diagnose(DiagnosticLevel::Error, "expected ':' after initializer designator", current_loc());
+        }
+        designators.syntax.push_back(make_node(NodeKind::Designator,
+                                               begin,
+                                               last_consumed_raw_end(),
+                                               {field},
+                                               text_payload(":")));
+        collect::InitDesignator sem;
+        sem.kind = collect::InitDesignatorKind::Field;
+        sem.field_name = node_text(tree_.node(field));
+        sem.loc = loc;
+        designators.sem.push_back(std::move(sem));
+    }
+    return designators;
+}
+
+Parser::ParsedDesignatorList Parser::parse_offsetof_designator_list() {
+    ParsedDesignatorList designators;
+    auto append_field = [&](size_t begin, SrcLoc loc, bool had_dot) {
+        if (!is_identifier_token(current().type)) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected member name in __builtin_offsetof",
+                     current_loc());
+            return;
+        }
+        NodeId field = parse_name_node(NodeKind::Name);
+        designators.syntax.push_back(make_node(NodeKind::Designator,
+                                               begin,
+                                               last_consumed_raw_end(),
+                                               {field},
+                                               text_payload(had_dot ? "." : "field")));
+        collect::InitDesignator sem;
+        sem.kind = collect::InitDesignatorKind::Field;
+        sem.field_name = node_text(tree_.node(field));
+        sem.loc = loc;
+        designators.sem.push_back(std::move(sem));
+    };
+
+    append_field(current_raw_index(), current_loc(), false);
+    while (!at_end() && !check(TokenType::RIGHT_PAREN)) {
+        if (match(TokenType::LEFT_BRACKET)) {
+            size_t begin = last_consumed_raw_index();
+            SrcLoc loc = last_consumed_loc();
+            ParsedExpr index = parse_expression();
+            if (!match(TokenType::RIGHT_BRACKET)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ']' in __builtin_offsetof designator",
+                         current_loc());
+            }
+            designators.syntax.push_back(make_node(NodeKind::Designator,
+                                                   begin,
+                                                   last_consumed_raw_end(),
+                                                   {index.syntax},
+                                                   text_payload("[]")));
+            collect::InitDesignator sem;
+            sem.kind = collect::InitDesignatorKind::Index;
+            sem.index = std::move(index.sem);
+            sem.loc = loc;
+            designators.sem.push_back(std::move(sem));
+            continue;
+        }
+        if (match(TokenType::DOT)) {
+            append_field(last_consumed_raw_index(), last_consumed_loc(), true);
             continue;
         }
         break;
     }
     return designators;
 }
-std::unique_ptr<Expr> Parser::parse_init_list() {
-    Token t = current_token();
-    check_and_consume(TokenType::LEFT_BRACE);
-    auto init_list = collect_->collect_initializer_list_expression(t.loc);
-    size_t last_recovery_idx = std::numeric_limits<size_t>::max();
-    while (!gentle_check(TokenType::RIGHT_BRACE) && !gentle_check(TokenType::Eof)) {
-        try {
-            InitElement elem;
-            elem.loc = current_token().loc;
-            if (is_init_designator_start()) {
-                elem.designators = parse_designator_list();
-                if (gentle_check(TokenType::ASSIGN)) {
-                    check_and_consume(TokenType::ASSIGN);
+
+Parser::ParsedExpr Parser::parse_init_list_expression(
+    bool* has_dependent_pack_expansion) {
+    size_t begin = current_raw_index();
+    Token brace = current();
+    if (!match(TokenType::LEFT_BRACE)) {
+        diagnose(DiagnosticLevel::Error, "expected initializer list", current_loc());
+        collect::ExprResult sem;
+        sem.has_error = true;
+        return {make_node(NodeKind::Error, begin, last_consumed_raw_end(), {}, {}, NodeFlagHasError),
+                std::move(sem)};
+    }
+
+    std::vector<NodeId> children;
+    std::vector<collect::InitElementInput> element_semantics;
+    bool dependent_pack_expansion = false;
+    while (!at_end() && !check(TokenType::RIGHT_BRACE)) {
+        size_t element_begin = current_raw_index();
+        SrcLoc element_loc = current_loc();
+
+        if (lang_opts_.is_cxx_mode() && !is_init_designator_start()) {
+            std::optional<PackExpansionPattern> pack_pattern =
+                try_parse_expression_pack_expansion(TokenType::RIGHT_BRACE);
+            if (pack_pattern.has_value()) {
+                std::vector<collect::ExprResult> expanded;
+                dependent_pack_expansion =
+                    expand_expression_pack(*pack_pattern, expanded) ||
+                    dependent_pack_expansion;
+                children.push_back(pack_pattern->syntax);
+                for (collect::ExprResult& element : expanded) {
+                    collect::InitElementInput input;
+                    input.value = std::move(element);
+                    input.loc = element_loc;
+                    element_semantics.push_back(std::move(input));
+                }
+                if (check(TokenType::RIGHT_BRACE)) {
+                    break;
+                }
+                if (!match(TokenType::COMMA)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ',' or '}' in initializer list",
+                             current_loc());
+                    break;
+                }
+                continue;
+            }
+        }
+        std::vector<NodeId> element_children;
+        std::vector<collect::InitDesignator> designator_semantics;
+        if (is_init_designator_start()) {
+            ParsedDesignatorList designators = parse_designator_list();
+            element_children.insert(element_children.end(),
+                                    designators.syntax.begin(),
+                                    designators.syntax.end());
+            designator_semantics = std::move(designators.sem);
+            match(TokenType::ASSIGN);
+        }
+
+        bool nested_dependent_pack_expansion = false;
+        ParsedExpr value = check(TokenType::LEFT_BRACE)
+            ? parse_init_list_expression(&nested_dependent_pack_expansion)
+            : parse_assignment_expression();
+        dependent_pack_expansion = dependent_pack_expansion ||
+            nested_dependent_pack_expansion;
+        element_children.push_back(value.syntax);
+        collect::InitElementInput element;
+        element.designators = std::move(designator_semantics);
+        element.value = std::move(value.sem);
+        element.loc = element_loc;
+        element_semantics.push_back(std::move(element));
+        children.push_back(make_node(NodeKind::InitElementExpr,
+                                     element_begin,
+                                     tree_.node(value.syntax).tokens.end,
+                                     element_children));
+
+        if (check(TokenType::RIGHT_BRACE)) {
+            break;
+        }
+        if (!match(TokenType::COMMA)) {
+            diagnose(DiagnosticLevel::Error, "expected ',' or '}' in initializer list", current_loc());
+            break;
+        }
+    }
+
+    if (!match(TokenType::RIGHT_BRACE)) {
+        diagnose(DiagnosticLevel::Error, "expected '}' after initializer list", current_loc());
+    }
+
+    NodeId syntax = make_node(NodeKind::InitListExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children);
+    collect::ExprResult sem =
+        collect_session_.collect_init_list_expr(std::move(element_semantics), brace.loc);
+    if (has_dependent_pack_expansion) {
+        *has_dependent_pack_expansion =
+            *has_dependent_pack_expansion || dependent_pack_expansion;
+    }
+    return {syntax, std::move(sem)};
+}
+
+std::optional<Parser::ParsedExpr> Parser::parse_builtin_primary_expression() {
+    if (!is_identifier_token(current().type)) {
+        return std::nullopt;
+    }
+
+    const Token builtin_token = current();
+    const BuiltinInfo* builtin_info =
+        BuiltinRegistry::instance().lookup(builtin_token.value);
+    if (!builtin_info || !builtin_info->supported) {
+        return std::nullopt;
+    }
+
+    switch (builtin_info->syntax) {
+        case BuiltinSyntaxKind::Available: {
+
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after __builtin_available",
+                         current_loc());
+            } else {
+                int depth = 1;
+                while (!at_end() && depth > 0) {
+                    TokenType type = current().type;
+                    consume();
+                    if (type == TokenType::LEFT_PAREN) ++depth;
+                    if (type == TokenType::RIGHT_PAREN) --depth;
                 }
             }
-            if (gentle_check(TokenType::LEFT_BRACE)) {
-                elem.value = parse_init_list();
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {},
+                                      text_payload("__builtin_available"));
+            collect::ExprResult sem =
+                collect_session_.make_integer_literal(1, "1", builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::TypePredicate: {
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after builtin name",
+                         current_loc());
+            }
+            cir::TypeId lhs_type{};
+            NodeId lhs_syntax = parse_type_name(&lhs_type);
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' between builtin type operands",
+                         current_loc());
+            }
+            cir::TypeId rhs_type{};
+            NodeId rhs_syntax = parse_type_name(&rhs_type);
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after builtin type operands",
+                         current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {lhs_syntax, rhs_syntax},
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem =
+                collect_session_.collect_builtin_types_compatible_expr(lhs_type,
+                                                                       rhs_type,
+                                                                       builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::ChooseExpr: {
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after builtin name",
+                         current_loc());
+            }
+            ParsedExpr condition = parse_assignment_expression();
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' after __builtin_choose_expr condition",
+                         current_loc());
+            }
+            ParsedExpr true_expr = parse_assignment_expression();
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' after __builtin_choose_expr true operand",
+                         current_loc());
+            }
+            ParsedExpr false_expr = parse_assignment_expression();
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after __builtin_choose_expr operands",
+                         current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {condition.syntax, true_expr.syntax, false_expr.syntax},
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem =
+                collect_session_.collect_builtin_choose_expr(std::move(condition.sem),
+                                                             std::move(true_expr.sem),
+                                                             std::move(false_expr.sem),
+                                                             builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::Offsetof: {
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after builtin name",
+                         current_loc());
+            }
+            cir::TypeId type{};
+            NodeId type_syntax = parse_type_name(&type);
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' after __builtin_offsetof type operand",
+                         current_loc());
+            }
+            ParsedDesignatorList designators = parse_offsetof_designator_list();
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after __builtin_offsetof designator",
+                         current_loc());
+            }
+
+            std::vector<NodeId> children{type_syntax};
+            children.insert(children.end(),
+                            designators.syntax.begin(),
+                            designators.syntax.end());
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      children,
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem =
+                collect_session_.collect_offsetof_expr(type,
+                                                       std::move(designators.sem),
+                                                       builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::VaArg: {
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after builtin name",
+                         current_loc());
+            }
+            ParsedExpr va_list = parse_assignment_expression();
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' after __builtin_va_arg list operand",
+                         current_loc());
+            }
+            cir::TypeId arg_type{};
+            NodeId type_syntax = parse_type_name(&arg_type);
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after __builtin_va_arg type operand",
+                         current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {va_list.syntax, type_syntax},
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem =
+                collect_session_.collect_va_arg_expr(std::move(va_list.sem),
+                                                     arg_type,
+                                                     builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::BitCast: {
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after __builtin_bit_cast",
+                         current_loc());
+            }
+            cir::TypeId target_type{};
+            cir::TypeRef target_ref{};
+            NodeId type_syntax = parse_type_name(
+                &target_type, nullptr, nullptr, &target_ref);
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' after __builtin_bit_cast type operand",
+                         current_loc());
+            }
+            ParsedExpr source = parse_assignment_expression();
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after __builtin_bit_cast operands",
+                         current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {type_syntax, source.syntax},
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem =
+                collect_session_.collect_builtin_bit_cast_expr(
+                    target_ref.type.valid()
+                        ? target_ref
+                        : collect_session_.type_ref(target_type),
+                    std::move(source.sem), builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::ConvertVector: {
+            size_t begin = current_raw_index();
+            consume();
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after builtin name",
+                         current_loc());
+            }
+            ParsedExpr vector = parse_assignment_expression();
+            if (!match(TokenType::COMMA)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ',' after __builtin_convertvector value operand",
+                         current_loc());
+            }
+            cir::TypeId target_type{};
+            cir::TypeRef target_ref{};
+            NodeId type_syntax = parse_type_name(
+                &target_type, nullptr, nullptr, &target_ref);
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after __builtin_convertvector type operand",
+                         current_loc());
+            }
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      {vector.syntax, type_syntax},
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem =
+                collect_session_.collect_builtin_convertvector_expr(std::move(vector.sem),
+                                                                    target_ref.type.valid()
+                                                                        ? target_ref
+                                                                        : collect_session_.type_ref(
+                                                                              target_type),
+                                                                    builtin_token.loc);
+            return ParsedExpr{syntax, std::move(sem)};
+        }
+        case BuiltinSyntaxKind::TypeTrait: {
+            size_t begin = current_raw_index();
+            consume();
+            bool opened = match(TokenType::LEFT_PAREN);
+            if (!opened) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected '(' after builtin type trait name",
+                         current_loc());
+            }
+
+            std::vector<cir::TypeRef> types;
+            std::vector<bool> pack_expansions;
+            std::vector<NodeId> type_syntax;
+            auto append_type_operand = [&](bool expands_pack) {
+                cir::TypeId type{};
+                cir::TypeRef type_ref{};
+                type_syntax.push_back(parse_type_name(
+                    &type, nullptr, nullptr, &type_ref));
+                if (type.valid()) {
+                    types.push_back(type_ref.type.valid()
+                        ? type_ref
+                        : collect_session_.type_ref(type));
+                    pack_expansions.push_back(expands_pack);
+                }
+            };
+            while (opened && !at_end() &&
+                   !check(TokenType::RIGHT_PAREN)) {
+                std::optional<PackExpansionPattern> pattern =
+                    try_parse_pack_expansion_pattern(
+                        [&] {
+                            cir::TypeId ignored_type{};
+                            cir::TypeRef ignored_ref{};
+                            (void)parse_type_name(
+                                &ignored_type, nullptr, nullptr,
+                                &ignored_ref);
+                        });
+                if (pattern.has_value()) {
+                    if (!pattern->has_pack_names()) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "pack expansion does not contain an unexpanded "
+                            "type parameter pack",
+                            pattern->ellipsis_loc);
+                        cursor_ = pattern->after_ellipsis_cursor;
+                        last_consumed_raw_end_ =
+                            pattern->after_ellipsis_last_consumed_raw_end;
+                    } else {
+                        bool arity_dependent = false;
+                        std::optional<size_t> element_count =
+                            resolve_pack_expansion_element_count(
+                                *pattern, &arity_dependent);
+                        if (arity_dependent) {
+                            parse_pack_expansion_pattern_deferred(
+                                [&] { append_type_operand(true); });
+                            cursor_ = pattern->after_ellipsis_cursor;
+                            last_consumed_raw_end_ =
+                                pattern
+                                    ->after_ellipsis_last_consumed_raw_end;
+                        } else {
+                            replay_pack_expansion_elements(
+                                *pattern, element_count.value_or(0),
+                                [&](size_t) {
+                                    append_type_operand(false);
+                                });
+                        }
+                    }
+                } else {
+                    append_type_operand(false);
+                }
+                if (!match(TokenType::COMMA)) {
+                    break;
+                }
+            }
+            if (!match(TokenType::RIGHT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ')' after builtin type trait operands",
+                         current_loc());
+            }
+
+            bool valid_arity =
+                static_cast<int>(types.size()) >= builtin_info->min_args &&
+                (builtin_info->max_args < 0 ||
+                 static_cast<int>(types.size()) <= builtin_info->max_args);
+            if (!valid_arity) {
+                std::string count = builtin_info->min_args ==
+                        builtin_info->max_args
+                    ? std::to_string(builtin_info->min_args)
+                    : std::to_string(builtin_info->min_args) +
+                          (builtin_info->max_args < 0
+                               ? " or more"
+                               : " to " +
+                                     std::to_string(builtin_info->max_args));
+                diagnose(DiagnosticLevel::Error,
+                         std::string(builtin_info->name) + " requires " +
+                             count + " type operand" +
+                             (count == "1" ? "" : "s"),
+                         builtin_token.loc);
+            }
+
+            NodeId syntax = make_node(NodeKind::CallExpr,
+                                      begin,
+                                      last_consumed_raw_end(),
+                                      type_syntax,
+                                      text_payload(std::string(builtin_info->name)));
+            collect::ExprResult sem;
+            if (valid_arity) {
+                sem = collect_session_.collect_builtin_type_trait_expr(
+                    builtin_info->kind, std::move(types),
+                    std::move(pack_expansions), builtin_token.loc);
             } else {
-                elem.value =
-                    parse_assignment_expression_with_optional_pack_expansion();
+                sem = collect_session_.make_boolean_literal(
+                    false, "false", builtin_token.loc);
+                sem.has_error = true;
             }
-            init_list->elements.push_back(std::move(elem));
-            diag_engine->sync_point_reached();
-            last_recovery_idx = std::numeric_limits<size_t>::max();
-            if (!gentle_check(TokenType::RIGHT_BRACE)) {
-                check_and_consume(TokenType::COMMA);
-            }
-        } catch (ParseError& e) {
-            if (is_in_tentative_context()) {
-                throw;
-            }
-            size_t recover_start_idx = get_token_idx();
-            skip_to_init_list_sync_point();
-            if (get_token_idx() == recover_start_idx &&
-                recover_start_idx == last_recovery_idx &&
-                !gentle_check(TokenType::Eof)) {
-                advance();
-            }
-            last_recovery_idx = get_token_idx();
-            diag_engine->sync_point_reached();
-            InitElement err_elem;
-            err_elem.loc = e.location;
-            err_elem.value = collect_->collect_error_expression(e.message, e.location);
-            init_list->elements.push_back(std::move(err_elem));
+            return ParsedExpr{syntax, std::move(sem)};
         }
+        case BuiltinSyntaxKind::TypeTransform:
+        case BuiltinSyntaxKind::IntegerSequenceType:
+        case BuiltinSyntaxKind::PackElementType:
+            return std::nullopt;
+        case BuiltinSyntaxKind::Call:
+            return std::nullopt;
     }
-    check_and_consume(TokenType::RIGHT_BRACE);
-    return init_list;
+    return std::nullopt;
 }
 
-std::unique_ptr<Expr> Parser::parse_paren_init_list() {
-    Token t = current_token();
-    check_and_consume(TokenType::LEFT_PAREN);
-    auto init_list = collect_->collect_initializer_list_expression(t.loc);
-    init_list->is_paren_init = true;
-
-    if (gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
-        return init_list;
+std::optional<Parser::ParsedExpr>
+Parser::parse_replayed_unary_left_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN) ||
+        peek(1).type != TokenType::ELLIPSIS) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op = binary_operator_for(peek(2).type);
+    if (!is_fold_operator(sem_op)) {
+        return std::nullopt;
     }
 
-    while (true) {
-        InitElement elem;
-        elem.loc = current_token().loc;
-        if (gentle_check(TokenType::LEFT_BRACE)) {
-            elem.value = parse_init_list();
-        } else {
-            elem.value =
-                parse_assignment_expression_with_optional_pack_expansion();
+    size_t begin = current_raw_index();
+    size_t replay_cursor = cursor_;
+    size_t replay_last_consumed_raw_end = last_consumed_raw_end_;
+    size_t replay_end_cursor = cursor_;
+    size_t after_fold_cursor = cursor_;
+    size_t after_fold_last_consumed_raw_end = last_consumed_raw_end_;
+    SrcLoc ellipsis_loc = peek(1).loc;
+    Token op = peek(2);
+    std::vector<collect::Session::ParameterPackIdentity> packs;
+    bool parsed_fold = false;
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        consume();
+        consume();
+        op = current();
+        consume();
+        replay_cursor = cursor_;
+        replay_last_consumed_raw_end = last_consumed_raw_end_;
+        auto capture_scope =
+            collect_session_.begin_parameter_pack_pattern_capture();
+        (void)parse_cast_expression();
+        replay_end_cursor = cursor_;
+        if (check(TokenType::RIGHT_PAREN)) {
+            consume();
+            after_fold_cursor = cursor_;
+            after_fold_last_consumed_raw_end = last_consumed_raw_end_;
+            parsed_fold = true;
         }
-        init_list->elements.push_back(std::move(elem));
-
-        if (gentle_check_and_consume(TokenType::COMMA)) {
-            continue;
-        }
-        check_and_consume(TokenType::RIGHT_PAREN);
-        break;
+        packs = collect_session_.finish_parameter_pack_pattern_capture(
+            capture_scope);
+        tentative.revert();
+    }
+    if (!parsed_fold) {
+        return std::nullopt;
     }
 
-    return init_list;
+    std::vector<NodeId> retained_children;
+    if (collect_session_.collecting_pattern() &&
+        retain_constraint_normal_form_syntax_) {
+        retained_children.push_back(retain_replayed_fold_operand_syntax(
+            replay_cursor,
+            replay_last_consumed_raw_end,
+            replay_end_cursor,
+            ellipsis_loc));
+    }
+    cursor_ = after_fold_cursor;
+    last_consumed_raw_end_ = after_fold_last_consumed_raw_end;
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              retained_children,
+                              text_payload("unary-left-fold"));
+
+    auto make_error_fold = [&]() {
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return error;
+    };
+
+    if (packs.empty()) {
+        diagnose(DiagnosticLevel::Error,
+                 "fold expression pattern does not contain an unexpanded pack",
+                 ellipsis_loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+
+    auto retain_dependent_fold = [&](const auto& discovered_packs) {
+        std::vector<collect::Session::ParameterPackIdentity> retained_packs;
+        ParsedExpr retained = retain_replayed_fold_operand_semantics(
+            replay_cursor,
+            replay_last_consumed_raw_end,
+            replay_end_cursor,
+            after_fold_cursor,
+            after_fold_last_consumed_raw_end,
+            ellipsis_loc,
+            &retained_packs);
+        const auto& identities = retained_packs.empty()
+            ? discovered_packs
+            : retained_packs;
+        std::vector<cir::TemplateValuePackReference> references;
+        references.reserve(identities.size());
+        for (const auto& pack : identities) {
+            references.push_back(retained_pack_reference(pack));
+        }
+        return collect_session_.make_dependent_fold_expression(
+            cir::TemplateValueFoldKind::UnaryLeft,
+            sem_op,
+            std::move(retained.sem),
+            std::nullopt,
+            std::move(references),
+            op.loc);
+    };
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, retain_dependent_fold(packs)};
+    }
+
+    PackExpansionPattern fold_pattern;
+    fold_pattern.packs = std::move(packs);
+    fold_pattern.replay_cursor = replay_cursor;
+    fold_pattern.replay_last_consumed_raw_end = replay_last_consumed_raw_end;
+    fold_pattern.replay_end_cursor = replay_end_cursor;
+    fold_pattern.after_ellipsis_cursor = after_fold_cursor;
+    fold_pattern.after_ellipsis_last_consumed_raw_end =
+        after_fold_last_consumed_raw_end;
+    fold_pattern.ellipsis_loc = ellipsis_loc;
+    bool dependent = false;
+    std::optional<size_t> element_count =
+        resolve_pack_expansion_element_count(fold_pattern, &dependent);
+    if (dependent) {
+        return ParsedExpr{syntax,
+                          retain_dependent_fold(fold_pattern.packs)};
+    }
+
+    size_t count = element_count.value_or(0);
+    if (count == 0) {
+        if (std::optional<collect::ExprResult> identity =
+                empty_unary_fold_identity(collect_session_, sem_op, op.loc)) {
+            return ParsedExpr{syntax, std::move(*identity)};
+        }
+        diagnose(DiagnosticLevel::Error,
+                 "empty unary fold expression has no identity for this operator",
+                 op.loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+
+    std::vector<collect::ExprResult> arguments;
+    arguments.reserve(count);
+    replay_pack_expansion_elements(
+        fold_pattern,
+        count,
+        [&](size_t) { arguments.push_back(parse_cast_expression().sem); });
+
+    collect::ExprResult folded = std::move(arguments.front());
+    for (size_t i = 1; i < arguments.size(); ++i) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move(folded),
+            std::move(arguments[i]),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
 }
-std::unique_ptr<Expr> Parser::parse_binary_expression(int min_precedence) {
-    std::unique_ptr<Expr> left = parse_cast_expression();
-    while (is_binary_operator(current_token().value)) {
-        TokenType op_type = current_token().type;
-        if (is_at_top_level_template_argument_expression() &&
-            (op_type == TokenType::GREATER_THAN ||
-             op_type == TokenType::RIGHT_SHIFT ||
-             op_type == TokenType::ASSIGN_RSHIFT)) {
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_direct_unary_left_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN) ||
+        peek(1).type != TokenType::ELLIPSIS ||
+        !is_identifier_token(peek(3).type) ||
+        peek(4).type != TokenType::RIGHT_PAREN) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op = binary_operator_for(peek(2).type);
+    if (!is_fold_operator(sem_op)) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    consume();
+    consume();
+    Token op = current();
+    consume();
+    Token name_token = current();
+    NodeId name = parse_name_node(NodeKind::Identifier);
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ')' after fold expression",
+                 current_loc());
+    }
+
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              {name},
+                              text_payload("unary-left-fold"));
+
+    auto make_dependent_fold = [&]() {
+        collect_session_.bump_pattern_taint();
+        collect::ExprResult dependent;
+        dependent.type =
+            collect_session_.file().dependent_type("fold expression");
+        dependent.category = collect::ValueCategory::Dependent;
+        return dependent;
+    };
+
+    if (!collect_session_.function_parameter_pack_name(name_token.value)) {
+        diagnose(DiagnosticLevel::Error,
+                 "fold expression pattern does not contain an unexpanded pack",
+                 name_token.loc);
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return ParsedExpr{syntax, std::move(error)};
+    }
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+
+    std::optional<std::vector<collect::ExprResult>> arguments =
+        collect_session_.function_parameter_pack_arguments(name_token.value,
+                                                          name_token.loc);
+    if (!arguments.has_value()) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+    if (arguments->empty()) {
+        if (std::optional<collect::ExprResult> identity =
+                empty_unary_fold_identity(collect_session_, sem_op, op.loc)) {
+            return ParsedExpr{syntax, std::move(*identity)};
+        }
+        diagnose(DiagnosticLevel::Error,
+                 "empty unary fold expression has no identity for this operator",
+                 op.loc);
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return ParsedExpr{syntax, std::move(error)};
+    }
+
+    collect::ExprResult folded = std::move(arguments->front());
+    for (size_t i = 1; i < arguments->size(); ++i) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move(folded),
+            std::move((*arguments)[i]),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
+}
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_direct_unary_right_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN) ||
+        !is_identifier_token(peek(1).type) ||
+        peek(3).type != TokenType::ELLIPSIS ||
+        peek(4).type != TokenType::RIGHT_PAREN) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op = binary_operator_for(peek(2).type);
+    if (!is_fold_operator(sem_op)) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    consume();
+    Token name_token = current();
+    NodeId name = parse_name_node(NodeKind::Identifier);
+    Token op = current();
+    consume();
+    consume();
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ')' after fold expression",
+                 current_loc());
+    }
+
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              {name},
+                              text_payload("unary-right-fold"));
+
+    auto make_dependent_fold = [&]() {
+        collect_session_.bump_pattern_taint();
+        collect::ExprResult dependent;
+        dependent.type =
+            collect_session_.file().dependent_type("fold expression");
+        dependent.category = collect::ValueCategory::Dependent;
+        return dependent;
+    };
+
+    if (!collect_session_.function_parameter_pack_name(name_token.value)) {
+        diagnose(DiagnosticLevel::Error,
+                 "fold expression pattern does not contain an unexpanded pack",
+                 name_token.loc);
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return ParsedExpr{syntax, std::move(error)};
+    }
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+
+    std::optional<std::vector<collect::ExprResult>> arguments =
+        collect_session_.function_parameter_pack_arguments(name_token.value,
+                                                          name_token.loc);
+    if (!arguments.has_value()) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+    if (arguments->empty()) {
+        if (std::optional<collect::ExprResult> identity =
+                empty_unary_fold_identity(collect_session_, sem_op, op.loc)) {
+            return ParsedExpr{syntax, std::move(*identity)};
+        }
+        diagnose(DiagnosticLevel::Error,
+                 "empty unary fold expression has no identity for this operator",
+                 op.loc);
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return ParsedExpr{syntax, std::move(error)};
+    }
+
+    collect::ExprResult folded = std::move(arguments->back());
+    for (size_t i = arguments->size() - 1; i > 0; --i) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move((*arguments)[i - 1]),
+            std::move(folded),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
+}
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_replayed_unary_right_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN)) {
+        return std::nullopt;
+    }
+
+    std::optional<size_t> ellipsis_offset;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    for (size_t offset = 1; true; ++offset) {
+        TokenType type = peek(offset).type;
+        if (type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::RIGHT_PAREN) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::ELLIPSIS && offset >= 2 &&
+            is_fold_operator(
+                binary_operator_for(peek(offset - 1).type)) &&
+            peek(offset + 1).type == TokenType::RIGHT_PAREN) {
+            ellipsis_offset = offset;
             break;
         }
-        std::string op = current_token().value;
-        Token op_tok = current_token();
-        int precedence = static_cast<int>(get_prec(op_type));
-        if (precedence == static_cast<int>(PrecLevel::UNKNOWN)) {
-            throw std::runtime_error("error in parse_binop");
+        switch (type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                ++brace_depth;
+                break;
+            case TokenType::RIGHT_BRACE:
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                break;
+            default:
+                break;
         }
-        if (precedence < min_precedence) {
+    }
+    if (!ellipsis_offset.has_value() || *ellipsis_offset < 3 ||
+        peek(*ellipsis_offset + 1).type != TokenType::RIGHT_PAREN) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op =
+        binary_operator_for(peek(*ellipsis_offset - 1).type);
+    if (!is_fold_operator(sem_op)) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    size_t replay_cursor = cursor_;
+    size_t replay_last_consumed_raw_end = last_consumed_raw_end_;
+    size_t replay_end_cursor = cursor_;
+    size_t after_fold_cursor = cursor_;
+    size_t after_fold_last_consumed_raw_end = last_consumed_raw_end_;
+    Token op;
+    SrcLoc ellipsis_loc{};
+    std::vector<collect::Session::ParameterPackIdentity> packs;
+    bool parsed_fold = false;
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        consume();
+        replay_cursor = cursor_;
+        replay_last_consumed_raw_end = last_consumed_raw_end_;
+        auto capture_scope =
+            collect_session_.begin_parameter_pack_pattern_capture();
+        (void)parse_cast_expression();
+        replay_end_cursor = cursor_;
+        op = current();
+        if (binary_operator_for(op.type) == sem_op) {
+            consume();
+            if (check(TokenType::ELLIPSIS)) {
+                ellipsis_loc = current().loc;
+                consume();
+                if (check(TokenType::RIGHT_PAREN)) {
+                    consume();
+                    after_fold_cursor = cursor_;
+                    after_fold_last_consumed_raw_end =
+                        last_consumed_raw_end_;
+                    parsed_fold = true;
+                }
+            }
+        }
+        packs = collect_session_.finish_parameter_pack_pattern_capture(
+            capture_scope);
+        tentative.revert();
+    }
+    if (!parsed_fold) {
+        return std::nullopt;
+    }
+
+    std::vector<NodeId> retained_children;
+    if (collect_session_.collecting_pattern() &&
+        retain_constraint_normal_form_syntax_) {
+        retained_children.push_back(retain_replayed_fold_operand_syntax(
+            replay_cursor,
+            replay_last_consumed_raw_end,
+            replay_end_cursor,
+            ellipsis_loc));
+    }
+    cursor_ = after_fold_cursor;
+    last_consumed_raw_end_ = after_fold_last_consumed_raw_end;
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              retained_children,
+                              text_payload("unary-right-fold"));
+
+    auto make_error_fold = [&]() {
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return error;
+    };
+
+    if (packs.empty()) {
+        diagnose(DiagnosticLevel::Error,
+                 "fold expression pattern does not contain an unexpanded pack",
+                 ellipsis_loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+
+    auto retain_dependent_fold = [&](const auto& discovered_packs) {
+        std::vector<collect::Session::ParameterPackIdentity> retained_packs;
+        ParsedExpr retained = retain_replayed_fold_operand_semantics(
+            replay_cursor,
+            replay_last_consumed_raw_end,
+            replay_end_cursor,
+            after_fold_cursor,
+            after_fold_last_consumed_raw_end,
+            ellipsis_loc,
+            &retained_packs);
+        const auto& identities = retained_packs.empty()
+            ? discovered_packs
+            : retained_packs;
+        std::vector<cir::TemplateValuePackReference> references;
+        references.reserve(identities.size());
+        for (const auto& pack : identities) {
+            references.push_back(retained_pack_reference(pack));
+        }
+        return collect_session_.make_dependent_fold_expression(
+            cir::TemplateValueFoldKind::UnaryRight,
+            sem_op,
+            std::move(retained.sem),
+            std::nullopt,
+            std::move(references),
+            op.loc);
+    };
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, retain_dependent_fold(packs)};
+    }
+
+    PackExpansionPattern fold_pattern;
+    fold_pattern.packs = std::move(packs);
+    fold_pattern.replay_cursor = replay_cursor;
+    fold_pattern.replay_last_consumed_raw_end = replay_last_consumed_raw_end;
+    fold_pattern.replay_end_cursor = replay_end_cursor;
+    fold_pattern.after_ellipsis_cursor = after_fold_cursor;
+    fold_pattern.after_ellipsis_last_consumed_raw_end =
+        after_fold_last_consumed_raw_end;
+    fold_pattern.ellipsis_loc = ellipsis_loc;
+    bool dependent = false;
+    std::optional<size_t> element_count =
+        resolve_pack_expansion_element_count(fold_pattern, &dependent);
+    if (dependent) {
+        return ParsedExpr{syntax,
+                          retain_dependent_fold(fold_pattern.packs)};
+    }
+
+    size_t count = element_count.value_or(0);
+    if (count == 0) {
+        if (std::optional<collect::ExprResult> identity =
+                empty_unary_fold_identity(collect_session_, sem_op, op.loc)) {
+            return ParsedExpr{syntax, std::move(*identity)};
+        }
+        diagnose(DiagnosticLevel::Error,
+                 "empty unary fold expression has no identity for this operator",
+                 op.loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+
+    std::vector<collect::ExprResult> arguments;
+    arguments.reserve(count);
+    replay_pack_expansion_elements(
+        fold_pattern,
+        count,
+        [&](size_t) { arguments.push_back(parse_cast_expression().sem); });
+
+    collect::ExprResult folded = std::move(arguments.back());
+    for (size_t i = arguments.size() - 1; i > 0; --i) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move(arguments[i - 1]),
+            std::move(folded),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
+}
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_replayed_binary_right_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN)) {
+        return std::nullopt;
+    }
+
+    std::optional<size_t> ellipsis_offset;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    for (size_t offset = 1; true; ++offset) {
+        TokenType type = peek(offset).type;
+        if (type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::RIGHT_PAREN) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::ELLIPSIS && offset >= 2 &&
+            is_fold_operator(
+                binary_operator_for(peek(offset - 1).type)) &&
+            is_fold_operator(
+                binary_operator_for(peek(offset + 1).type))) {
+            ellipsis_offset = offset;
             break;
         }
-        advance();
-        if (op_type == TokenType::QUESTION) {
-            // conditional — GCC extension: omitted middle operand (a ?: b)
-            std::unique_ptr<Expr> right1 = nullptr;
-            if (current_token().type != TokenType::COLON) {
-                right1 = parse_binary_expression();
-            }
-            check_and_consume(TokenType::COLON);
-            auto right2 = parse_binary_expression(precedence);
-            auto newLeft = collect_->collect_conditional_expression(std::move(left),
-                std::move(right1), std::move(right2), QualType(), op_tok.loc);
-            left = std::move(newLeft);
-        } else if (is_assignment_token(op_type)) {
-            // todo
-            auto right = parse_binary_expression(precedence);
-            if (op_type != TokenType::ASSIGN) {
-                // compound assignment
-                /* A compound assignment of the form E1 op= E2 is equivalent to the simple assignment expression E1 =
-                 * E1 op (E2), except that the lvalue E1 is evaluated only once, and with respect to an indeterminately
-                 * sequenced function call, the operation of a compound assignment is a single evaluation. */
-                auto bop  = string2bop(op);
-                left = collect_->collect_compound_assign_operation(std::move(left),
-                    std::move(right), bop, op_tok.loc);
-            } else {
-                // Collect validates and types binary operations
-                auto newLeft = collect_->collect_binary_operation(std::move(left), std::move(right),
-                    string2bop(op), op_tok.loc);
-                left = std::move(newLeft);
-            }
-            // same as below, except we dont
-        } else {
-            auto new_prec = precedence+1;
-            auto right = parse_binary_expression(new_prec);
-
-            // Collect validates and types binary operations
-            auto newLeft = collect_->collect_binary_operation(std::move(left),
-                std::move(right),
-                string2bop(op), op_tok.loc);
-            left = std::move(newLeft);
+        switch (type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                ++brace_depth;
+                break;
+            case TokenType::RIGHT_BRACE:
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                break;
+            default:
+                break;
         }
     }
-    return left;
-
-
-}
-
-std::unique_ptr<Expr> Parser::parse_expression() {
-    auto left = parse_assignment_expression();
-    while (gentle_check(TokenType::COMMA)) {
-        Token op_tok = current_token();
-        std::string op = current_token().value;
-        advance();
-        auto right = parse_assignment_expression();
-        left = collect_->collect_binary_operation(
-            std::move(left),
-            std::move(right),
-            string2bop(op),
-            op_tok.loc);
+    if (!ellipsis_offset.has_value() || *ellipsis_offset < 3 ||
+        peek(*ellipsis_offset + 1).type == TokenType::RIGHT_PAREN) {
+        return std::nullopt;
     }
-    return left;
-}
-std::unique_ptr<Expr> Parser::parse_assignment_expression() {
-    if (is_cxx_mode_active() && gentle_check(TokenType::THROW_KW)) {
-        return parse_cpp_throw_expression();
+    BinaryOperator sem_op =
+        binary_operator_for(peek(*ellipsis_offset - 1).type);
+    BinaryOperator sem_op2 =
+        binary_operator_for(peek(*ellipsis_offset + 1).type);
+    if (!is_fold_operator(sem_op) ||
+        !is_fold_operator(sem_op2)) {
+        return std::nullopt;
     }
-    return parse_binary_expression(static_cast<int>(PrecLevel::ASSIGNMENT));
+
+    size_t begin = current_raw_index();
+    size_t replay_cursor = cursor_;
+    size_t replay_last_consumed_raw_end = last_consumed_raw_end_;
+    size_t replay_end_cursor = cursor_;
+    size_t init_cursor = cursor_;
+    size_t init_last_consumed_raw_end = last_consumed_raw_end_;
+    size_t init_end_cursor = cursor_;
+    size_t after_fold_cursor = cursor_;
+    size_t after_fold_last_consumed_raw_end = last_consumed_raw_end_;
+    Token op;
+    Token op2;
+    SrcLoc ellipsis_loc{};
+    std::vector<collect::Session::ParameterPackIdentity> packs;
+    std::vector<collect::Session::ParameterPackIdentity> init_packs;
+    bool parsed_fold = false;
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        consume();
+        replay_cursor = cursor_;
+        replay_last_consumed_raw_end = last_consumed_raw_end_;
+        auto capture_scope =
+            collect_session_.begin_parameter_pack_pattern_capture();
+        (void)parse_cast_expression();
+        replay_end_cursor = cursor_;
+        packs = collect_session_.finish_parameter_pack_pattern_capture(
+            capture_scope);
+        op = current();
+        if (binary_operator_for(op.type) == sem_op) {
+            consume();
+            if (check(TokenType::ELLIPSIS)) {
+                ellipsis_loc = current().loc;
+                consume();
+                op2 = current();
+                if (binary_operator_for(op2.type) == sem_op2) {
+                    consume();
+                    init_cursor = cursor_;
+                    init_last_consumed_raw_end = last_consumed_raw_end_;
+                    auto init_capture_scope =
+                        collect_session_.begin_parameter_pack_pattern_capture();
+                    (void)parse_cast_expression();
+                    init_end_cursor = cursor_;
+                    init_packs =
+                        collect_session_.finish_parameter_pack_pattern_capture(
+                            init_capture_scope);
+                    if (check(TokenType::RIGHT_PAREN)) {
+                        consume();
+                        after_fold_cursor = cursor_;
+                        after_fold_last_consumed_raw_end =
+                            last_consumed_raw_end_;
+                        parsed_fold = true;
+                    }
+                }
+            }
+        }
+        tentative.revert();
+    }
+    if (!parsed_fold) {
+        return std::nullopt;
+    }
+    if (packs.empty()) {
+        return std::nullopt;
+    }
+
+    std::vector<NodeId> retained_children;
+    if (collect_session_.collecting_pattern() &&
+        retain_constraint_normal_form_syntax_) {
+        retained_children.push_back(retain_replayed_fold_operand_syntax(
+            replay_cursor,
+            replay_last_consumed_raw_end,
+            replay_end_cursor,
+            ellipsis_loc));
+        retained_children.push_back(retain_replayed_fold_operand_syntax(
+            init_cursor,
+            init_last_consumed_raw_end,
+            init_end_cursor,
+            ellipsis_loc));
+    }
+    cursor_ = after_fold_cursor;
+    last_consumed_raw_end_ = after_fold_last_consumed_raw_end;
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              retained_children,
+                              text_payload("binary-right-fold"));
+
+    auto make_error_fold = [&]() {
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return error;
+    };
+
+    if (sem_op != sem_op2) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold operators must match",
+                 op2.loc);
+    }
+    if (!init_packs.empty()) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold expression contains unexpanded packs on both sides",
+                 ellipsis_loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+
+    auto retain_dependent_fold = [&](const auto& discovered_packs) {
+        std::vector<collect::Session::ParameterPackIdentity> retained_packs;
+        ParsedExpr retained_pattern =
+            retain_replayed_fold_operand_semantics(
+                replay_cursor,
+                replay_last_consumed_raw_end,
+                replay_end_cursor,
+                after_fold_cursor,
+                after_fold_last_consumed_raw_end,
+                ellipsis_loc,
+                &retained_packs);
+        ParsedExpr retained_initializer =
+            retain_replayed_fold_operand_semantics(
+                init_cursor,
+                init_last_consumed_raw_end,
+                init_end_cursor,
+                after_fold_cursor,
+                after_fold_last_consumed_raw_end,
+                ellipsis_loc);
+        const auto& identities = retained_packs.empty()
+            ? discovered_packs
+            : retained_packs;
+        std::vector<cir::TemplateValuePackReference> references;
+        references.reserve(identities.size());
+        for (const auto& pack : identities) {
+            references.push_back(retained_pack_reference(pack));
+        }
+        return collect_session_.make_dependent_fold_expression(
+            cir::TemplateValueFoldKind::BinaryRight,
+            sem_op,
+            std::move(retained_pattern.sem),
+            std::optional<collect::ExprResult>(
+                std::move(retained_initializer.sem)),
+            std::move(references),
+            op.loc);
+    };
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, retain_dependent_fold(packs)};
+    }
+
+    PackExpansionPattern fold_pattern;
+    fold_pattern.packs = std::move(packs);
+    fold_pattern.replay_cursor = replay_cursor;
+    fold_pattern.replay_last_consumed_raw_end = replay_last_consumed_raw_end;
+    fold_pattern.replay_end_cursor = replay_end_cursor;
+    fold_pattern.after_ellipsis_cursor = after_fold_cursor;
+    fold_pattern.after_ellipsis_last_consumed_raw_end =
+        after_fold_last_consumed_raw_end;
+    fold_pattern.ellipsis_loc = ellipsis_loc;
+    bool dependent = false;
+    std::optional<size_t> element_count =
+        resolve_pack_expansion_element_count(fold_pattern, &dependent);
+    if (dependent) {
+        return ParsedExpr{syntax,
+                          retain_dependent_fold(fold_pattern.packs)};
+    }
+
+    cursor_ = init_cursor;
+    last_consumed_raw_end_ = init_last_consumed_raw_end;
+    ParsedExpr init = parse_cast_expression();
+    if (cursor_ != init_end_cursor) {
+        diagnose(DiagnosticLevel::Error,
+                 "could not replay fold expression init",
+                 ellipsis_loc);
+        cursor_ = init_end_cursor;
+    }
+
+    std::vector<collect::ExprResult> arguments;
+    size_t count = element_count.value_or(0);
+    arguments.reserve(count);
+    replay_pack_expansion_elements(
+        fold_pattern,
+        count,
+        [&](size_t) { arguments.push_back(parse_cast_expression().sem); });
+
+    collect::ExprResult folded = std::move(init.sem);
+    for (size_t i = arguments.size(); i > 0; --i) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move(arguments[i - 1]),
+            std::move(folded),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
 }
 
-std::unique_ptr<Expr> Parser::parse_conditional_expression() {
-    return parse_binary_expression(static_cast<int>(PrecLevel::CONDITIONAL));
+std::optional<Parser::ParsedExpr>
+Parser::parse_direct_binary_right_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN) ||
+        !is_identifier_token(peek(1).type) ||
+        peek(3).type != TokenType::ELLIPSIS) {
+        return std::nullopt;
+    }
+    if (!collect_session_.function_parameter_pack_name(peek(1).value)) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op = binary_operator_for(peek(2).type);
+    BinaryOperator sem_op2 = binary_operator_for(peek(4).type);
+    if (!is_fold_operator(sem_op) ||
+        !is_fold_operator(sem_op2)) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    consume();
+    Token name_token = current();
+    NodeId name = parse_name_node(NodeKind::Identifier);
+    Token op = current();
+    consume();
+    consume();
+    Token op2 = current();
+    consume();
+    if (sem_op != sem_op2) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold operators must match",
+                 op2.loc);
+    }
+    bool init_is_direct_function_pack =
+        is_identifier_token(current().type) &&
+        collect_session_.function_parameter_pack_name(current().value) &&
+        peek(1).type == TokenType::RIGHT_PAREN;
+    SrcLoc init_loc = current().loc;
+    ParsedExpr init = parse_cast_expression();
+    if (init_is_direct_function_pack) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold expression contains unexpanded packs on both sides",
+                 init_loc);
+    }
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ')' after fold expression",
+                 current_loc());
+    }
+
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              {name, init.syntax},
+                              text_payload("binary-right-fold"));
+
+    auto make_dependent_fold = [&]() {
+        collect_session_.bump_pattern_taint();
+        collect::ExprResult dependent;
+        dependent.type =
+            collect_session_.file().dependent_type("fold expression");
+        dependent.category = collect::ValueCategory::Dependent;
+        return dependent;
+    };
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+
+    std::optional<std::vector<collect::ExprResult>> arguments =
+        collect_session_.function_parameter_pack_arguments(name_token.value,
+                                                          name_token.loc);
+    if (!arguments.has_value()) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+    collect::ExprResult folded = std::move(init.sem);
+    for (size_t i = arguments->size(); i > 0; --i) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move((*arguments)[i - 1]),
+            std::move(folded),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
 }
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_replayed_binary_left_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN)) {
+        return std::nullopt;
+    }
+
+    std::optional<size_t> ellipsis_offset;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    for (size_t offset = 1; true; ++offset) {
+        TokenType type = peek(offset).type;
+        if (type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::RIGHT_PAREN) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::ELLIPSIS && offset >= 2 &&
+            is_fold_operator(
+                binary_operator_for(peek(offset - 1).type)) &&
+            is_fold_operator(
+                binary_operator_for(peek(offset + 1).type))) {
+            ellipsis_offset = offset;
+            break;
+        }
+        switch (type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                ++brace_depth;
+                break;
+            case TokenType::RIGHT_BRACE:
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    if (!ellipsis_offset.has_value() || *ellipsis_offset < 3 ||
+        peek(*ellipsis_offset + 1).type == TokenType::RIGHT_PAREN) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op =
+        binary_operator_for(peek(*ellipsis_offset - 1).type);
+    BinaryOperator sem_op2 =
+        binary_operator_for(peek(*ellipsis_offset + 1).type);
+    if (!is_fold_operator(sem_op) ||
+        !is_fold_operator(sem_op2)) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    size_t init_cursor = cursor_;
+    size_t init_last_consumed_raw_end = last_consumed_raw_end_;
+    size_t init_end_cursor = cursor_;
+    size_t replay_cursor = cursor_;
+    size_t replay_last_consumed_raw_end = last_consumed_raw_end_;
+    size_t replay_end_cursor = cursor_;
+    size_t after_fold_cursor = cursor_;
+    size_t after_fold_last_consumed_raw_end = last_consumed_raw_end_;
+    Token op;
+    Token op2;
+    SrcLoc ellipsis_loc{};
+    std::vector<collect::Session::ParameterPackIdentity> init_packs;
+    std::vector<collect::Session::ParameterPackIdentity> packs;
+    bool parsed_fold = false;
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        consume();
+        init_cursor = cursor_;
+        init_last_consumed_raw_end = last_consumed_raw_end_;
+        auto init_capture_scope =
+            collect_session_.begin_parameter_pack_pattern_capture();
+        (void)parse_cast_expression();
+        init_end_cursor = cursor_;
+        init_packs = collect_session_.finish_parameter_pack_pattern_capture(
+            init_capture_scope);
+        op = current();
+        if (binary_operator_for(op.type) == sem_op) {
+            consume();
+            if (check(TokenType::ELLIPSIS)) {
+                ellipsis_loc = current().loc;
+                consume();
+                op2 = current();
+                if (binary_operator_for(op2.type) == sem_op2) {
+                    consume();
+                    replay_cursor = cursor_;
+                    replay_last_consumed_raw_end = last_consumed_raw_end_;
+                    auto capture_scope =
+                        collect_session_.begin_parameter_pack_pattern_capture();
+                    (void)parse_cast_expression();
+                    replay_end_cursor = cursor_;
+                    packs =
+                        collect_session_.finish_parameter_pack_pattern_capture(
+                            capture_scope);
+                    if (check(TokenType::RIGHT_PAREN)) {
+                        consume();
+                        after_fold_cursor = cursor_;
+                        after_fold_last_consumed_raw_end =
+                            last_consumed_raw_end_;
+                        parsed_fold = true;
+                    }
+                }
+            }
+        }
+        tentative.revert();
+    }
+    if (!parsed_fold) {
+        return std::nullopt;
+    }
+    bool init_has_packs = !init_packs.empty();
+    bool pattern_has_packs = !packs.empty();
+    if (init_has_packs && !pattern_has_packs) {
+        return std::nullopt;
+    }
+
+    std::vector<NodeId> retained_children;
+    if (collect_session_.collecting_pattern() &&
+        retain_constraint_normal_form_syntax_) {
+        retained_children.push_back(retain_replayed_fold_operand_syntax(
+            init_cursor,
+            init_last_consumed_raw_end,
+            init_end_cursor,
+            ellipsis_loc));
+        retained_children.push_back(retain_replayed_fold_operand_syntax(
+            replay_cursor,
+            replay_last_consumed_raw_end,
+            replay_end_cursor,
+            ellipsis_loc));
+    }
+    cursor_ = after_fold_cursor;
+    last_consumed_raw_end_ = after_fold_last_consumed_raw_end;
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              retained_children,
+                              text_payload("binary-left-fold"));
+
+    auto make_error_fold = [&]() {
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return error;
+    };
+
+    if (sem_op != sem_op2) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold operators must match",
+                 op2.loc);
+    }
+    if (init_has_packs && pattern_has_packs) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold expression contains unexpanded packs on both sides",
+                 ellipsis_loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+    if (!pattern_has_packs) {
+        diagnose(DiagnosticLevel::Error,
+                 "fold expression pattern does not contain an unexpanded pack",
+                 ellipsis_loc);
+        return ParsedExpr{syntax, make_error_fold()};
+    }
+
+    auto retain_dependent_fold = [&](const auto& discovered_packs) {
+        ParsedExpr retained_initializer =
+            retain_replayed_fold_operand_semantics(
+                init_cursor,
+                init_last_consumed_raw_end,
+                init_end_cursor,
+                after_fold_cursor,
+                after_fold_last_consumed_raw_end,
+                ellipsis_loc);
+        std::vector<collect::Session::ParameterPackIdentity> retained_packs;
+        ParsedExpr retained_pattern =
+            retain_replayed_fold_operand_semantics(
+                replay_cursor,
+                replay_last_consumed_raw_end,
+                replay_end_cursor,
+                after_fold_cursor,
+                after_fold_last_consumed_raw_end,
+                ellipsis_loc,
+                &retained_packs);
+        const auto& identities = retained_packs.empty()
+            ? discovered_packs
+            : retained_packs;
+        std::vector<cir::TemplateValuePackReference> references;
+        references.reserve(identities.size());
+        for (const auto& pack : identities) {
+            references.push_back(retained_pack_reference(pack));
+        }
+        return collect_session_.make_dependent_fold_expression(
+            cir::TemplateValueFoldKind::BinaryLeft,
+            sem_op,
+            std::move(retained_pattern.sem),
+            std::optional<collect::ExprResult>(
+                std::move(retained_initializer.sem)),
+            std::move(references),
+            op.loc);
+    };
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, retain_dependent_fold(packs)};
+    }
+
+    PackExpansionPattern fold_pattern;
+    fold_pattern.packs = std::move(packs);
+    fold_pattern.replay_cursor = replay_cursor;
+    fold_pattern.replay_last_consumed_raw_end = replay_last_consumed_raw_end;
+    fold_pattern.replay_end_cursor = replay_end_cursor;
+    fold_pattern.after_ellipsis_cursor = after_fold_cursor;
+    fold_pattern.after_ellipsis_last_consumed_raw_end =
+        after_fold_last_consumed_raw_end;
+    fold_pattern.ellipsis_loc = ellipsis_loc;
+    bool dependent = false;
+    std::optional<size_t> element_count =
+        resolve_pack_expansion_element_count(fold_pattern, &dependent);
+    if (dependent) {
+        return ParsedExpr{syntax,
+                          retain_dependent_fold(fold_pattern.packs)};
+    }
+
+    cursor_ = init_cursor;
+    last_consumed_raw_end_ = init_last_consumed_raw_end;
+    ParsedExpr init = parse_cast_expression();
+    if (cursor_ != init_end_cursor) {
+        diagnose(DiagnosticLevel::Error,
+                 "could not replay fold expression init",
+                 ellipsis_loc);
+        cursor_ = init_end_cursor;
+    }
+
+    std::vector<collect::ExprResult> arguments;
+    size_t count = element_count.value_or(0);
+    arguments.reserve(count);
+    replay_pack_expansion_elements(
+        fold_pattern,
+        count,
+        [&](size_t) { arguments.push_back(parse_cast_expression().sem); });
+
+    collect::ExprResult folded = std::move(init.sem);
+    for (collect::ExprResult& argument : arguments) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move(folded),
+            std::move(argument),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
+}
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_direct_binary_left_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN)) {
+        return std::nullopt;
+    }
+
+    std::optional<size_t> ellipsis_offset;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    for (size_t offset = 1; true; ++offset) {
+        TokenType type = peek(offset).type;
+        if (type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 &&
+            type == TokenType::RIGHT_PAREN) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 &&
+            type == TokenType::ELLIPSIS && offset >= 2 &&
+            is_fold_operator(
+                binary_operator_for(peek(offset - 1).type)) &&
+            is_fold_operator(
+                binary_operator_for(peek(offset + 1).type)) &&
+            is_identifier_token(peek(offset + 2).type) &&
+            peek(offset + 3).type == TokenType::RIGHT_PAREN) {
+            ellipsis_offset = offset;
+            break;
+        }
+        switch (type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    if (!ellipsis_offset.has_value() || *ellipsis_offset < 3 ||
+        !is_identifier_token(peek(*ellipsis_offset + 2).type) ||
+        peek(*ellipsis_offset + 3).type != TokenType::RIGHT_PAREN) {
+        return std::nullopt;
+    }
+    BinaryOperator sem_op =
+        binary_operator_for(peek(*ellipsis_offset - 1).type);
+    BinaryOperator sem_op2 =
+        binary_operator_for(peek(*ellipsis_offset + 1).type);
+    if (!is_fold_operator(sem_op) ||
+        !is_fold_operator(sem_op2)) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    consume();
+    ParsedExpr init = parse_cast_expression();
+    Token op = current();
+    if (binary_operator_for(op.type) != sem_op) {
+        return std::nullopt;
+    }
+    consume();
+    if (!match(TokenType::ELLIPSIS)) {
+        return std::nullopt;
+    }
+    Token op2 = current();
+    consume();
+    if (sem_op != sem_op2) {
+        diagnose(DiagnosticLevel::Error,
+                 "binary fold operators must match",
+                 op2.loc);
+    }
+    Token name_token = current();
+    NodeId name = parse_name_node(NodeKind::Identifier);
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ')' after fold expression",
+                 current_loc());
+    }
+
+    NodeId syntax = make_node(NodeKind::AmbiguousSyntax,
+                              begin,
+                              last_consumed_raw_end(),
+                              {init.syntax, name},
+                              text_payload("binary-left-fold"));
+
+    auto make_dependent_fold = [&]() {
+        collect_session_.bump_pattern_taint();
+        collect::ExprResult dependent;
+        dependent.type =
+            collect_session_.file().dependent_type("fold expression");
+        dependent.category = collect::ValueCategory::Dependent;
+        return dependent;
+    };
+
+    if (!collect_session_.function_parameter_pack_name(name_token.value)) {
+        diagnose(DiagnosticLevel::Error,
+                 "fold expression pattern does not contain an unexpanded pack",
+                 name_token.loc);
+        collect::ExprResult error;
+        error.has_error = true;
+        error.type = collect_session_.file().unknown_type();
+        return ParsedExpr{syntax, std::move(error)};
+    }
+
+    if (should_retain_dependent_fold_pattern(
+            collect_session_, retain_constraint_normal_form_syntax_)) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+
+    std::optional<std::vector<collect::ExprResult>> arguments =
+        collect_session_.function_parameter_pack_arguments(name_token.value,
+                                                          name_token.loc);
+    if (!arguments.has_value()) {
+        return ParsedExpr{syntax, make_dependent_fold()};
+    }
+    collect::ExprResult folded = std::move(init.sem);
+    for (collect::ExprResult& argument : *arguments) {
+        folded = collect_session_.collect_binary_expr(
+            sem_op,
+            std::move(folded),
+            std::move(argument),
+            op.loc);
+    }
+    return ParsedExpr{syntax, std::move(folded)};
+}
+
+std::optional<Parser::ParsedExpr>
+Parser::parse_invalid_fold_expression() {
+    if (!check(TokenType::LEFT_PAREN)) {
+        return std::nullopt;
+    }
+
+    std::optional<size_t> ellipsis_offset;
+    std::optional<size_t> right_paren_offset;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    for (size_t offset = 1; true; ++offset) {
+        TokenType type = peek(offset).type;
+        if (type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::RIGHT_PAREN) {
+            right_paren_offset = offset;
+            break;
+        }
+        if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+            type == TokenType::ELLIPSIS) {
+            ellipsis_offset = offset;
+        }
+        switch (type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                ++brace_depth;
+                break;
+            case TokenType::RIGHT_BRACE:
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    if (!ellipsis_offset.has_value() || !right_paren_offset.has_value()) {
+        return std::nullopt;
+    }
+
+    auto token_is_fold_operator = [&](size_t offset) {
+        return is_fold_operator(binary_operator_for(peek(offset).type));
+    };
+    auto token_is_operator_like = [&](size_t offset) {
+        if (token_is_fold_operator(offset)) {
+            return true;
+        }
+        switch (peek(offset).type) {
+            case TokenType::THREE_WAY_COMPARE:
+            case TokenType::DOT:
+            case TokenType::ARROW:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    std::optional<size_t> bad_operator_offset;
+    if (*ellipsis_offset == 1) {
+        size_t operator_offset = *ellipsis_offset + 1;
+        if (operator_offset >= *right_paren_offset) {
+            return std::nullopt;
+        }
+        if (!token_is_operator_like(operator_offset)) {
+            return std::nullopt;
+        }
+        if (!token_is_fold_operator(operator_offset)) {
+            bad_operator_offset = operator_offset;
+        }
+    } else if (*ellipsis_offset + 1 == *right_paren_offset) {
+        if (*ellipsis_offset < 2) {
+            return std::nullopt;
+        }
+        size_t operator_offset = *ellipsis_offset - 1;
+        if (!token_is_operator_like(operator_offset)) {
+            return std::nullopt;
+        }
+        if (!token_is_fold_operator(operator_offset)) {
+            bad_operator_offset = operator_offset;
+        }
+    } else {
+        if (*ellipsis_offset < 2 ||
+            *ellipsis_offset + 1 >= *right_paren_offset) {
+            return std::nullopt;
+        }
+        size_t left_operator_offset = *ellipsis_offset - 1;
+        size_t right_operator_offset = *ellipsis_offset + 1;
+        if (!token_is_operator_like(left_operator_offset) ||
+            !token_is_operator_like(right_operator_offset)) {
+            return std::nullopt;
+        }
+        if (!token_is_fold_operator(left_operator_offset)) {
+            bad_operator_offset = left_operator_offset;
+        } else if (!token_is_fold_operator(right_operator_offset)) {
+            bad_operator_offset = right_operator_offset;
+        }
+    }
+    if (!bad_operator_offset.has_value()) {
+        return std::nullopt;
+    }
+
+    size_t begin = current_raw_index();
+    diagnose(DiagnosticLevel::Error,
+             "unsupported fold operator",
+             peek(*bad_operator_offset).loc);
+    for (size_t consumed = 0;
+         consumed <= *right_paren_offset && !at_end();
+         ++consumed) {
+        consume();
+    }
+    collect::ExprResult sem;
+    sem.has_error = true;
+    sem.type = collect_session_.file().unknown_type();
+    NodeId syntax = make_node(NodeKind::Error,
+                              begin,
+                              last_consumed_raw_end(),
+                              {},
+                              text_payload("fold expression"),
+                              NodeFlagHasError);
+    return ParsedExpr{syntax, std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_primary_expression() {
+    size_t begin = current_raw_index();
+    auto consume_literal_suffix = [&]() {
+        std::string suffix;
+        if (check(TokenType::LITERAL_SUFFIX)) {
+            suffix = std::string(current().value);
+            consume();
+        }
+        return suffix;
+    };
+    if (check(TokenType::BITWISE_XOR) &&
+        (peek(1).type == TokenType::LEFT_BRACE ||
+         peek(1).type == TokenType::LEFT_PAREN)) {
+        return parse_block_literal_expression();
+    }
+    if (lang_opts_.is_objc()) {
+        if (check(TokenType::AT)) {
+            return parse_objc_at_expression();
+        }
+
+        if (check(TokenType::LEFT_BRACKET) && !lang_opts_.is_cxx_mode()) {
+            return parse_objc_message_expression();
+        }
+    }
+
+    if (check(TokenType::TEMPLATE) &&
+        peek(1).type == TokenType::SPLICE_OPEN) {
+        Token template_token = current();
+        consume();
+        Token open = current();
+        consume();
+        ParsedExpr operand = parse_expression(PrecLevel::ASSIGNMENT);
+        cir::Fragment operand_fragment = operand.sem.fragment;
+        if (!match(TokenType::SPLICE_CLOSE)) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected ':]' after splice operand",
+                     current_loc());
+        }
+        collect::Session::SpliceTemplateResolution resolution =
+            collect_session_.resolve_splice_template_operand(
+                std::move(operand.sem), open.loc);
+        std::vector<collect::Session::TemplateArgument> arguments;
+        bool has_arguments = check(TokenType::LESS_THAN);
+        const collect::Session::TemplateInfo* info =
+            resolution.template_entity.valid()
+                ? collect_session_.template_info(
+                      resolution.template_entity)
+                : nullptr;
+        bool parsed_arguments = true;
+        if (has_arguments) {
+            if (resolution.dependent || !info) {
+                parsed_arguments =
+                    parse_dependent_expression_template_argument_list(
+                        open.loc);
+            } else {
+                std::vector<const collect::Session::TemplateInfo*>
+                    function_candidates;
+                if (!info->is_class_template && !info->is_alias_template &&
+                    !info->is_variable_template && !info->is_concept) {
+                    function_candidates =
+                        collect_session_.function_template_infos_for_name(
+                            info->lexical_context,
+                            info->name,
+                            /*include_parents=*/false);
+                }
+                parsed_arguments = function_candidates.size() > 1
+                    ? parse_candidate_neutral_template_argument_list(
+                          *info, arguments, open.loc)
+                    : parse_template_argument_list(
+                          *info, arguments, open.loc);
+            }
+        }
+        collect::ExprResult sem;
+        if (resolution.dependent) {
+            sem.fragment = std::move(operand_fragment);
+            sem.type = collect_session_.file().dependent_type(
+                "dependent template splice");
+            sem.category = collect::ValueCategory::Dependent;
+            sem.has_error = !parsed_arguments;
+            sem = collect_session_.make_dependent_expr(
+                std::move(sem), template_token.loc);
+        } else if (resolution.has_error || !info || !parsed_arguments) {
+            sem.has_error = true;
+        } else if (check(TokenType::SCOPE_RESOLUTION)) {
+            if (!has_arguments ||
+                (!info->is_class_template && !info->is_alias_template)) {
+                diagnose(DiagnosticLevel::Error,
+                         "spliced template scope must designate a class or alias template specialization",
+                         open.loc);
+                sem.has_error = true;
+            } else {
+                cir::EntityId instantiated = instantiate_template_with_args(
+                    *info, std::move(arguments), open.loc);
+                cir::DeclContextId context =
+                    instantiated.valid() &&
+                            collect_session_.file().valid(instantiated)
+                        ? collect_session_.file()
+                              .entity(instantiated)
+                              .semantic_context
+                        : cir::DeclContextId{};
+                while (context.valid() &&
+                       check(TokenType::SCOPE_RESOLUTION)) {
+                    consume();
+                    bool has_template = match(TokenType::TEMPLATE);
+                    if (!is_identifier_token(current().type)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected name after spliced template scope",
+                                 current_loc());
+                        sem.has_error = true;
+                        break;
+                    }
+                    Token component = current();
+                    consume();
+                    if (check(TokenType::LESS_THAN)) {
+                        const collect::Session::TemplateInfo* component_info =
+                            collect_session_.template_info_in_context(
+                                context,
+                                component.value,
+                                /*include_parents=*/false);
+                        if (!component_info ||
+                            (!component_info->is_class_template &&
+                             !component_info->is_alias_template)) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "spliced scope component is not a type template",
+                                     component.loc);
+                            sem.has_error = true;
+                            break;
+                        }
+                        std::vector<collect::Session::TemplateArgument>
+                            component_arguments;
+                        if (!parse_and_canonicalize_template_argument_list(
+                                *component_info,
+                                component_arguments,
+                                component.loc)) {
+                            sem.has_error = true;
+                            break;
+                        }
+                        cir::EntityId component_entity =
+                            instantiate_template_with_args(
+                                *component_info,
+                                std::move(component_arguments),
+                                component.loc,
+                                0,
+                                false,
+                                true);
+                        context = component_entity.valid() &&
+                                  collect_session_.file().valid(
+                                      component_entity)
+                            ? collect_session_.file()
+                                  .entity(component_entity)
+                                  .semantic_context
+                            : cir::DeclContextId{};
+                        continue;
+                    }
+                    if (has_template) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "template disambiguator requires a template argument list",
+                                 component.loc);
+                        sem.has_error = true;
+                        break;
+                    }
+                    if (check(TokenType::SCOPE_RESOLUTION)) {
+                        collect::Session::QualifierResolution next =
+                            collect_session_.resolve_qualifier_component(
+                                context, component.value, component.loc);
+                        if (next.has_error || !next.context.valid()) {
+                            sem.has_error = true;
+                            break;
+                        }
+                        context = next.context;
+                    } else {
+                        sem = collect_session_.lookup_qualified_name(
+                            context, component.value, component.loc);
+                    }
+                }
+                if (!context.valid() && !sem.has_error) {
+                    sem.has_error = true;
+                }
+            }
+        } else if (!info->is_class_template && !info->is_alias_template &&
+                   !info->is_concept) {
+            if (!has_arguments && info->is_variable_template) {
+                diagnose(DiagnosticLevel::Error,
+                         "a variable-template splice requires a template argument list",
+                         open.loc);
+                sem.has_error = true;
+            } else {
+                sem = instantiate_template_id_expression_result(
+                    *info,
+                    std::move(arguments),
+                    open.loc,
+                    /*qualified_name=*/false);
+            }
+        } else {
+            diagnose(DiagnosticLevel::Error,
+                     "template splice is not valid in an expression",
+                     open.loc);
+            sem.has_error = true;
+        }
+        return {make_node(NodeKind::SpliceExpr,
+                          begin,
+                          last_consumed_raw_end(),
+                          {operand.syntax},
+                          text_payload("template [:") ,
+                          sem.has_error ? NodeFlagHasError : NodeFlagNone),
+                std::move(sem)};
+    }
+
+    if (check(TokenType::SPLICE_OPEN)) {
+        size_t begin = current_raw_index();
+        Token open = current();
+        consume();
+        ParsedExpr operand = parse_expression(PrecLevel::ASSIGNMENT);
+        if (!match(TokenType::SPLICE_CLOSE)) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected ':]' after splice operand",
+                     current_loc());
+        }
+        collect::ExprResult sem;
+        if (check(TokenType::SCOPE_RESOLUTION) &&
+            peek(1).type == TokenType::TEMPLATE) {
+            cir::Fragment operand_fragment = operand.sem.fragment;
+            bool dependent_scope = false;
+            collect::Session::QualifierResolution scope =
+                collect_session_.resolve_splice_scope_operand(
+                    std::move(operand.sem), open.loc, &dependent_scope);
+            bool parsed_suffix = true;
+            if (dependent_scope) {
+                while (check(TokenType::SCOPE_RESOLUTION)) {
+                    consume();
+                    (void)match(TokenType::TEMPLATE);
+                    if (!is_identifier_token(current().type)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected name after spliced scope",
+                                 current_loc());
+                        parsed_suffix = false;
+                        break;
+                    }
+                    Token component = current();
+                    consume();
+                    if (check(TokenType::LESS_THAN) &&
+                        !parse_dependent_expression_template_argument_list(
+                            component.loc)) {
+                        parsed_suffix = false;
+                        break;
+                    }
+                }
+                collect::ExprResult dependent;
+                dependent.fragment = std::move(operand_fragment);
+                dependent.type = collect_session_.file().dependent_type(
+                    "dependent spliced qualified name");
+                dependent.category = collect::ValueCategory::Dependent;
+                dependent.has_error = !parsed_suffix;
+                sem = collect_session_.make_dependent_expr(
+                    std::move(dependent), open.loc);
+            } else if (!scope.has_error) {
+                cir::DeclContextId context = scope.context;
+                while (check(TokenType::SCOPE_RESOLUTION)) {
+                    consume();
+                    bool has_template = match(TokenType::TEMPLATE);
+                    if (!is_identifier_token(current().type)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected name after spliced scope",
+                                 current_loc());
+                        sem.has_error = true;
+                        break;
+                    }
+                    Token component = current();
+                    consume();
+                    if (check(TokenType::LESS_THAN)) {
+                        const collect::Session::TemplateInfo* info =
+                            collect_session_.template_info_in_context(
+                                context,
+                                component.value,
+                                /*include_parents=*/false);
+                        if (!info ||
+                            (!info->is_class_template &&
+                             !info->is_alias_template)) {
+                            diagnose(DiagnosticLevel::Error,
+                                     has_template
+                                         ? "template disambiguator names a non-template"
+                                         : "spliced scope component is not a template",
+                                     component.loc);
+                            sem.has_error = true;
+                            break;
+                        }
+                        std::vector<collect::Session::TemplateArgument>
+                            arguments;
+                        uint64_t point_lookup_generation = 0;
+                        if (!parse_and_canonicalize_template_argument_list(
+                                *info,
+                                arguments,
+                                component.loc,
+                                &point_lookup_generation)) {
+                            sem.has_error = true;
+                            break;
+                        }
+                        cir::EntityId instantiated =
+                            instantiate_template_with_args(
+                                *info,
+                                std::move(arguments),
+                                component.loc,
+                                point_lookup_generation,
+                                /*replay_guard_entered=*/false,
+                                /*arguments_are_canonical=*/true);
+                        if (!instantiated.valid() ||
+                            !collect_session_.file().valid(instantiated)) {
+                            sem.has_error = true;
+                            break;
+                        }
+                        context = collect_session_.file()
+                                      .entity(instantiated)
+                                      .semantic_context;
+                        if (!context.valid()) {
+                            sem.has_error = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    if (has_template) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "template disambiguator requires a template argument list",
+                                 component.loc);
+                        sem.has_error = true;
+                        break;
+                    }
+                    if (check(TokenType::SCOPE_RESOLUTION)) {
+                        collect::Session::QualifierResolution next =
+                            collect_session_.resolve_qualifier_component(
+                                context, component.value, component.loc);
+                        if (next.has_error || !next.context.valid()) {
+                            sem.has_error = true;
+                            break;
+                        }
+                        context = next.context;
+                        continue;
+                    }
+                    sem = collect_session_.lookup_qualified_name(
+                        context, component.value, component.loc);
+                    break;
+                }
+            } else {
+                sem.has_error = true;
+            }
+        } else if (check(TokenType::SCOPE_RESOLUTION) &&
+            is_identifier_token(peek(1).type)) {
+
+            std::vector<std::string> path;
+            do {
+                consume();
+                path.push_back(std::string(current().value));
+                consume();
+            } while (check(TokenType::SCOPE_RESOLUTION) &&
+                     is_identifier_token(peek(1).type));
+            sem = collect_session_.collect_splice_qualified_expr(
+                std::move(operand.sem), path, open.loc);
+        } else {
+            sem = collect_session_.collect_splice_expr(std::move(operand.sem),
+                                                       open.loc);
+        }
+        return {make_node(NodeKind::SpliceExpr,
+                          begin,
+                          last_consumed_raw_end(),
+                          {operand.syntax},
+                          text_payload("[:"),
+                          sem.has_error ? NodeFlagHasError : NodeFlagNone),
+                std::move(sem)};
+    }
+
+    if (lang_opts_.is_cxx_mode() && check(TokenType::LEFT_BRACKET) &&
+        peek(1).type != TokenType::LEFT_BRACKET) {
+        return parse_lambda_expression();
+    }
+    if (auto builtin = parse_builtin_primary_expression()) {
+        return *std::move(builtin);
+    }
+    if (check(TokenType::GENERIC)) {
+        return parse_generic_selection_expression();
+    }
+    if (lang_opts_.is_cxx_mode() && check(TokenType::REQUIRES_KW)) {
+        return parse_requires_expression();
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        decltype_specifier_precedes_scope()) {
+        return parse_cxx_qualified_id_expression();
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        check(TokenType::SCOPE_RESOLUTION)) {
+
+        return parse_cxx_qualified_id_expression();
+    }
+
+    if (lang_opts_.is_cxx_mode() && is_type_start(current().type) &&
+        !is_identifier_token(current().type)) {
+        TokenType first_type_token = current().type;
+        auto is_single_token_fundamental_specifier = [](TokenType token) {
+            switch (token) {
+                case TokenType::VOID:
+                case TokenType::CHAR:
+                case TokenType::SHORT:
+                case TokenType::INT:
+                case TokenType::LONG:
+                case TokenType::FLOAT:
+                case TokenType::DOUBLE:
+                case TokenType::SIGNED:
+                case TokenType::UNSIGNED:
+                case TokenType::BOOL:
+                case TokenType::WCHAR_T:
+                case TokenType::CHAR8_T:
+                case TokenType::CHAR16_T:
+                case TokenType::CHAR32_T:
+                case TokenType::INT128:
+                case TokenType::FLOAT16:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        DeclarationParser type_parser(*this);
+        cir::TypeRef type = type_parser.parse_declaration(false, true);
+        if (is_single_token_fundamental_specifier(first_type_token) &&
+            current_raw_index() != begin + 1) {
+            diagnose(DiagnosticLevel::Error,
+                     "functional cast type must be a single simple-type-specifier",
+                     loc_for_index(begin));
+            collect::ExprResult sem;
+            sem.has_error = true;
+            return {make_node(NodeKind::Error,
+                              begin,
+                              last_consumed_raw_end(),
+                              {},
+                              {},
+                              NodeFlagHasError),
+                    std::move(sem)};
+        }
+        if (type.type.valid() &&
+            (check(TokenType::LEFT_PAREN) ||
+             check(TokenType::LEFT_BRACE))) {
+            collect::ExprResult sem;
+            sem.type = type.type;
+            sem.category = collect::ValueCategory::Type;
+            NodeId syntax = type_parser.type_syntax != InvalidNodeId
+                ? type_parser.type_syntax
+                : make_node(NodeKind::TypeName,
+                            begin,
+                            last_consumed_raw_end(),
+                            {},
+                            text_payload(
+                                collect_session_.file().format_type(type)));
+            return {syntax, std::move(sem)};
+        }
+        diagnose(DiagnosticLevel::Error,
+                 "expected '(' or '{' after type name in expression",
+                 current_loc());
+        collect::ExprResult sem;
+        sem.has_error = true;
+        return {make_node(NodeKind::Error,
+                          begin,
+                          last_consumed_raw_end(),
+                          {},
+                          {},
+                          NodeFlagHasError),
+                std::move(sem)};
+    }
+    if (is_integer_token(current().type)) {
+        Token token = current();
+        SrcLoc loc = token.loc;
+        consume();
+        std::string suffix = consume_literal_suffix();
+        std::string spelling = aburi::token_spelling_for_output(token);
+        int64_t value = 0;
+        if (auto parsed = parse_integer_literal_info(spelling)) {
+            value = static_cast<int64_t>(parsed->value);
+        } else {
+            diagnose(DiagnosticLevel::Error, "invalid integer literal", loc);
+        }
+        IntegerLiteralPayload payload{value, spelling, suffix};
+        NodeId syntax = make_node(NodeKind::IntegerLiteral, begin, last_consumed_raw_end(), {}, std::move(payload));
+        collect::ExprResult sem =
+            collect_session_.make_integer_literal(value, spelling, token.type, loc);
+        if (!suffix.empty()) {
+            sem = collect_session_.collect_user_defined_literal(
+                std::move(sem),
+                collect::UserDefinedLiteralKind::Integer,
+                std::move(suffix),
+                std::move(spelling),
+                loc);
+        }
+        return {syntax, std::move(sem)};
+    }
+    if (is_imaginary_token(current().type)) {
+        Token token = current();
+        SrcLoc loc = token.loc;
+        consume();
+        std::string spelling = aburi::token_spelling_for_output(token);
+        FloatingLiteralKind literal_kind =
+            token.type == TokenType::IMAG_FLOAT_CONST ? FloatingLiteralKind::Float
+            : token.type == TokenType::IMAG_LONG_DOUBLE_CONST
+                ? FloatingLiteralKind::LongDouble
+                : FloatingLiteralKind::Double;
+        FloatingLiteralPayload payload{literal_kind, spelling};
+        NodeId syntax = make_node(NodeKind::FloatingLiteral, begin, last_consumed_raw_end(), {}, std::move(payload));
+        collect::ExprResult sem =
+            collect_session_.make_imaginary_literal(literal_kind, std::move(spelling), loc);
+        return {syntax, std::move(sem)};
+    }
+    if (is_floating_token(current().type)) {
+        Token token = current();
+        SrcLoc loc = token.loc;
+        consume();
+        std::string suffix = consume_literal_suffix();
+        std::string spelling = aburi::token_spelling_for_output(token);
+        FloatingLiteralKind literal_kind = floating_literal_kind_for(token.type);
+        FloatingLiteralPayload payload{literal_kind, spelling, suffix};
+        NodeId syntax = make_node(NodeKind::FloatingLiteral, begin, last_consumed_raw_end(), {}, std::move(payload));
+        collect::ExprResult sem =
+            collect_session_.make_floating_literal(literal_kind, spelling, loc);
+        if (!suffix.empty()) {
+            sem = collect_session_.collect_user_defined_literal(
+                std::move(sem),
+                collect::UserDefinedLiteralKind::Floating,
+                std::move(suffix),
+                std::move(spelling),
+                loc);
+        }
+        return {syntax, std::move(sem)};
+    }
+    if (check(TokenType::TRUE_KW) || check(TokenType::FALSE_KW)) {
+        SrcLoc loc = current().loc;
+        bool value = check(TokenType::TRUE_KW);
+        std::string spelling = current().value.empty()
+            ? std::string(value ? "true" : "false")
+            : std::string(current().value);
+        consume();
+        BooleanLiteralPayload payload{value, spelling};
+        NodeId syntax = make_node(NodeKind::BooleanLiteral, begin, last_consumed_raw_end(), {}, std::move(payload));
+        collect::ExprResult sem =
+            collect_session_.make_boolean_literal(value, std::move(spelling), loc);
+        return {syntax, std::move(sem)};
+    }
+    if (check(TokenType::NULLPTR_KW)) {
+        Token token = current();
+        consume();
+        NodeId syntax = make_node(NodeKind::Identifier,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  {},
+                                  text_payload("nullptr"));
+        collect::ExprResult sem = collect_session_.make_nullptr_literal(token.loc);
+        return {syntax, std::move(sem)};
+    }
+    if (check(TokenType::THIS_KW)) {
+        Token token = current();
+        consume();
+        NodeId syntax = make_node(NodeKind::Identifier,
+                                  begin,
+                                  last_consumed_raw_end(),
+                                  {},
+                                  text_payload("this"));
+        collect::ExprResult sem = collect_session_.collect_this_expr(token.loc);
+        return {syntax, std::move(sem)};
+    }
+    if (check(TokenType::CHAR_LITERAL)) {
+        Token token = current();
+        SrcLoc loc = token.loc;
+        consume();
+        std::string suffix = consume_literal_suffix();
+        std::string spelling = aburi::token_spelling_for_output(token);
+        std::string decoded = std::string(token.value);
+        int64_t value = character_literal_value(decoded);
+        CharacterLiteralPayload payload{
+            value, token.literal_prefix, decoded, spelling, suffix
+        };
+        NodeId syntax = make_node(NodeKind::CharacterLiteral, begin, last_consumed_raw_end(), {}, std::move(payload));
+        collect::ExprResult sem =
+            collect_session_.make_character_literal(std::move(decoded), token.literal_prefix,
+                spelling, loc);
+        if (!suffix.empty()) {
+            sem = collect_session_.collect_user_defined_literal(
+                std::move(sem),
+                collect::UserDefinedLiteralKind::Character,
+                std::move(suffix),
+                std::move(spelling),
+                loc);
+        }
+        return {syntax, std::move(sem)};
+    }
+    if (check(TokenType::STRING_LITERAL)) {
+        Token token = current();
+        SrcLoc loc = token.loc;
+        consume();
+        std::string suffix = consume_literal_suffix();
+        std::string spelling = aburi::token_spelling_for_output(token);
+        std::string decoded = std::string(token.value);
+        StringLiteralPayload payload{
+            token.literal_prefix, decoded, spelling, suffix
+        };
+        NodeId syntax = make_node(NodeKind::StringLiteral, begin, last_consumed_raw_end(), {}, std::move(payload));
+        collect::ExprResult sem =
+            collect_session_.make_string_literal(std::move(decoded), spelling, loc,
+                                                 token.literal_prefix);
+        if (!suffix.empty()) {
+            sem = collect_session_.collect_user_defined_literal(
+                std::move(sem),
+                collect::UserDefinedLiteralKind::String,
+                std::move(suffix),
+                std::move(spelling),
+                loc);
+        }
+        return {syntax, std::move(sem)};
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        is_identifier_token(current().type) &&
+        peek(1).type == TokenType::ELLIPSIS &&
+        peek(2).type == TokenType::LEFT_BRACKET) {
+        Token pack_name = current();
+        consume();
+        consume();
+        consume();
+        ParsedExpr index = parse_conditional_expression();
+        if (!match(TokenType::RIGHT_BRACKET)) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected ']' after pack index",
+                     current_loc());
+        }
+        if (!lang_opts_.is_cxx26_or_later()) {
+            diagnose(DiagnosticLevel::Error,
+                     "pack indexing is a C++26 feature",
+                     pack_name.loc);
+        }
+        collect::ExprResult sem = collect_session_.collect_pack_index_expr(
+            pack_name.value, std::move(index.sem), pack_name.loc);
+        if (!lang_opts_.is_cxx26_or_later()) {
+            sem.has_error = true;
+        }
+        NodeId syntax = make_node(
+            NodeKind::PackIndexExpr,
+            begin,
+            last_consumed_raw_end(),
+            {index.syntax},
+            text_payload(pack_name.value),
+            sem.has_error ? NodeFlagHasError : NodeFlagNone);
+        return {syntax, std::move(sem)};
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        collect_session_.in_pack_pattern_capture() &&
+        is_identifier_token(current().type)) {
+
+        (void)collect_session_.capture_any_parameter_pack_name(
+            current().value);
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        (check(TokenType::SCOPE_RESOLUTION) ||
+         (is_identifier_token(current().type) &&
+          peek(1).type == TokenType::SCOPE_RESOLUTION &&
+          peek(2).type != TokenType::MULTIPLY) ||
+         (is_identifier_token(current().type) &&
+          peek(1).type == TokenType::LESS_THAN &&
+          template_id_precedes_scope(0)))) {
+        return parse_cxx_qualified_id_expression();
+    }
+    if (lang_opts_.is_cxx_mode() && is_identifier_token(current().type) &&
+        peek(1).type == TokenType::LESS_THAN) {
+        if (const collect::Session::TemplateInfo* info =
+                collect_session_.template_info_for_name(current().value)) {
+            Token name_token = current();
+            consume();
+            return parse_unqualified_template_id_expression(
+                *info,
+                std::string(name_token.value),
+                name_token.loc,
+                begin);
+        }
+
+        if (template_id_precedes_call(0)) {
+            Token name_token = current();
+            consume();
+            collect::Session::TemplateInfo unresolved_info;
+            unresolved_info.name = std::string(name_token.value);
+            std::vector<collect::Session::TemplateArgument> arguments;
+            bool parsed = parse_candidate_neutral_template_argument_list(
+                unresolved_info, arguments, name_token.loc);
+            collect::ExprResult sem;
+            sem.name = unresolved_info.name;
+            sem.unresolved_unqualified_name = true;
+            sem.category = collect::ValueCategory::FunctionDesignator;
+            sem.has_explicit_template_arguments = true;
+            sem.explicit_template_arguments = std::move(arguments);
+            sem.unparenthesized_id_or_member = true;
+            sem.unparenthesized_identifier = true;
+            sem.possibly_parenthesized_identifier = true;
+            sem.has_error = !parsed;
+            NodeId syntax = make_node(
+                NodeKind::Identifier,
+                begin,
+                last_consumed_raw_end(),
+                {},
+                text_payload(unresolved_info.name),
+                sem.has_error ? NodeFlagHasError : NodeFlagNone);
+            return {syntax, std::move(sem)};
+        }
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        is_identifier_token(current().type) &&
+        (peek(1).type == TokenType::LEFT_PAREN ||
+         peek(1).type == TokenType::LEFT_BRACE)) {
+        const collect::Session::TemplateInfo* info =
+            collect_session_.template_info_for_name(current().value);
+        bool is_primary_class = info && info->is_class_template &&
+            !info->is_partial_specialization;
+        bool is_deducible_alias = info && info->is_alias_template &&
+            info->alias_deduction_projection.has_value();
+        if (is_primary_class || is_deducible_alias) {
+            Token name = current();
+            consume();
+            collect::ExprResult sem;
+            cir::TypeRef visible_type =
+                collect_session_.lookup_type_name_ref_checked(name.value,
+                                                              name.loc);
+            if (visible_type.valid()) {
+
+                sem.type = visible_type.type;
+            } else {
+                sem.name = info->name;
+                sem.entity = info->entity;
+            }
+            sem.category = collect::ValueCategory::Type;
+            sem.unparenthesized_id_or_member = true;
+            return {make_node(NodeKind::Identifier,
+                              begin,
+                              last_consumed_raw_end(),
+                              {},
+                              text_payload(name.value)),
+                    std::move(sem)};
+        }
+    }
+    if (lang_opts_.is_cxx_mode() && check(TokenType::OPERATOR_KW)) {
+        if (starts_conversion_function_id()) {
+            ParsedConversionFunctionId conversion_id =
+                *parse_conversion_function_id();
+            collect::ExprResult object = collect_session_.collect_this_expr(
+                conversion_id.loc);
+            collect::ExprResult sem;
+            if (!object.place.valid() &&
+                !collect_session_.expr_is_dependent(object)) {
+                diagnose(DiagnosticLevel::Error,
+                         "an unqualified conversion-function-id requires a member function context",
+                         conversion_id.loc);
+                sem = std::move(object);
+                sem.has_error = true;
+            } else {
+                sem = collect_session_
+                    .collect_conversion_function_id_access_expr(
+                        std::move(object),
+                        conversion_id.target_type,
+                        /*is_arrow=*/false,
+                        conversion_id.loc);
+            }
+            sem.has_error = sem.has_error || conversion_id.has_error;
+            sem.unparenthesized_id_or_member = true;
+            NodeId syntax = make_node(
+                NodeKind::Identifier,
+                begin,
+                last_consumed_raw_end(),
+                conversion_id.type_syntax != InvalidNodeId
+                    ? std::vector<NodeId>{conversion_id.type_syntax}
+                    : std::vector<NodeId>{},
+                text_payload(conversion_id.name),
+                sem.has_error ? NodeFlagHasError : NodeFlagNone);
+            return {syntax, std::move(sem)};
+        }
+        std::optional<ParsedOperatorFunctionId> operator_id =
+            parse_operator_function_id();
+        if (!operator_id) {
+            collect::ExprResult sem;
+            sem.has_error = true;
+            return {make_node(NodeKind::Error,
+                              begin,
+                              last_consumed_raw_end(),
+                              {},
+                              {},
+                              NodeFlagHasError),
+                    std::move(sem)};
+        }
+        if (!operator_id->has_error && check(TokenType::LESS_THAN)) {
+            if (const collect::Session::TemplateInfo* info =
+                    collect_session_.template_info_for_name(
+                        operator_id->name)) {
+                return parse_unqualified_template_id_expression(
+                    *info,
+                    operator_id->name,
+                    operator_id->loc,
+                    begin);
+            }
+        }
+        collect::ExprResult sem = collect_session_.lookup_name(
+            operator_id->name,
+            operator_id->loc,
+            check(TokenType::LEFT_PAREN));
+        sem.has_error = sem.has_error || operator_id->has_error;
+        sem.unparenthesized_id_or_member = true;
+        sem.unparenthesized_identifier = true;
+        sem.possibly_parenthesized_identifier = true;
+        NodeId syntax = make_node(
+            NodeKind::Identifier,
+            begin,
+            last_consumed_raw_end(),
+            {},
+            text_payload(operator_id->name),
+            sem.has_error ? NodeFlagHasError : NodeFlagNone);
+        return {syntax, std::move(sem)};
+    }
+    if (is_identifier_token(current().type)) {
+        bool allow_unresolved_call_name = peek(1).type == TokenType::LEFT_PAREN;
+        NodeId syntax = parse_name_node(NodeKind::Identifier);
+        collect::ExprResult sem =
+            collect_session_.lookup_name(node_text(tree_.node(syntax)),
+                                         tree_.node(syntax).loc,
+                                         allow_unresolved_call_name);
+        if (sem.entity.valid()) {
+            materialize_deferred_static_data_member_expr(sem);
+        }
+        sem.unparenthesized_id_or_member = true;
+        sem.unparenthesized_identifier = true;
+        sem.possibly_parenthesized_identifier = true;
+        return {syntax, std::move(sem)};
+    }
+    if (check(TokenType::LEFT_BRACE)) {
+        return parse_init_list_expression();
+    }
+    if (auto fold = parse_replayed_unary_left_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_direct_unary_left_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_replayed_binary_right_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_direct_binary_right_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_replayed_unary_right_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_direct_unary_right_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_replayed_binary_left_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_direct_binary_left_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (auto fold = parse_invalid_fold_expression()) {
+        return *std::move(fold);
+    }
+    if (match(TokenType::LEFT_PAREN)) {
+        size_t paren_begin = begin;
+        ParsedExpr inner = parse_expression();
+        if (!match(TokenType::RIGHT_PAREN)) {
+            diagnose(DiagnosticLevel::Error, "expected ')'", current_loc());
+        }
+        NodeId syntax = make_node(NodeKind::ParenExpr,
+                                  paren_begin,
+                                  last_consumed_raw_end(),
+                                  {inner.syntax},
+                                  text_payload("paren"));
+        inner.sem.unparenthesized_id_or_member = false;
+        inner.sem.unparenthesized_identifier = false;
+        return {syntax, std::move(inner.sem)};
+    }
+
+    diagnose(DiagnosticLevel::Error, "expected expression", current_loc());
+    consume();
+    collect::ExprResult sem;
+    sem.has_error = true;
+    return {make_node(NodeKind::Error, begin, last_consumed_raw_end(), {}, {}, NodeFlagHasError), std::move(sem)};
+}
+
+Parser::ParsedExpr Parser::parse_generic_selection_expression() {
+
+    size_t begin = current_raw_index();
+    SrcLoc loc = current().loc;
+    consume();
+    if (!match(TokenType::LEFT_PAREN)) {
+        diagnose(DiagnosticLevel::Error, "expected '(' after '_Generic'", current_loc());
+    }
+    ParsedExpr controlling = parse_assignment_expression();
+    std::vector<NodeId> children{controlling.syntax};
+    if (!match(TokenType::COMMA)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ',' after _Generic controlling expression",
+                 current_loc());
+    }
+    std::vector<collect::GenericAssociation> associations;
+    do {
+        collect::GenericAssociation assoc;
+        assoc.loc = current_loc();
+        if (check(TokenType::DEFAULT)) {
+            consume();
+            assoc.is_default = true;
+        } else {
+            children.push_back(parse_type_name(nullptr, nullptr, nullptr, &assoc.type));
+        }
+        if (!match(TokenType::COLON)) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected ':' in generic association",
+                     current_loc());
+        }
+        ParsedExpr assoc_expr = parse_assignment_expression();
+        children.push_back(assoc_expr.syntax);
+        assoc.expr = std::move(assoc_expr.sem);
+        associations.push_back(std::move(assoc));
+    } while (match(TokenType::COMMA));
+    if (!match(TokenType::RIGHT_PAREN)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ')' after generic associations",
+                 current_loc());
+    }
+    collect::ExprResult sem =
+        collect_session_.collect_generic_selection(std::move(controlling.sem),
+                                                   std::move(associations),
+                                                   loc);
+    NodeId syntax = make_node(NodeKind::GenericSelectionExpr,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              text_payload("_Generic"));
+    return {syntax, std::move(sem)};
+}
+
+cir::TypeRef Parser::parse_splice_type_specifier() {
+    Token open = current();
+    consume();
+    ParsedExpr operand = parse_expression(PrecLevel::ASSIGNMENT);
+    cir::TemplateValueExpression splice_operand =
+        operand.sem.template_value_expr;
+    if (!match(TokenType::SPLICE_CLOSE)) {
+        diagnose(DiagnosticLevel::Error,
+                 "expected ':]' after splice operand",
+                 current_loc());
+    }
+    auto parse_dependent_scope_tail =
+        [&](cir::TypeRef qualifier) -> cir::TypeRef {
+        while (match(TokenType::SCOPE_RESOLUTION)) {
+            bool has_template = match(TokenType::TEMPLATE);
+            if (!is_identifier_token(current().type)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected type name after spliced scope",
+                         current_loc());
+                return collect_session_.type_ref(
+                    collect_session_.file().unknown_type());
+            }
+            Token component = current();
+            consume();
+            std::vector<collect::Session::TemplateArgument> arguments;
+            if (check(TokenType::LESS_THAN)) {
+                collect::Session::TemplateInfo neutral;
+                if (!parse_candidate_neutral_template_argument_list(
+                        neutral, arguments, component.loc)) {
+                    return collect_session_.type_ref(
+                        collect_session_.file().unknown_type());
+                }
+            } else if (has_template) {
+                diagnose(DiagnosticLevel::Error,
+                         "template disambiguator requires a template argument list",
+                         component.loc);
+                return collect_session_.type_ref(
+                    collect_session_.file().unknown_type());
+            }
+            qualifier = collect_session_.type_ref(
+                collect_session_.file().dependent_name_type(
+                    qualifier,
+                    component.value,
+                    std::move(arguments),
+                    false));
+        }
+        return qualifier;
+    };
+    auto parse_concrete_scope_tail =
+        [&](cir::DeclContextId context) -> cir::TypeRef {
+        while (match(TokenType::SCOPE_RESOLUTION)) {
+            bool has_template = match(TokenType::TEMPLATE);
+            if (!is_identifier_token(current().type)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected type name after spliced scope",
+                         current_loc());
+                return collect_session_.type_ref(
+                    collect_session_.file().unknown_type());
+            }
+            Token component = current();
+            consume();
+            if (check(TokenType::LESS_THAN)) {
+                const collect::Session::TemplateInfo* component_info =
+                    collect_session_.template_info_in_context(
+                        context,
+                        component.value,
+                        /*include_parents=*/false);
+                if (!component_info ||
+                    (!component_info->is_class_template &&
+                     !component_info->is_alias_template)) {
+                    diagnose(DiagnosticLevel::Error,
+                             has_template
+                                 ? "template disambiguator names a non-template"
+                                 : "spliced scope component is not a template",
+                             component.loc);
+                    return collect_session_.type_ref(
+                        collect_session_.file().unknown_type());
+                }
+                std::vector<collect::Session::TemplateArgument> arguments;
+                if (!parse_and_canonicalize_template_argument_list(
+                        *component_info, arguments, component.loc)) {
+                    return collect_session_.type_ref(
+                        collect_session_.file().unknown_type());
+                }
+                cir::EntityId instantiated = instantiate_template_with_args(
+                    *component_info,
+                    std::move(arguments),
+                    component.loc,
+                    0,
+                    false,
+                    true);
+                if (!instantiated.valid() ||
+                    !collect_session_.file().valid(instantiated)) {
+                    return collect_session_.type_ref(
+                        collect_session_.file().unknown_type());
+                }
+                if (check(TokenType::SCOPE_RESOLUTION)) {
+                    context = collect_session_.file()
+                                  .entity(instantiated)
+                                  .semantic_context;
+                    continue;
+                }
+                return collect_session_.type_ref(
+                    collect_session_.file().entity(instantiated).type);
+            }
+            if (has_template) {
+                diagnose(DiagnosticLevel::Error,
+                         "template disambiguator requires a template argument list",
+                         component.loc);
+                return collect_session_.type_ref(
+                    collect_session_.file().unknown_type());
+            }
+            if (check(TokenType::SCOPE_RESOLUTION)) {
+                collect::Session::QualifierResolution next =
+                    collect_session_.resolve_qualifier_component(
+                        context, component.value, component.loc);
+                if (next.has_error) {
+                    return collect_session_.type_ref(
+                        collect_session_.file().unknown_type());
+                }
+                if (next.dependent_type.valid()) {
+                    return parse_dependent_scope_tail(next.dependent_type);
+                }
+                context = next.context;
+                continue;
+            }
+            cir::TypeId type = collect_session_.lookup_qualified_type_name(
+                context, component.value);
+            if (!type.valid()) {
+                diagnose(DiagnosticLevel::Error,
+                         "spliced scope does not contain type '" +
+                             std::string(component.value) + "'",
+                         component.loc);
+                type = collect_session_.file().unknown_type();
+            }
+            return collect_session_.type_ref(type);
+        }
+        return collect_session_.type_ref(
+            collect_session_.file().unknown_type());
+    };
+    if (check(TokenType::LESS_THAN)) {
+        collect::Session::SpliceTemplateResolution resolution =
+            collect_session_.resolve_splice_template_operand(
+                std::move(operand.sem), open.loc);
+        std::vector<collect::Session::TemplateArgument> arguments;
+        uint64_t point_lookup_generation = 0;
+        if (resolution.dependent) {
+            collect::Session::TemplateInfo neutral;
+            if (!parse_candidate_neutral_template_argument_list(
+                    neutral, arguments, open.loc)) {
+                return collect_session_.type_ref(
+                    collect_session_.file().unknown_type());
+            }
+            cir::NameId display = collect_session_.file().intern_name(
+                "[:splice:]");
+            cir::TypeRef dependent = collect_session_.type_ref(
+                collect_session_.file().template_specialization_type(
+                    display,
+                    resolution.template_entity,
+                    std::move(arguments),
+                    /*is_dependent=*/true,
+                    /*is_class_template_placeholder=*/false,
+                    std::move(splice_operand)));
+            return check(TokenType::SCOPE_RESOLUTION)
+                ? parse_dependent_scope_tail(dependent)
+                : dependent;
+        }
+        const collect::Session::TemplateInfo* info =
+            collect_session_.template_info(resolution.template_entity);
+        if (resolution.has_error || !info ||
+            (!info->is_class_template && !info->is_alias_template)) {
+            if (!resolution.has_error) {
+                diagnose(DiagnosticLevel::Error,
+                         "splice type specialization must designate a class or alias template",
+                         open.loc);
+            }
+            collect::Session::TemplateInfo neutral;
+            (void)parse_candidate_neutral_template_argument_list(
+                neutral, arguments, open.loc);
+            return collect_session_.type_ref(
+                collect_session_.file().unknown_type());
+        }
+        if (!parse_and_canonicalize_template_argument_list(
+                *info,
+                arguments,
+                open.loc,
+                &point_lookup_generation)) {
+            return collect_session_.type_ref(
+                collect_session_.file().unknown_type());
+        }
+        cir::EntityId instantiated = instantiate_template_with_args(
+            *info,
+            std::move(arguments),
+            open.loc,
+            point_lookup_generation,
+            /*replay_guard_entered=*/false,
+            /*arguments_are_canonical=*/true);
+        if (!instantiated.valid() ||
+            !collect_session_.file().valid(instantiated)) {
+            return collect_session_.type_ref(
+                collect_session_.file().unknown_type());
+        }
+        if (check(TokenType::SCOPE_RESOLUTION)) {
+            return parse_concrete_scope_tail(
+                collect_session_.file().entity(instantiated).semantic_context);
+        }
+        return collect_session_.type_ref(
+            collect_session_.file().entity(instantiated).type);
+    }
+    if (check(TokenType::SCOPE_RESOLUTION)) {
+        bool dependent = false;
+        collect::Session::QualifierResolution scope =
+            collect_session_.resolve_splice_scope_operand(
+                std::move(operand.sem), open.loc, &dependent);
+        if (dependent) {
+            return parse_dependent_scope_tail(
+                scope.dependent_type.valid()
+                    ? scope.dependent_type
+                    : collect_session_.type_ref(
+                          collect_session_.file().dependent_type(
+                              "[:splice-scope:]")));
+        }
+        if (scope.has_error || !scope.context.valid()) {
+            return collect_session_.type_ref(
+                collect_session_.file().unknown_type());
+        }
+        return parse_concrete_scope_tail(scope.context);
+    }
+    return collect_session_.splice_type_operand(std::move(operand.sem),
+                                                open.loc);
+}
+
+} // namespace aburi::syntax

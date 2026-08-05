@@ -1,0 +1,270 @@
+#ifndef ADINKRA_THREAD
+#define ADINKRA_THREAD
+
+#include <__adinkra/config>
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <ctime>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <ostream>
+#include <pthread.h>
+#include <sched.h>
+#include <system_error>
+#include <tuple>
+#include <type_traits>
+#include <unistd.h>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class thread {
+    class state_base {
+    public:
+        virtual ~state_base() = default;
+        virtual void run() = 0;
+    };
+
+    template<class Function, class... Arguments>
+    class state final : public state_base {
+    public:
+        template<class InputFunction, class... InputArguments>
+        explicit state(
+            InputFunction&& function,
+            InputArguments&&... arguments)
+            : values_(
+                  std::forward<InputFunction>(function),
+                  std::forward<InputArguments>(arguments)...) {}
+
+        void run() override {
+            std::apply(
+                []<class Callable, class... Values>(
+                    Callable& function, Values&... values) {
+                    std::invoke(
+                        std::move(function),
+                        std::move(values)...);
+                },
+                values_);
+        }
+
+    private:
+        tuple<Function, Arguments...> values_;
+    };
+
+public:
+    using native_handle_type = pthread_t;
+
+    class id {
+    public:
+        constexpr id() noexcept : value_() {}
+
+        friend bool operator==(id left, id right) noexcept {
+            if (left.value_ == native_handle_type{} ||
+                right.value_ == native_handle_type{}) {
+                return left.value_ == right.value_;
+            }
+            return ::pthread_equal(left.value_, right.value_) != 0;
+        }
+
+        friend bool operator<(id left, id right) noexcept {
+            return reinterpret_cast<uintptr_t>(left.value_) <
+                   reinterpret_cast<uintptr_t>(right.value_);
+        }
+
+    private:
+        friend class thread;
+        friend id __adinkra_current_thread_id() noexcept;
+        friend struct hash<id>;
+
+        explicit id(native_handle_type value) noexcept : value_(value) {}
+        native_handle_type value_;
+    };
+
+    thread() noexcept : handle_(), joinable_(false) {}
+
+    template<class Function, class... Arguments>
+        requires (
+            !is_same_v<remove_cvref_t<Function>, thread> &&
+            requires(
+                decay_t<Function>& function,
+                decay_t<Arguments>&... values) {
+                std::invoke(
+                    std::move(function),
+                    std::move(values)...);
+            })
+    explicit thread(Function&& function, Arguments&&... arguments)
+        : handle_(), joinable_(false) {
+        using state_type = state<
+            decay_t<Function>, decay_t<Arguments>...>;
+        state_base* value = new state_type(
+            std::forward<Function>(function),
+            std::forward<Arguments>(arguments)...);
+        const int result =
+            ::pthread_create(&handle_, nullptr, start, value);
+        if (result != 0) {
+            delete value;
+            throw system_error(
+                result, generic_category(), "pthread_create");
+        }
+        joinable_ = true;
+    }
+
+    thread(thread&& other) noexcept
+        : handle_(other.handle_), joinable_(other.joinable_) {
+        other.handle_ = native_handle_type{};
+        other.joinable_ = false;
+    }
+
+    thread& operator=(thread&& other) noexcept {
+        if (joinable_) {
+            terminate();
+        }
+        handle_ = other.handle_;
+        joinable_ = other.joinable_;
+        other.handle_ = native_handle_type{};
+        other.joinable_ = false;
+        return *this;
+    }
+
+    ~thread() {
+        if (joinable_) {
+            terminate();
+        }
+    }
+
+    thread(const thread&) = delete;
+    thread& operator=(const thread&) = delete;
+
+    bool joinable() const noexcept {
+        return joinable_;
+    }
+
+    id get_id() const noexcept {
+        return joinable_ ? id(handle_) : id();
+    }
+
+    native_handle_type native_handle() {
+        return handle_;
+    }
+
+    void join() {
+        if (!joinable_) {
+            throw system_error(
+                EINVAL, generic_category(), "thread::join");
+        }
+        const int result = ::pthread_join(handle_, nullptr);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "pthread_join");
+        }
+        handle_ = native_handle_type{};
+        joinable_ = false;
+    }
+
+    void detach() {
+        if (!joinable_) {
+            throw system_error(
+                EINVAL, generic_category(), "thread::detach");
+        }
+        const int result = ::pthread_detach(handle_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), "pthread_detach");
+        }
+        handle_ = native_handle_type{};
+        joinable_ = false;
+    }
+
+    void swap(thread& other) noexcept {
+        std::swap(handle_, other.handle_);
+        std::swap(joinable_, other.joinable_);
+    }
+
+    static unsigned hardware_concurrency() noexcept {
+        const long count = ::sysconf(_SC_NPROCESSORS_ONLN);
+        return count > 0 ? static_cast<unsigned>(count) : 0;
+    }
+
+private:
+    static void* start(void* raw) noexcept {
+        unique_ptr<state_base> value(
+            static_cast<state_base*>(raw));
+        try {
+            value->run();
+        } catch (...) {
+            terminate();
+        }
+        return nullptr;
+    }
+
+    native_handle_type handle_;
+    bool joinable_;
+};
+
+template<>
+struct hash<thread::id> {
+    using argument_type = thread::id;
+    using result_type = size_t;
+
+    size_t operator()(thread::id value) const noexcept {
+        return hash<uintptr_t>{}(
+            reinterpret_cast<uintptr_t>(value.value_));
+    }
+};
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream,
+    thread::id value) {
+    return stream << hash<thread::id>{}(value);
+}
+
+inline void swap(thread& left, thread& right) noexcept {
+    left.swap(right);
+}
+
+inline thread::id __adinkra_current_thread_id() noexcept {
+    return thread::id(::pthread_self());
+}
+
+namespace this_thread {
+
+inline thread::id get_id() noexcept {
+    return __adinkra_current_thread_id();
+}
+
+inline void yield() noexcept {
+    (void)::sched_yield();
+}
+
+template<class Representation, class Period>
+void sleep_for(
+    const chrono::duration<Representation, Period>& duration) {
+    const auto nanoseconds =
+        chrono::duration_cast<chrono::nanoseconds>(duration).count();
+    if (nanoseconds <= 0) {
+        return;
+    }
+    timespec value{
+        static_cast<time_t>(nanoseconds / 1000000000LL),
+        static_cast<long>(nanoseconds % 1000000000LL)};
+    while (::nanosleep(&value, &value) != 0 && errno == EINTR) {}
+}
+
+template<class Clock, class Duration>
+void sleep_until(
+    const chrono::time_point<Clock, Duration>& deadline) {
+    auto now = Clock::now();
+    while (now < deadline) {
+        sleep_for(deadline - now);
+        now = Clock::now();
+    }
+}
+
+} // namespace this_thread
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

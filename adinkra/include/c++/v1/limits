@@ -1,0 +1,211 @@
+#ifndef ADINKRA_LIMITS
+#define ADINKRA_LIMITS
+
+#include <__adinkra/config>
+#include <cfloat>
+#include <climits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+enum float_round_style {
+    round_indeterminate = -1,
+    round_toward_zero = 0,
+    round_to_nearest = 1,
+    round_toward_infinity = 2,
+    round_toward_neg_infinity = 3
+};
+
+enum float_denorm_style {
+    denorm_indeterminate = -1,
+    denorm_absent = 0,
+    denorm_present = 1
+};
+
+template<class Type>
+class numeric_limits {
+public:
+    static constexpr bool is_specialized = false;
+    static constexpr Type min() noexcept { return Type(); }
+    static constexpr Type max() noexcept { return Type(); }
+    static constexpr Type lowest() noexcept { return Type(); }
+    static constexpr int digits = 0;
+    static constexpr int digits10 = 0;
+    static constexpr int max_digits10 = 0;
+    static constexpr bool is_signed = false;
+    static constexpr bool is_integer = false;
+    static constexpr bool is_exact = false;
+    static constexpr int radix = 0;
+    static constexpr Type epsilon() noexcept { return Type(); }
+    static constexpr Type round_error() noexcept { return Type(); }
+    static constexpr int min_exponent = 0;
+    static constexpr int min_exponent10 = 0;
+    static constexpr int max_exponent = 0;
+    static constexpr int max_exponent10 = 0;
+    static constexpr bool has_infinity = false;
+    static constexpr bool has_quiet_NaN = false;
+    static constexpr bool has_signaling_NaN = false;
+    static constexpr float_denorm_style has_denorm = denorm_absent;
+    static constexpr bool has_denorm_loss = false;
+    static constexpr Type infinity() noexcept { return Type(); }
+    static constexpr Type quiet_NaN() noexcept { return Type(); }
+    static constexpr Type signaling_NaN() noexcept { return Type(); }
+    static constexpr Type denorm_min() noexcept { return Type(); }
+    static constexpr bool is_iec559 = false;
+    static constexpr bool is_bounded = false;
+    static constexpr bool is_modulo = false;
+    static constexpr bool traps = false;
+    static constexpr bool tinyness_before = false;
+    static constexpr float_round_style round_style = round_toward_zero;
+};
+
+template<>
+class numeric_limits<bool> {
+public:
+    static constexpr bool is_specialized = true;
+    static constexpr bool min() noexcept { return false; }
+    static constexpr bool max() noexcept { return true; }
+    static constexpr bool lowest() noexcept { return false; }
+    static constexpr int digits = 1;
+    static constexpr int digits10 = 0;
+    static constexpr int max_digits10 = 0;
+    static constexpr bool is_signed = false;
+    static constexpr bool is_integer = true;
+    static constexpr bool is_exact = true;
+    static constexpr int radix = 2;
+    static constexpr bool epsilon() noexcept { return false; }
+    static constexpr bool round_error() noexcept { return false; }
+    static constexpr int min_exponent = 0;
+    static constexpr int min_exponent10 = 0;
+    static constexpr int max_exponent = 0;
+    static constexpr int max_exponent10 = 0;
+    static constexpr bool has_infinity = false;
+    static constexpr bool has_quiet_NaN = false;
+    static constexpr bool has_signaling_NaN = false;
+    static constexpr float_denorm_style has_denorm = denorm_absent;
+    static constexpr bool has_denorm_loss = false;
+    static constexpr bool infinity() noexcept { return false; }
+    static constexpr bool quiet_NaN() noexcept { return false; }
+    static constexpr bool signaling_NaN() noexcept { return false; }
+    static constexpr bool denorm_min() noexcept { return false; }
+    static constexpr bool is_iec559 = false;
+    static constexpr bool is_bounded = true;
+    static constexpr bool is_modulo = false;
+    static constexpr bool traps = false;
+    static constexpr bool tinyness_before = false;
+    static constexpr float_round_style round_style =
+        round_toward_zero;
+};
+
+#define _ADINKRA_INTEGER_LIMITS(Type, Minimum, Maximum, Signed)          \
+    template<> class numeric_limits<Type> {                               \
+    public:                                                               \
+        static constexpr bool is_specialized = true;                      \
+        static constexpr Type min() noexcept { return Minimum; }          \
+        static constexpr Type max() noexcept { return Maximum; }          \
+        static constexpr Type lowest() noexcept { return Minimum; }       \
+        static constexpr int digits =                                     \
+            int(sizeof(Type) * CHAR_BIT - ((Signed) ? 1 : 0));            \
+        static constexpr int digits10 = digits * 301 / 1000;              \
+        static constexpr int max_digits10 = 0;                            \
+        static constexpr bool is_signed = Signed;                         \
+        static constexpr bool is_integer = true;                          \
+        static constexpr bool is_exact = true;                            \
+        static constexpr int radix = 2;                                   \
+        static constexpr Type epsilon() noexcept { return 0; }            \
+        static constexpr Type round_error() noexcept { return 0; }        \
+        static constexpr int min_exponent = 0;                            \
+        static constexpr int min_exponent10 = 0;                          \
+        static constexpr int max_exponent = 0;                            \
+        static constexpr int max_exponent10 = 0;                          \
+        static constexpr bool has_infinity = false;                       \
+        static constexpr bool has_quiet_NaN = false;                      \
+        static constexpr bool has_signaling_NaN = false;                  \
+        static constexpr float_denorm_style has_denorm = denorm_absent;   \
+        static constexpr bool has_denorm_loss = false;                    \
+        static constexpr Type infinity() noexcept { return 0; }           \
+        static constexpr Type quiet_NaN() noexcept { return 0; }          \
+        static constexpr Type signaling_NaN() noexcept { return 0; }      \
+        static constexpr Type denorm_min() noexcept { return 0; }         \
+        static constexpr bool is_iec559 = false;                          \
+        static constexpr bool is_bounded = true;                          \
+        static constexpr bool is_modulo = !(Signed);                      \
+        static constexpr bool traps = false;                              \
+        static constexpr bool tinyness_before = false;                    \
+        static constexpr float_round_style round_style = round_toward_zero; \
+    }
+
+_ADINKRA_INTEGER_LIMITS(char, CHAR_MIN, CHAR_MAX, CHAR_MIN < 0);
+_ADINKRA_INTEGER_LIMITS(signed char, SCHAR_MIN, SCHAR_MAX, true);
+_ADINKRA_INTEGER_LIMITS(unsigned char, 0, UCHAR_MAX, false);
+_ADINKRA_INTEGER_LIMITS(short, SHRT_MIN, SHRT_MAX, true);
+_ADINKRA_INTEGER_LIMITS(unsigned short, 0, USHRT_MAX, false);
+_ADINKRA_INTEGER_LIMITS(int, INT_MIN, INT_MAX, true);
+_ADINKRA_INTEGER_LIMITS(unsigned int, 0U, UINT_MAX, false);
+_ADINKRA_INTEGER_LIMITS(long, LONG_MIN, LONG_MAX, true);
+_ADINKRA_INTEGER_LIMITS(unsigned long, 0UL, ULONG_MAX, false);
+_ADINKRA_INTEGER_LIMITS(long long, LLONG_MIN, LLONG_MAX, true);
+_ADINKRA_INTEGER_LIMITS(unsigned long long, 0ULL, ULLONG_MAX, false);
+#if defined(__WCHAR_UNSIGNED__)
+_ADINKRA_INTEGER_LIMITS(wchar_t, 0, __WCHAR_MAX__, false);
+#else
+_ADINKRA_INTEGER_LIMITS(
+    wchar_t, -__WCHAR_MAX__ - 1, __WCHAR_MAX__, true);
+#endif
+#if defined(__cpp_char8_t)
+_ADINKRA_INTEGER_LIMITS(char8_t, 0, UCHAR_MAX, false);
+#endif
+_ADINKRA_INTEGER_LIMITS(char16_t, 0, __UINT16_MAX__, false);
+_ADINKRA_INTEGER_LIMITS(char32_t, 0, __UINT32_MAX__, false);
+
+#undef _ADINKRA_INTEGER_LIMITS
+
+#define _ADINKRA_FLOAT_LIMITS(Type, Prefix, Huge, Nan)                  \
+    template<> class numeric_limits<Type> {                              \
+    public:                                                              \
+        static constexpr bool is_specialized = true;                     \
+        static constexpr Type min() noexcept { return Prefix##_MIN; }    \
+        static constexpr Type max() noexcept { return Prefix##_MAX; }    \
+        static constexpr Type lowest() noexcept { return -Prefix##_MAX; } \
+        static constexpr int digits = Prefix##_MANT_DIG;                 \
+        static constexpr int digits10 = Prefix##_DIG;                    \
+        static constexpr int max_digits10 = 2 + digits * 301 / 1000;     \
+        static constexpr bool is_signed = true;                          \
+        static constexpr bool is_integer = false;                        \
+        static constexpr bool is_exact = false;                          \
+        static constexpr int radix = Prefix##_RADIX_VALUE;               \
+        static constexpr Type epsilon() noexcept { return Prefix##_EPSILON; } \
+        static constexpr Type round_error() noexcept { return static_cast<Type>(0.5); } \
+        static constexpr int min_exponent = Prefix##_MIN_EXP;            \
+        static constexpr int min_exponent10 = Prefix##_MIN_10_EXP;       \
+        static constexpr int max_exponent = Prefix##_MAX_EXP;            \
+        static constexpr int max_exponent10 = Prefix##_MAX_10_EXP;       \
+        static constexpr bool has_infinity = true;                       \
+        static constexpr bool has_quiet_NaN = true;                      \
+        static constexpr bool has_signaling_NaN = true;                  \
+        static constexpr float_denorm_style has_denorm = denorm_present; \
+        static constexpr Type infinity() noexcept { return Huge; }       \
+        static constexpr Type quiet_NaN() noexcept { return Nan; }       \
+        static constexpr Type signaling_NaN() noexcept { return Nan; }   \
+        static constexpr Type denorm_min() noexcept { return Prefix##_TRUE_MIN; } \
+        static constexpr bool is_iec559 = true;                          \
+        static constexpr bool is_bounded = true;                         \
+        static constexpr bool is_modulo = false;                         \
+        static constexpr bool traps = false;                             \
+        static constexpr bool tinyness_before = false;                   \
+        static constexpr float_round_style round_style = round_to_nearest; \
+    }
+
+#define FLT_RADIX_VALUE FLT_RADIX
+#define DBL_RADIX_VALUE FLT_RADIX
+#define LDBL_RADIX_VALUE FLT_RADIX
+_ADINKRA_FLOAT_LIMITS(float, FLT, __builtin_huge_valf(), __builtin_nanf(""));
+_ADINKRA_FLOAT_LIMITS(double, DBL, __builtin_huge_val(), __builtin_nan(""));
+_ADINKRA_FLOAT_LIMITS(long double, LDBL, __builtin_huge_vall(), __builtin_nanl(""));
+#undef FLT_RADIX_VALUE
+#undef DBL_RADIX_VALUE
+#undef LDBL_RADIX_VALUE
+#undef _ADINKRA_FLOAT_LIMITS
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

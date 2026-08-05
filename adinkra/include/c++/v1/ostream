@@ -1,0 +1,541 @@
+#ifndef ADINKRA_OSTREAM
+#define ADINKRA_OSTREAM
+
+#include <__adinkra/io>
+#include <__adinkra/sstream>
+#include <ios>
+#include <iosfwd>
+#include <streambuf>
+#include <string_view>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits>
+class basic_ostream : public virtual basic_ios<Character, Traits> {
+public:
+    using char_type = Character;
+    using traits_type = Traits;
+    using int_type = typename Traits::int_type;
+    using pos_type = typename Traits::pos_type;
+    using off_type = typename Traits::off_type;
+
+    template<class NativeStream>
+        requires (!is_base_of_v<
+            basic_streambuf<Character, Traits>,
+            remove_cv_t<NativeStream>>)
+    explicit basic_ostream(NativeStream* stream) noexcept
+        : stream_(static_cast<void*>(stream)), buffer_(nullptr) {}
+
+    explicit basic_ostream(
+        basic_streambuf<Character, Traits>* buffer) noexcept
+        : stream_(nullptr), buffer_(buffer) {}
+
+    virtual ~basic_ostream() = default;
+
+    basic_ostream& put(Character value) {
+        if (buffer_ != nullptr) {
+            record(!Traits::eq_int_type(
+                buffer_->sputc(value), Traits::eof()));
+        } else if constexpr (is_same_v<Character, char>) {
+            record(__io::put(stream_, value));
+        } else {
+            record(false);
+        }
+        finish_unit();
+        return *this;
+    }
+
+    basic_ostream& write(const Character* value, streamsize count) {
+        if (count < 0) {
+            this->setstate(ios_base::failbit);
+            return *this;
+        }
+        if (buffer_ != nullptr) {
+            record(buffer_->sputn(value, count) == count);
+        } else if constexpr (is_same_v<Character, char>) {
+            record(__io::write(
+                stream_, value, static_cast<size_t>(count)));
+        } else {
+            record(false);
+        }
+        finish_unit();
+        return *this;
+    }
+
+    basic_ostream& flush() {
+        if (buffer_ != nullptr) {
+            record(buffer_->pubsync() == 0);
+        } else if constexpr (is_same_v<Character, char>) {
+            record(__io::flush(stream_));
+        } else {
+            record(false);
+        }
+        return *this;
+    }
+
+    basic_ostream& operator<<(basic_ostream& (*function)(basic_ostream&)) {
+        return function(*this);
+    }
+
+    basic_ostream& operator<<(
+        basic_ios<Character, Traits>& (*function)(
+            basic_ios<Character, Traits>&)) {
+        function(*this);
+        return *this;
+    }
+
+    basic_ostream& operator<<(ios_base& (*function)(ios_base&)) {
+        function(*this);
+        return *this;
+    }
+
+    basic_ostream& operator<<(bool value) {
+        if ((this->flags() & ios_base::boolalpha) != 0) {
+            return value ? write("true", 4) : write("false", 5);
+        }
+        return write_unsigned(value ? 1 : 0);
+    }
+
+    basic_ostream& operator<<(short value) {
+        return write_signed(value);
+    }
+    basic_ostream& operator<<(unsigned short value) {
+        return write_unsigned(value);
+    }
+    basic_ostream& operator<<(int value) {
+        return write_signed(value);
+    }
+    basic_ostream& operator<<(unsigned int value) {
+        return write_unsigned(value);
+    }
+    basic_ostream& operator<<(long value) {
+        return write_signed(value);
+    }
+    basic_ostream& operator<<(unsigned long value) {
+        return write_unsigned(value);
+    }
+    basic_ostream& operator<<(long long value) {
+        return write_signed(value);
+    }
+    basic_ostream& operator<<(unsigned long long value) {
+        return write_unsigned(value);
+    }
+    basic_ostream& operator<<(float value) {
+        return write_floating(value);
+    }
+    basic_ostream& operator<<(double value) {
+        return write_floating(value);
+    }
+    basic_ostream& operator<<(long double value) {
+        return write_floating(value);
+    }
+    basic_ostream& operator<<(const void* value) {
+        if (buffer_ == nullptr) {
+            record(__io::write_pointer(
+                stream_, value,
+                (this->flags() & ios_base::uppercase) != 0));
+            finish_unit();
+            return *this;
+        }
+        char formatted[96];
+        const size_t count = __sstream::format_pointer(
+            formatted, sizeof(formatted), value,
+            (this->flags() & ios_base::uppercase) != 0);
+        return write_formatted(formatted, count);
+    }
+
+    basic_ostream& operator<<(
+        basic_streambuf<Character, Traits>* buffer) {
+        if (buffer == nullptr) {
+            this->setstate(ios_base::badbit);
+            return *this;
+        }
+        bool copied = false;
+        for (;;) {
+            const int_type value = buffer->sbumpc();
+            if (Traits::eq_int_type(value, Traits::eof())) {
+                break;
+            }
+            copied = true;
+            put(Traits::to_char_type(value));
+            if (this->fail()) {
+                break;
+            }
+        }
+        if (!copied) {
+            this->setstate(ios_base::failbit);
+        }
+        return *this;
+    }
+
+    pos_type tellp() {
+        const long long position =
+            buffer_ != nullptr
+                ? static_cast<long long>(buffer_->pubseekoff(
+                      0, ios_base::cur, ios_base::out))
+                : __io::tell(stream_);
+        if (position < 0) {
+            this->setstate(ios_base::failbit);
+            return pos_type(-1);
+        }
+        return static_cast<pos_type>(position);
+    }
+
+    basic_ostream& seekp(pos_type position) {
+        return seekp(
+            static_cast<off_type>(position), ios_base::beg);
+    }
+
+    basic_ostream& seekp(
+        off_type offset, ios_base::seekdir direction) {
+        if (!this->fail()) {
+            const bool sought =
+                buffer_ != nullptr
+                    ? buffer_->pubseekoff(
+                          offset, direction, ios_base::out) !=
+                          pos_type(-1)
+                    : __io::seek(
+                          stream_, static_cast<long long>(offset),
+                          direction);
+            if (!sought) {
+                this->setstate(ios_base::failbit);
+            }
+        }
+        return *this;
+    }
+
+    void* native_stream() const noexcept { return stream_; }
+    basic_streambuf<Character, Traits>* rdbuf() const noexcept {
+        return buffer_;
+    }
+    basic_streambuf<Character, Traits>* rdbuf(
+        basic_streambuf<Character, Traits>* buffer) noexcept {
+        auto* previous = buffer_;
+        buffer_ = buffer;
+        return previous;
+    }
+
+    basic_ostream& __write_character_sequence(
+        const Character* value, size_t count) {
+        if constexpr (is_same_v<Character, char>) {
+            return write_formatted(value, count);
+        } else {
+            return write(
+                value, static_cast<streamsize>(count));
+        }
+    }
+
+protected:
+    basic_ostream(basic_ostream&& other) noexcept
+        : stream_(other.stream_), buffer_(other.buffer_) {
+        this->move(other);
+        other.stream_ = nullptr;
+        other.buffer_ = nullptr;
+    }
+
+    basic_ostream& operator=(basic_ostream&& other) noexcept {
+        if (this != &other) {
+            this->move(other);
+            stream_ = other.stream_;
+            buffer_ = other.buffer_;
+            other.stream_ = nullptr;
+            other.buffer_ = nullptr;
+        }
+        return *this;
+    }
+
+    void swap(basic_ostream& other) noexcept {
+        this->basic_ios<Character, Traits>::swap(other);
+
+        void* saved_stream = stream_;
+        stream_ = other.stream_;
+        other.stream_ = saved_stream;
+
+        basic_streambuf<Character, Traits>* saved_buffer = buffer_;
+        buffer_ = other.buffer_;
+        other.buffer_ = saved_buffer;
+    }
+
+    void set_native_stream(void* stream) noexcept {
+        stream_ = stream;
+        buffer_ = nullptr;
+    }
+
+    void set_streambuf(
+        basic_streambuf<Character, Traits>* buffer) noexcept {
+        stream_ = nullptr;
+        buffer_ = buffer;
+    }
+
+private:
+    void* stream_;
+    basic_streambuf<Character, Traits>* buffer_;
+
+    int number_base() const noexcept {
+        const auto flags = this->flags();
+        return (flags & ios_base::hex) != 0 ? 16
+             : (flags & ios_base::oct) != 0 ? 8
+                                            : 10;
+    }
+
+    void record(bool success) {
+        if (!success) {
+            this->setstate(ios_base::badbit);
+        }
+    }
+
+    void finish_unit() {
+        if ((this->flags() & ios_base::unitbuf) != 0) {
+            flush();
+        }
+        this->width(0);
+    }
+
+    basic_ostream& write_signed(long long value) {
+        const auto flags = this->flags();
+        const int base = number_base();
+        if (buffer_ != nullptr) {
+            char formatted[128];
+            const size_t count =
+                base == 10
+                    ? __sstream::format_signed(
+                          formatted, sizeof(formatted), value, base,
+                          (flags & ios_base::uppercase) != 0,
+                          (flags & ios_base::showbase) != 0,
+                          (flags & ios_base::showpos) != 0)
+                    : __sstream::format_unsigned(
+                          formatted, sizeof(formatted),
+                          static_cast<unsigned long long>(value), base,
+                          (flags & ios_base::uppercase) != 0,
+                          (flags & ios_base::showbase) != 0, false);
+            return write_formatted(formatted, count);
+        }
+        if (base == 10) {
+            record(__io::write_signed(
+                stream_, value, base,
+                (flags & ios_base::uppercase) != 0,
+                (flags & ios_base::showbase) != 0,
+                (flags & ios_base::showpos) != 0));
+        } else {
+            record(__io::write_unsigned(
+                stream_, static_cast<unsigned long long>(value), base,
+                (flags & ios_base::uppercase) != 0,
+                (flags & ios_base::showbase) != 0,
+                false));
+        }
+        finish_unit();
+        return *this;
+    }
+
+    basic_ostream& write_unsigned(unsigned long long value) {
+        const auto flags = this->flags();
+        if (buffer_ != nullptr) {
+            char formatted[128];
+            const size_t count = __sstream::format_unsigned(
+                formatted, sizeof(formatted), value, number_base(),
+                (flags & ios_base::uppercase) != 0,
+                (flags & ios_base::showbase) != 0,
+                (flags & ios_base::showpos) != 0);
+            return write_formatted(formatted, count);
+        }
+        record(__io::write_unsigned(
+            stream_, value, number_base(),
+            (flags & ios_base::uppercase) != 0,
+            (flags & ios_base::showbase) != 0,
+            (flags & ios_base::showpos) != 0));
+        finish_unit();
+        return *this;
+    }
+
+    basic_ostream& write_floating(long double value) {
+        const auto flags = this->flags();
+        if (buffer_ != nullptr) {
+            char formatted[512];
+            const size_t count = __sstream::format_floating(
+                formatted, sizeof(formatted), value,
+                static_cast<int>(this->precision()),
+                (flags & ios_base::uppercase) != 0,
+                (flags & ios_base::scientific) != 0,
+                (flags & ios_base::fixed) != 0,
+                (flags & ios_base::showpoint) != 0,
+                (flags & ios_base::showpos) != 0);
+            return write_formatted(formatted, count);
+        }
+        record(__io::write_floating(
+            stream_, value, static_cast<int>(this->precision()),
+            (flags & ios_base::uppercase) != 0,
+            (flags & ios_base::scientific) != 0,
+            (flags & ios_base::fixed) != 0,
+            (flags & ios_base::showpoint) != 0,
+            (flags & ios_base::showpos) != 0));
+        finish_unit();
+        return *this;
+    }
+
+    basic_ostream& write_formatted(
+        const char* value, size_t count) {
+        if constexpr (is_same_v<Character, char>) {
+            const streamsize requested = this->width();
+            const size_t width =
+                requested > 0
+                    ? static_cast<size_t>(requested)
+                    : 0;
+            const size_t padding =
+                width > count ? width - count : 0;
+            const auto flags = this->flags();
+
+            size_t prefix = 0;
+            if (count != 0 && padding != 0 &&
+                (flags & ios_base::internal) != 0) {
+                if (value[0] == '+' || value[0] == '-') {
+                    prefix = 1;
+                } else if (
+                    count >= 2 && value[0] == '0' &&
+                    (value[1] == 'x' || value[1] == 'X')) {
+                    prefix = 2;
+                }
+            }
+
+            if ((flags & ios_base::left) != 0) {
+                write_raw(value, count);
+                write_fill(padding);
+            } else if (prefix != 0) {
+                write_raw(value, prefix);
+                write_fill(padding);
+                write_raw(value + prefix, count - prefix);
+            } else {
+                write_fill(padding);
+                write_raw(value, count);
+            }
+            finish_unit();
+            return *this;
+        } else {
+            record(false);
+            finish_unit();
+            return *this;
+        }
+    }
+
+    void write_raw(const char* value, size_t count) {
+        if (buffer_ != nullptr) {
+            record(buffer_->sputn(
+                       value, static_cast<streamsize>(count)) ==
+                   static_cast<streamsize>(count));
+        } else {
+            record(__io::write(stream_, value, count));
+        }
+    }
+
+    void write_fill(size_t count) {
+        char buffer[64];
+        const char value = static_cast<char>(this->fill());
+        for (char& character : buffer) {
+            character = value;
+        }
+        while (count != 0) {
+            const size_t current =
+                count < sizeof(buffer) ? count : sizeof(buffer);
+            write_raw(buffer, current);
+            count -= current;
+        }
+    }
+};
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream, Character value) {
+    return stream.__write_character_sequence(&value, 1);
+}
+
+template<class Traits>
+basic_ostream<char, Traits>& operator<<(
+    basic_ostream<char, Traits>& stream, const char* value) {
+    return stream.__write_character_sequence(
+        value, Traits::length(value));
+}
+
+template<class Traits>
+basic_ostream<char, Traits>& operator<<(
+    basic_ostream<char, Traits>& stream, signed char value) {
+    const char character = static_cast<char>(value);
+    return stream.__write_character_sequence(&character, 1);
+}
+
+template<class Traits>
+basic_ostream<char, Traits>& operator<<(
+    basic_ostream<char, Traits>& stream, unsigned char value) {
+    const char character = static_cast<char>(value);
+    return stream.__write_character_sequence(&character, 1);
+}
+
+template<class Traits>
+basic_ostream<char, Traits>& operator<<(
+    basic_ostream<char, Traits>& stream,
+    const signed char* value) {
+    const char* characters =
+        reinterpret_cast<const char*>(value);
+    return stream.__write_character_sequence(
+        characters, Traits::length(characters));
+}
+
+template<class Traits>
+basic_ostream<char, Traits>& operator<<(
+    basic_ostream<char, Traits>& stream,
+    const unsigned char* value) {
+    const char* characters =
+        reinterpret_cast<const char*>(value);
+    return stream.__write_character_sequence(
+        characters, Traits::length(characters));
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream,
+    basic_string_view<Character, Traits> value) {
+    return stream.__write_character_sequence(
+        value.data(), value.size());
+}
+
+template<class Character, class Traits, class Allocator>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& stream,
+    const basic_string<Character, Traits, Allocator>& value) {
+    return stream.__write_character_sequence(
+        value.data(), value.size());
+}
+
+template<class Ostream, class Type>
+    requires (
+        is_base_of_v<ios_base, Ostream> &&
+        requires(Ostream& stream, const Type& value) {
+            stream << value;
+        })
+Ostream&& operator<<(Ostream&& stream, const Type& value) {
+    stream << value;
+    return std::move(stream);
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& endl(
+    basic_ostream<Character, Traits>& stream) {
+    stream.put(Character('\n'));
+    stream.flush();
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& ends(
+    basic_ostream<Character, Traits>& stream) {
+    stream.put(Character());
+    return stream;
+}
+
+template<class Character, class Traits>
+basic_ostream<Character, Traits>& flush(
+    basic_ostream<Character, Traits>& stream) {
+    return stream.flush();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

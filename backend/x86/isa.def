@@ -1,0 +1,373 @@
+
+
+#ifndef ABURI_X86_ISA
+#error "define ABURI_X86_ISA before including isa.def"
+#endif
+
+#define ABURI_X86_GRP1(Stem, stem, base, ext)                                 \
+    ABURI_X86_ISA(Stem##BAcc, stem "b", Plain, 0, (base) + 0x04,              \
+                  (Imm8u, Acc8), RF_NONE, 0)                                  \
+    ABURI_X86_ISA(Stem##BImm, stem "b", Modrm, 0, 0x80, (Imm8u, Rm8),         \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##BMr, stem "b", Modrm, 0, (base) + 0x00, (Gpr8, Rm8),  \
+                  RF_NONE, 0)                                                 \
+    ABURI_X86_ISA(Stem##BRm, stem "b", Modrm, 0, (base) + 0x02, (Mem, Gpr8),  \
+                  RF_NONE, 0)                                                 \
+    ABURI_X86_ISA(Stem##WImm8, stem "w", Modrm, 0x66, 0x83, (Imm8s, Rm16),    \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##WAcc, stem "w", Plain, 0x66, (base) + 0x05,           \
+                  (Imm16, Acc16), RF_NONE, 0)                                 \
+    ABURI_X86_ISA(Stem##WImm, stem "w", Modrm, 0x66, 0x81, (Imm16, Rm16),     \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##WMr, stem "w", Modrm, 0x66, (base) + 0x01,            \
+                  (Gpr16, Rm16), RF_NONE, 0)                                  \
+    ABURI_X86_ISA(Stem##WRm, stem "w", Modrm, 0x66, (base) + 0x03,            \
+                  (Mem, Gpr16), RF_NONE, 0)                                   \
+    ABURI_X86_ISA(Stem##LImm8, stem "l", Modrm, 0, 0x83, (Imm8s, Rm32),       \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##LAcc, stem "l", Plain, 0, (base) + 0x05,              \
+                  (Imm32, Acc32), RF_NONE, 0)                                 \
+    ABURI_X86_ISA(Stem##LImm, stem "l", Modrm, 0, 0x81, (Imm32, Rm32),        \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##LMr, stem "l", Modrm, 0, (base) + 0x01,               \
+                  (Gpr32, Rm32), RF_NONE, 0)                                  \
+    ABURI_X86_ISA(Stem##LRm, stem "l", Modrm, 0, (base) + 0x03,               \
+                  (Mem, Gpr32), RF_NONE, 0)                                   \
+    ABURI_X86_ISA(Stem##QImm8, stem "q", Modrm, 0, 0x83, (Imm8s, Rm64), RF_W, \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##QAcc, stem "q", Plain, 0, (base) + 0x05,              \
+                  (Imm32, Acc64), RF_W, 0)                                    \
+    ABURI_X86_ISA(Stem##QImm, stem "q", Modrm, 0, 0x81, (Imm32, Rm64), RF_W,  \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##QMr, stem "q", Modrm, 0, (base) + 0x01, (Gpr64, Rm64),\
+                  RF_W, 0)                                                    \
+    ABURI_X86_ISA(Stem##QRm, stem "q", Modrm, 0, (base) + 0x03, (Mem, Gpr64), \
+                  RF_W, 0)
+
+#define ABURI_X86_SHIFT(Stem, stem, ext)                                      \
+    ABURI_X86_ISA(Stem##B1, stem "b", Modrm, 0, 0xD0, (ImmOne, Rm8), RF_NONE, \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##BI, stem "b", Modrm, 0, 0xC0, (Imm8u, Rm8), RF_NONE,  \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##BCl, stem "b", Modrm, 0, 0xD2, (Cl, Rm8), RF_NONE,    \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##W1, stem "w", Modrm, 0x66, 0xD1, (ImmOne, Rm16),      \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##WI, stem "w", Modrm, 0x66, 0xC1, (Imm8u, Rm16),       \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##WCl, stem "w", Modrm, 0x66, 0xD3, (Cl, Rm16),         \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##L1, stem "l", Modrm, 0, 0xD1, (ImmOne, Rm32),         \
+                  RF_NONE, ext)                                               \
+    ABURI_X86_ISA(Stem##LI, stem "l", Modrm, 0, 0xC1, (Imm8u, Rm32), RF_NONE, \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##LCl, stem "l", Modrm, 0, 0xD3, (Cl, Rm32), RF_NONE,   \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##Q1, stem "q", Modrm, 0, 0xD1, (ImmOne, Rm64), RF_W,   \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##QI, stem "q", Modrm, 0, 0xC1, (Imm8u, Rm64), RF_W,    \
+                  ext)                                                        \
+    ABURI_X86_ISA(Stem##QCl, stem "q", Modrm, 0, 0xD3, (Cl, Rm64), RF_W, ext)
+
+#define ABURI_X86_UNARY(Stem, stem, ext)                                      \
+    ABURI_X86_ISA(Stem##B, stem "b", Modrm, 0, 0xF6, (Rm8), RF_NONE, ext)     \
+    ABURI_X86_ISA(Stem##W, stem "w", Modrm, 0x66, 0xF7, (Rm16), RF_NONE, ext) \
+    ABURI_X86_ISA(Stem##L, stem "l", Modrm, 0, 0xF7, (Rm32), RF_NONE, ext)    \
+    ABURI_X86_ISA(Stem##Q, stem "q", Modrm, 0, 0xF7, (Rm64), RF_W, ext)
+
+#define ABURI_X86_SSE_ARITH(Stem, stem, opcode)                               \
+    ABURI_X86_ISA(Stem##SS, stem "ss", Modrm, 0xF3, opcode, (RmX, Xmm),       \
+                  RF_NONE, 0)                                                 \
+    ABURI_X86_ISA(Stem##SD, stem "sd", Modrm, 0xF2, opcode, (RmX, Xmm),       \
+                  RF_NONE, 0)                                                 \
+    ABURI_X86_ISA(Stem##PS, stem "ps", Modrm, 0, opcode, (RmX, Xmm), RF_NONE, \
+                  0)                                                          \
+    ABURI_X86_ISA(Stem##PD, stem "pd", Modrm, 0x66, opcode, (RmX, Xmm),       \
+                  RF_NONE, 0)
+
+ABURI_X86_ISA(MovBMr, "movb", Modrm, 0, 0x88, (Gpr8, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(MovBRm, "movb", Modrm, 0, 0x8A, (Mem, Gpr8), RF_NONE, 0)
+ABURI_X86_ISA(MovBIr, "movb", OpReg, 0, 0xB0, (Imm8u, Gpr8), RF_NONE, 0)
+ABURI_X86_ISA(MovBIm, "movb", Modrm, 0, 0xC6, (Imm8u, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(MovWMr, "movw", Modrm, 0x66, 0x89, (Gpr16, Rm16), RF_NONE, 0)
+ABURI_X86_ISA(MovWRm, "movw", Modrm, 0x66, 0x8B, (Mem, Gpr16), RF_NONE, 0)
+ABURI_X86_ISA(MovWIr, "movw", OpReg, 0x66, 0xB8, (Imm16, Gpr16), RF_NONE, 0)
+ABURI_X86_ISA(MovWIm, "movw", Modrm, 0x66, 0xC7, (Imm16, Rm16), RF_NONE, 0)
+ABURI_X86_ISA(MovLMr, "movl", Modrm, 0, 0x89, (Gpr32, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(MovLRm, "movl", Modrm, 0, 0x8B, (Mem, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(MovLIr, "movl", OpReg, 0, 0xB8, (Imm32, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(MovLSr, "movl", OpReg, 0, 0xB8, (ImmSym, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(MovLIm, "movl", Modrm, 0, 0xC7, (Imm32, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(MovLSm, "movl", Modrm, 0, 0xC7, (ImmSym, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(MovQMr, "movq", Modrm, 0, 0x89, (Gpr64, Rm64), RF_W, 0)
+ABURI_X86_ISA(MovQRm, "movq", Modrm, 0, 0x8B, (Mem, Gpr64), RF_W, 0)
+ABURI_X86_ISA(MovQIm, "movq", Modrm, 0, 0xC7, (Imm32, Rm64), RF_W, 0)
+ABURI_X86_ISA(MovQSm, "movq", Modrm, 0, 0xC7, (ImmSym, Rm64), RF_W, 0)
+
+ABURI_X86_ISA(MovQXm, "movq", Modrm, 0xF3, 0x0F7E, (Mem, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovQmX, "movq", Modrm, 0x66, 0x0FD6, (Xmm, Mem), RF_NONE, 0)
+
+ABURI_X86_ISA(MovDGX, "movd", Modrm, 0x66, 0x0F6E, (Rm32, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovDXG, "movd", Modrm, 0x66, 0x0F7E, (Xmm, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(MovQGX, "movq", Modrm, 0x66, 0x0F6E, (Rm64, Xmm), RF_W, 0)
+ABURI_X86_ISA(MovQXG, "movq", Modrm, 0x66, 0x0F7E, (Xmm, Rm64), RF_W, 0)
+ABURI_X86_ISA(MovAbsQ, "movabsq", OpReg, 0, 0xB8, (Imm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(MovAbsQS, "movabsq", OpReg, 0, 0xB8, (ImmSym64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(MovAbsL, "movabsl", OpReg, 0, 0xB8, (Imm32, Gpr32), RF_NONE, 0)
+
+ABURI_X86_ISA(Movzbl, "movzbl", Modrm, 0, 0x0FB6, (Rm8, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(Movzbw, "movzbw", Modrm, 0x66, 0x0FB6, (Rm8, Gpr16), RF_NONE, 0)
+ABURI_X86_ISA(Movzbq, "movzbq", Modrm, 0, 0x0FB6, (Rm8, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Movzwl, "movzwl", Modrm, 0, 0x0FB7, (Rm16, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(Movzwq, "movzwq", Modrm, 0, 0x0FB7, (Rm16, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Movsbl, "movsbl", Modrm, 0, 0x0FBE, (Rm8, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(Movsbw, "movsbw", Modrm, 0x66, 0x0FBE, (Rm8, Gpr16), RF_NONE, 0)
+ABURI_X86_ISA(Movsbq, "movsbq", Modrm, 0, 0x0FBE, (Rm8, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Movswl, "movswl", Modrm, 0, 0x0FBF, (Rm16, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(Movswq, "movswq", Modrm, 0, 0x0FBF, (Rm16, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Movslq, "movslq", Modrm, 0, 0x63, (Rm32, Gpr64), RF_W, 0)
+
+ABURI_X86_ISA(LeaL, "leal", Modrm, 0, 0x8D, (Mem, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(LeaQ, "leaq", Modrm, 0, 0x8D, (Mem, Gpr64), RF_W, 0)
+
+ABURI_X86_GRP1(Add, "add", 0x00, 0)
+ABURI_X86_GRP1(Or, "or", 0x08, 1)
+ABURI_X86_GRP1(Adc, "adc", 0x10, 2)
+ABURI_X86_GRP1(Sbb, "sbb", 0x18, 3)
+ABURI_X86_GRP1(And, "and", 0x20, 4)
+ABURI_X86_GRP1(Sub, "sub", 0x28, 5)
+ABURI_X86_GRP1(Xor, "xor", 0x30, 6)
+ABURI_X86_GRP1(Cmp, "cmp", 0x38, 7)
+
+ABURI_X86_UNARY(Neg, "neg", 3)
+ABURI_X86_UNARY(Not, "not", 2)
+ABURI_X86_UNARY(Mul, "mul", 4)
+ABURI_X86_UNARY(Div, "div", 6)
+ABURI_X86_UNARY(Idiv, "idiv", 7)
+
+ABURI_X86_SHIFT(Shl, "shl", 4)
+ABURI_X86_SHIFT(Sal, "sal", 4)
+ABURI_X86_SHIFT(Shr, "shr", 5)
+ABURI_X86_SHIFT(Sar, "sar", 7)
+ABURI_X86_SHIFT(Rol, "rol", 0)
+ABURI_X86_SHIFT(Ror, "ror", 1)
+
+ABURI_X86_ISA(Imul1B, "imulb", Modrm, 0, 0xF6, (Rm8), RF_NONE, 5)
+ABURI_X86_ISA(Imul3L8, "imull", Modrm, 0, 0x6B, (Imm8s, Rm32, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(Imul3L, "imull", Modrm, 0, 0x69, (Imm32, Rm32, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(Imul2L, "imull", Modrm, 0, 0x0FAF, (Rm32, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(Imul1L, "imull", Modrm, 0, 0xF7, (Rm32), RF_NONE, 5)
+ABURI_X86_ISA(Imul3Q8, "imulq", Modrm, 0, 0x6B, (Imm8s, Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Imul3Q, "imulq", Modrm, 0, 0x69, (Imm32, Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Imul2Q, "imulq", Modrm, 0, 0x0FAF, (Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(Imul1Q, "imulq", Modrm, 0, 0xF7, (Rm64), RF_W, 5)
+ABURI_X86_ISA(Imul2W, "imulw", Modrm, 0x66, 0x0FAF, (Rm16, Gpr16), RF_NONE, 0)
+
+ABURI_X86_ISA(IncB, "incb", Modrm, 0, 0xFE, (Rm8), RF_NONE, 0)
+ABURI_X86_ISA(IncW, "incw", Modrm, 0x66, 0xFF, (Rm16), RF_NONE, 0)
+ABURI_X86_ISA(IncL, "incl", Modrm, 0, 0xFF, (Rm32), RF_NONE, 0)
+ABURI_X86_ISA(IncQ, "incq", Modrm, 0, 0xFF, (Rm64), RF_W, 0)
+ABURI_X86_ISA(DecB, "decb", Modrm, 0, 0xFE, (Rm8), RF_NONE, 1)
+ABURI_X86_ISA(DecW, "decw", Modrm, 0x66, 0xFF, (Rm16), RF_NONE, 1)
+ABURI_X86_ISA(DecL, "decl", Modrm, 0, 0xFF, (Rm32), RF_NONE, 1)
+ABURI_X86_ISA(DecQ, "decq", Modrm, 0, 0xFF, (Rm64), RF_W, 1)
+
+ABURI_X86_ISA(TestBAcc, "testb", Plain, 0, 0xA8, (Imm8u, Acc8), RF_NONE, 0)
+ABURI_X86_ISA(TestBImm, "testb", Modrm, 0, 0xF6, (Imm8u, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(TestBMr, "testb", Modrm, 0, 0x84, (Gpr8, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(TestWAcc, "testw", Plain, 0x66, 0xA9, (Imm16, Acc16), RF_NONE, 0)
+ABURI_X86_ISA(TestWImm, "testw", Modrm, 0x66, 0xF7, (Imm16, Rm16), RF_NONE, 0)
+ABURI_X86_ISA(TestWMr, "testw", Modrm, 0x66, 0x85, (Gpr16, Rm16), RF_NONE, 0)
+ABURI_X86_ISA(TestLAcc, "testl", Plain, 0, 0xA9, (Imm32, Acc32), RF_NONE, 0)
+ABURI_X86_ISA(TestLImm, "testl", Modrm, 0, 0xF7, (Imm32, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(TestLMr, "testl", Modrm, 0, 0x85, (Gpr32, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(TestQAcc, "testq", Plain, 0, 0xA9, (Imm32, Acc64), RF_W, 0)
+ABURI_X86_ISA(TestQImm, "testq", Modrm, 0, 0xF7, (Imm32, Rm64), RF_W, 0)
+ABURI_X86_ISA(TestQMr, "testq", Modrm, 0, 0x85, (Gpr64, Rm64), RF_W, 0)
+
+ABURI_X86_ISA(Cbtw, "cbtw", Plain, 0x66, 0x98, (None), RF_NONE, 0)
+ABURI_X86_ISA(Cwtl, "cwtl", Plain, 0, 0x98, (None), RF_NONE, 0)
+ABURI_X86_ISA(Cltq, "cltq", Plain, 0, 0x98, (None), RF_W, 0)
+ABURI_X86_ISA(Cwtd, "cwtd", Plain, 0x66, 0x99, (None), RF_NONE, 0)
+ABURI_X86_ISA(Cltd, "cltd", Plain, 0, 0x99, (None), RF_NONE, 0)
+ABURI_X86_ISA(Cqto, "cqto", Plain, 0, 0x99, (None), RF_W, 0)
+ABURI_X86_ISA(Cdqe, "cdqe", Plain, 0, 0x98, (None), RF_W, 0)
+ABURI_X86_ISA(Cdq, "cdq", Plain, 0, 0x99, (None), RF_NONE, 0)
+ABURI_X86_ISA(Cqo, "cqo", Plain, 0, 0x99, (None), RF_W, 0)
+
+ABURI_X86_ISA(PushQr, "pushq", OpReg, 0, 0x50, (Gpr64), RF_NONE, 0)
+ABURI_X86_ISA(PushQi8, "pushq", Plain, 0, 0x6A, (Imm8s), RF_NONE, 0)
+ABURI_X86_ISA(PushQi, "pushq", Plain, 0, 0x68, (Imm32), RF_NONE, 0)
+ABURI_X86_ISA(PushQm, "pushq", Modrm, 0, 0xFF, (Mem), RF_NONE, 6)
+ABURI_X86_ISA(PopQr, "popq", OpReg, 0, 0x58, (Gpr64), RF_NONE, 0)
+ABURI_X86_ISA(PopQm, "popq", Modrm, 0, 0x8F, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Leave, "leave", Plain, 0, 0xC9, (None), RF_NONE, 0)
+
+ABURI_X86_ISA(JmpRel, "jmp", Rel, 0, 0xE9, (Rel), RF_RELAX, 0xEB)
+ABURI_X86_ISA(JmpInd, "jmp", Modrm, 0, 0xFF, (IndirRm), RF_NONE, 4)
+ABURI_X86_ISA(JmpqInd, "jmpq", Modrm, 0, 0xFF, (IndirRm), RF_NONE, 4)
+ABURI_X86_ISA(JccRel, "j", Rel, 0, 0x0F80, (Cond, Rel), RF_RELAX | RF_COND,
+              0x70)
+ABURI_X86_ISA(CallRel, "call", Rel, 0, 0xE8, (Rel), RF_NONE, 0)
+ABURI_X86_ISA(CallqRel, "callq", Rel, 0, 0xE8, (Rel), RF_NONE, 0)
+ABURI_X86_ISA(CallInd, "call", Modrm, 0, 0xFF, (IndirRm), RF_NONE, 2)
+ABURI_X86_ISA(CallqInd, "callq", Modrm, 0, 0xFF, (IndirRm), RF_NONE, 2)
+ABURI_X86_ISA(Ret, "ret", Plain, 0, 0xC3, (None), RF_NONE, 0)
+ABURI_X86_ISA(RetImm, "ret", Plain, 0, 0xC2, (Imm16), RF_NONE, 0)
+ABURI_X86_ISA(Retq, "retq", Plain, 0, 0xC3, (None), RF_NONE, 0)
+ABURI_X86_ISA(RetqImm, "retq", Plain, 0, 0xC2, (Imm16), RF_NONE, 0)
+
+ABURI_X86_ISA(Setcc, "set", Modrm, 0, 0x0F90, (Cond, Rm8), RF_COND, 0)
+ABURI_X86_ISA(CmovW, "cmov", Modrm, 0x66, 0x0F40, (Cond, Rm16, Gpr16),
+              RF_COND, 0)
+ABURI_X86_ISA(CmovL, "cmov", Modrm, 0, 0x0F40, (Cond, Rm32, Gpr32), RF_COND, 0)
+ABURI_X86_ISA(CmovQ, "cmov", Modrm, 0, 0x0F40, (Cond, Rm64, Gpr64),
+              RF_W | RF_COND, 0)
+
+ABURI_X86_ISA(BswapL, "bswapl", OpReg, 0, 0x0FC8, (Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(BswapQ, "bswapq", OpReg, 0, 0x0FC8, (Gpr64), RF_W, 0)
+ABURI_X86_ISA(BsrL, "bsrl", Modrm, 0, 0x0FBD, (Rm32, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(BsrQ, "bsrq", Modrm, 0, 0x0FBD, (Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(BsfL, "bsfl", Modrm, 0, 0x0FBC, (Rm32, Gpr32), RF_NONE, 0)
+ABURI_X86_ISA(BsfQ, "bsfq", Modrm, 0, 0x0FBC, (Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(PopcntL, "popcntl", Modrm, 0xF3, 0x0FB8, (Rm32, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(PopcntQ, "popcntq", Modrm, 0xF3, 0x0FB8, (Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(LzcntL, "lzcntl", Modrm, 0xF3, 0x0FBD, (Rm32, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(LzcntQ, "lzcntq", Modrm, 0xF3, 0x0FBD, (Rm64, Gpr64), RF_W, 0)
+ABURI_X86_ISA(TzcntL, "tzcntl", Modrm, 0xF3, 0x0FBC, (Rm32, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(TzcntQ, "tzcntq", Modrm, 0xF3, 0x0FBC, (Rm64, Gpr64), RF_W, 0)
+
+ABURI_X86_ISA(XchgB, "xchgb", Modrm, 0, 0x86, (Gpr8, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(XchgW, "xchgw", Modrm, 0x66, 0x87, (Gpr16, Rm16), RF_NONE, 0)
+ABURI_X86_ISA(XchgL, "xchgl", Modrm, 0, 0x87, (Gpr32, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(XchgQ, "xchgq", Modrm, 0, 0x87, (Gpr64, Rm64), RF_W, 0)
+ABURI_X86_ISA(XaddB, "xaddb", Modrm, 0, 0x0FC0, (Gpr8, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(XaddW, "xaddw", Modrm, 0x66, 0x0FC1, (Gpr16, Rm16), RF_NONE, 0)
+ABURI_X86_ISA(XaddL, "xaddl", Modrm, 0, 0x0FC1, (Gpr32, Rm32), RF_NONE, 0)
+ABURI_X86_ISA(XaddQ, "xaddq", Modrm, 0, 0x0FC1, (Gpr64, Rm64), RF_W, 0)
+ABURI_X86_ISA(CmpxchgB, "cmpxchgb", Modrm, 0, 0x0FB0, (Gpr8, Rm8), RF_NONE, 0)
+ABURI_X86_ISA(CmpxchgW, "cmpxchgw", Modrm, 0x66, 0x0FB1, (Gpr16, Rm16),
+              RF_NONE, 0)
+ABURI_X86_ISA(CmpxchgL, "cmpxchgl", Modrm, 0, 0x0FB1, (Gpr32, Rm32),
+              RF_NONE, 0)
+ABURI_X86_ISA(CmpxchgQ, "cmpxchgq", Modrm, 0, 0x0FB1, (Gpr64, Rm64), RF_W, 0)
+ABURI_X86_ISA(Mfence, "mfence", Plain, 0, 0x0FAEF0, (None), RF_NONE, 0)
+ABURI_X86_ISA(Lfence, "lfence", Plain, 0, 0x0FAEE8, (None), RF_NONE, 0)
+ABURI_X86_ISA(Sfence, "sfence", Plain, 0, 0x0FAEF8, (None), RF_NONE, 0)
+ABURI_X86_ISA(Pause, "pause", Plain, 0xF3, 0x90, (None), RF_NONE, 0)
+
+ABURI_X86_ISA(Nop, "nop", Plain, 0, 0x90, (None), RF_NONE, 0)
+ABURI_X86_ISA(NopL, "nopl", Modrm, 0, 0x0F1F, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(NopW, "nopw", Modrm, 0x66, 0x0F1F, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Ud2, "ud2", Plain, 0, 0x0F0B, (None), RF_NONE, 0)
+ABURI_X86_ISA(Int3, "int3", Plain, 0, 0xCC, (None), RF_NONE, 0)
+ABURI_X86_ISA(IntImm, "int", Plain, 0, 0xCD, (Imm8u), RF_NONE, 0)
+ABURI_X86_ISA(Hlt, "hlt", Plain, 0, 0xF4, (None), RF_NONE, 0)
+ABURI_X86_ISA(Cpuid, "cpuid", Plain, 0, 0x0FA2, (None), RF_NONE, 0)
+ABURI_X86_ISA(Rdtsc, "rdtsc", Plain, 0, 0x0F31, (None), RF_NONE, 0)
+ABURI_X86_ISA(Syscall, "syscall", Plain, 0, 0x0F05, (None), RF_NONE, 0)
+
+ABURI_X86_ISA(MovapsRm, "movaps", Modrm, 0, 0x0F28, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovapsMr, "movaps", Modrm, 0, 0x0F29, (Xmm, Mem), RF_NONE, 0)
+ABURI_X86_ISA(MovapdRm, "movapd", Modrm, 0x66, 0x0F28, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovapdMr, "movapd", Modrm, 0x66, 0x0F29, (Xmm, Mem), RF_NONE, 0)
+ABURI_X86_ISA(MovupsRm, "movups", Modrm, 0, 0x0F10, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovupsMr, "movups", Modrm, 0, 0x0F11, (Xmm, Mem), RF_NONE, 0)
+ABURI_X86_ISA(MovupdRm, "movupd", Modrm, 0x66, 0x0F10, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovupdMr, "movupd", Modrm, 0x66, 0x0F11, (Xmm, Mem), RF_NONE, 0)
+ABURI_X86_ISA(MovssRm, "movss", Modrm, 0xF3, 0x0F10, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovssMr, "movss", Modrm, 0xF3, 0x0F11, (Xmm, Mem), RF_NONE, 0)
+ABURI_X86_ISA(MovsdRm, "movsd", Modrm, 0xF2, 0x0F10, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(MovsdMr, "movsd", Modrm, 0xF2, 0x0F11, (Xmm, Mem), RF_NONE, 0)
+ABURI_X86_ISA(Pxor, "pxor", Modrm, 0x66, 0x0FEF, (RmX, Xmm), RF_NONE, 0)
+
+ABURI_X86_SSE_ARITH(Add, "add", 0x0F58)
+ABURI_X86_SSE_ARITH(Sub, "sub", 0x0F5C)
+ABURI_X86_SSE_ARITH(Mul, "mul", 0x0F59)
+ABURI_X86_SSE_ARITH(Div, "div", 0x0F5E)
+ABURI_X86_SSE_ARITH(Min, "min", 0x0F5D)
+ABURI_X86_SSE_ARITH(Max, "max", 0x0F5F)
+ABURI_X86_SSE_ARITH(Sqrt, "sqrt", 0x0F51)
+ABURI_X86_ISA(Xorps, "xorps", Modrm, 0, 0x0F57, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Xorpd, "xorpd", Modrm, 0x66, 0x0F57, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Andps, "andps", Modrm, 0, 0x0F54, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Andpd, "andpd", Modrm, 0x66, 0x0F54, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Andnps, "andnps", Modrm, 0, 0x0F55, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Orps, "orps", Modrm, 0, 0x0F56, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Orpd, "orpd", Modrm, 0x66, 0x0F56, (RmX, Xmm), RF_NONE, 0)
+
+ABURI_X86_ISA(Cvtss2sd, "cvtss2sd", Modrm, 0xF3, 0x0F5A, (RmX, Xmm),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsd2ss, "cvtsd2ss", Modrm, 0xF2, 0x0F5A, (RmX, Xmm),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsi2ssL, "cvtsi2ss", Modrm, 0xF3, 0x0F2A, (Rm32, Xmm),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsi2ssQ, "cvtsi2ss", Modrm, 0xF3, 0x0F2A, (Rm64, Xmm), RF_W, 0)
+ABURI_X86_ISA(Cvtsi2ssLs, "cvtsi2ssl", Modrm, 0xF3, 0x0F2A, (Rm32, Xmm),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsi2ssQs, "cvtsi2ssq", Modrm, 0xF3, 0x0F2A, (Rm64, Xmm),
+              RF_W, 0)
+ABURI_X86_ISA(Cvtsi2sdL, "cvtsi2sd", Modrm, 0xF2, 0x0F2A, (Rm32, Xmm),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsi2sdQ, "cvtsi2sd", Modrm, 0xF2, 0x0F2A, (Rm64, Xmm), RF_W, 0)
+ABURI_X86_ISA(Cvtsi2sdLs, "cvtsi2sdl", Modrm, 0xF2, 0x0F2A, (Rm32, Xmm),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsi2sdQs, "cvtsi2sdq", Modrm, 0xF2, 0x0F2A, (Rm64, Xmm),
+              RF_W, 0)
+ABURI_X86_ISA(Cvttss2siL, "cvttss2si", Modrm, 0xF3, 0x0F2C, (RmX, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvttss2siQ, "cvttss2si", Modrm, 0xF3, 0x0F2C, (RmX, Gpr64),
+              RF_W, 0)
+ABURI_X86_ISA(Cvttsd2siL, "cvttsd2si", Modrm, 0xF2, 0x0F2C, (RmX, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvttsd2siQ, "cvttsd2si", Modrm, 0xF2, 0x0F2C, (RmX, Gpr64),
+              RF_W, 0)
+ABURI_X86_ISA(Cvtss2siL, "cvtss2si", Modrm, 0xF3, 0x0F2D, (RmX, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtss2siQ, "cvtss2si", Modrm, 0xF3, 0x0F2D, (RmX, Gpr64),
+              RF_W, 0)
+ABURI_X86_ISA(Cvtsd2siL, "cvtsd2si", Modrm, 0xF2, 0x0F2D, (RmX, Gpr32),
+              RF_NONE, 0)
+ABURI_X86_ISA(Cvtsd2siQ, "cvtsd2si", Modrm, 0xF2, 0x0F2D, (RmX, Gpr64),
+              RF_W, 0)
+ABURI_X86_ISA(Ucomiss, "ucomiss", Modrm, 0, 0x0F2E, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Ucomisd, "ucomisd", Modrm, 0x66, 0x0F2E, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Comiss, "comiss", Modrm, 0, 0x0F2F, (RmX, Xmm), RF_NONE, 0)
+ABURI_X86_ISA(Comisd, "comisd", Modrm, 0x66, 0x0F2F, (RmX, Xmm), RF_NONE, 0)
+
+ABURI_X86_ISA(Flds, "flds", Modrm, 0, 0xD9, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Fldl, "fldl", Modrm, 0, 0xDD, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Fldt, "fldt", Modrm, 0, 0xDB, (Mem), RF_NONE, 5)
+ABURI_X86_ISA(FldSt, "fld", FpuSt, 0, 0xD9C0, (StN), RF_NONE, 0)
+ABURI_X86_ISA(Fstps, "fstps", Modrm, 0, 0xD9, (Mem), RF_NONE, 3)
+ABURI_X86_ISA(Fstpl, "fstpl", Modrm, 0, 0xDD, (Mem), RF_NONE, 3)
+ABURI_X86_ISA(Fstpt, "fstpt", Modrm, 0, 0xDB, (Mem), RF_NONE, 7)
+ABURI_X86_ISA(FstpSt, "fstp", FpuSt, 0, 0xDDD8, (StN), RF_NONE, 0)
+ABURI_X86_ISA(Fildl, "fildl", Modrm, 0, 0xDB, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Fildll, "fildll", Modrm, 0, 0xDF, (Mem), RF_NONE, 5)
+ABURI_X86_ISA(Fistpll, "fistpll", Modrm, 0, 0xDF, (Mem), RF_NONE, 7)
+ABURI_X86_ISA(Fisttpll, "fisttpll", Modrm, 0, 0xDD, (Mem), RF_NONE, 1)
+ABURI_X86_ISA(Fadds, "fadds", Modrm, 0, 0xD8, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Faddl, "faddl", Modrm, 0, 0xDC, (Mem), RF_NONE, 0)
+ABURI_X86_ISA(Faddp, "faddp", Plain, 0, 0xDEC1, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fmulp, "fmulp", Plain, 0, 0xDEC9, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fsubp, "fsubp", Plain, 0, 0xDEE1, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fsubrp, "fsubrp", Plain, 0, 0xDEE9, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fdivp, "fdivp", Plain, 0, 0xDEF1, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fdivrp, "fdivrp", Plain, 0, 0xDEF9, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fchs, "fchs", Plain, 0, 0xD9E0, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fabs, "fabs", Plain, 0, 0xD9E1, (None), RF_NONE, 0)
+ABURI_X86_ISA(Fucomip, "fucomip", FpuSt, 0, 0xDFE8, (StN, St0), RF_NONE, 0)
+ABURI_X86_ISA(Fucomi, "fucomi", FpuSt, 0, 0xDBE8, (StN, St0), RF_NONE, 0)
+ABURI_X86_ISA(Fnstcw, "fnstcw", Modrm, 0, 0xD9, (Mem), RF_NONE, 7)
+ABURI_X86_ISA(Fldcw, "fldcw", Modrm, 0, 0xD9, (Mem), RF_NONE, 5)
+
+#undef ABURI_X86_GRP1
+#undef ABURI_X86_SHIFT
+#undef ABURI_X86_UNARY
+#undef ABURI_X86_SSE_ARITH

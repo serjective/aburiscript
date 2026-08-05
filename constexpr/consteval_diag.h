@@ -15,7 +15,10 @@ enum class ConstEvalDiagCode {
     StepLimitExceeded,
     RecursionLimitExceeded,
     DivisionByZero,
-    InvalidShiftAmount
+    InvalidShiftAmount,
+    InvalidDeallocation,
+    DynamicAllocationLeaked,
+    DynamicAllocationEscaped
 };
 
 struct ConstEvalDiagnostic {

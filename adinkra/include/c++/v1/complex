@@ -1,0 +1,443 @@
+#ifndef ADINKRA_COMPLEX
+#define ADINKRA_COMPLEX
+
+#include <__adinkra/config>
+#include <cmath>
+#include <istream>
+#include <ostream>
+#include <sstream>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+
+template<class Type>
+class complex;
+
+template<class Type, class Derived>
+class __complex_base {
+public:
+    constexpr __complex_base(
+        const Type& real_value,
+        const Type& imaginary_value)
+        : real_(real_value), imaginary_(imaginary_value) {}
+
+    constexpr Type real() const {
+        return real_;
+    }
+
+    constexpr void real(Type value) {
+        real_ = value;
+    }
+
+    constexpr Type imag() const {
+        return imaginary_;
+    }
+
+    constexpr void imag(Type value) {
+        imaginary_ = value;
+    }
+
+    constexpr Derived& operator=(const Type& value) {
+        real_ = value;
+        imaginary_ = Type();
+        return derived();
+    }
+
+    constexpr Derived& operator+=(const Derived& value) {
+        real_ += value.real();
+        imaginary_ += value.imag();
+        return derived();
+    }
+
+    constexpr Derived& operator-=(const Derived& value) {
+        real_ -= value.real();
+        imaginary_ -= value.imag();
+        return derived();
+    }
+
+    constexpr Derived& operator*=(const Derived& value) {
+        const Type new_real =
+            real_ * value.real() - imaginary_ * value.imag();
+        const Type new_imaginary =
+            real_ * value.imag() + imaginary_ * value.real();
+        real_ = new_real;
+        imaginary_ = new_imaginary;
+        return derived();
+    }
+
+    constexpr Derived& operator/=(const Derived& value) {
+        const auto quotient =
+            __builtin_complex(real_, imaginary_) /
+            __builtin_complex(value.real(), value.imag());
+        real_ = __real__ quotient;
+        imaginary_ = __imag__ quotient;
+        return derived();
+    }
+
+    constexpr Derived& operator+=(const Type& value) {
+        real_ += value;
+        return derived();
+    }
+
+    constexpr Derived& operator-=(const Type& value) {
+        real_ -= value;
+        return derived();
+    }
+
+    constexpr Derived& operator*=(const Type& value) {
+        real_ *= value;
+        imaginary_ *= value;
+        return derived();
+    }
+
+    constexpr Derived& operator/=(const Type& value) {
+        real_ /= value;
+        imaginary_ /= value;
+        return derived();
+    }
+
+private:
+    constexpr Derived& derived() {
+        return static_cast<Derived&>(*this);
+    }
+
+    Type real_;
+    Type imaginary_;
+};
+
+template<class Type>
+class complex : public __complex_base<Type, complex<Type>> {
+    using base_type = __complex_base<Type, complex<Type>>;
+
+public:
+    using value_type = Type;
+    using base_type::operator=;
+
+    constexpr complex(
+        const Type& real_value = Type(),
+        const Type& imaginary_value = Type())
+        : base_type(real_value, imaginary_value) {}
+
+    template<class Other>
+    constexpr complex(const complex<Other>& value)
+        : base_type(
+              static_cast<Type>(value.real()),
+              static_cast<Type>(value.imag())) {}
+};
+
+#define ADINKRA_DEFINE_COMPLEX_SPECIALIZATION(Type)               \
+    template<>                                                      \
+    class complex<Type> : public __complex_base<Type, complex<Type>> { \
+        using base_type = __complex_base<Type, complex<Type>>;      \
+                                                                    \
+    public:                                                         \
+        using value_type = Type;                                    \
+        using base_type::operator=;                                 \
+                                                                    \
+        constexpr complex(                                          \
+            const Type& real_value = Type(),                        \
+            const Type& imaginary_value = Type())                   \
+            : base_type(real_value, imaginary_value) {}             \
+                                                                    \
+        template<class Other>                                       \
+        constexpr complex(const complex<Other>& value)              \
+            : base_type(                                            \
+                  static_cast<Type>(value.real()),                  \
+                  static_cast<Type>(value.imag())) {}               \
+    }
+
+ADINKRA_DEFINE_COMPLEX_SPECIALIZATION(float);
+ADINKRA_DEFINE_COMPLEX_SPECIALIZATION(double);
+
+#undef ADINKRA_DEFINE_COMPLEX_SPECIALIZATION
+
+template<class Type>
+constexpr bool operator==(
+    const complex<Type>& left,
+    const complex<Type>& right) {
+    return left.real() == right.real() &&
+           left.imag() == right.imag();
+}
+
+template<class Type>
+constexpr bool operator!=(
+    const complex<Type>& left,
+    const complex<Type>& right) {
+    return !(left == right);
+}
+
+template<class Type>
+constexpr complex<Type> operator+(
+    complex<Type> left, const complex<Type>& right) {
+    left += right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator-(
+    complex<Type> left, const complex<Type>& right) {
+    left -= right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator*(
+    complex<Type> left, const complex<Type>& right) {
+    left *= right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator/(
+    complex<Type> left, const complex<Type>& right) {
+    left /= right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator+(
+    complex<Type> left, const Type& right) {
+    left += right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator+(
+    const Type& left, complex<Type> right) {
+    right += left;
+    return right;
+}
+
+template<class Type>
+constexpr complex<Type> operator-(
+    complex<Type> left, const Type& right) {
+    left -= right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator-(
+    const Type& left, const complex<Type>& right) {
+    return complex<Type>(
+        left - right.real(), -right.imag());
+}
+
+template<class Type>
+constexpr complex<Type> operator*(
+    complex<Type> left, const Type& right) {
+    left *= right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator*(
+    const Type& left, complex<Type> right) {
+    right *= left;
+    return right;
+}
+
+template<class Type>
+constexpr complex<Type> operator/(
+    complex<Type> left, const Type& right) {
+    left /= right;
+    return left;
+}
+
+template<class Type>
+constexpr complex<Type> operator/(
+    const Type& left, const complex<Type>& right) {
+    return complex<Type>(left) / right;
+}
+
+template<class Type>
+constexpr complex<Type> operator+(
+    const complex<Type>& value) {
+    return value;
+}
+
+template<class Type>
+constexpr complex<Type> operator-(
+    const complex<Type>& value) {
+    return complex<Type>(-value.real(), -value.imag());
+}
+
+template<class Type>
+constexpr bool operator==(
+    const complex<Type>& left, const Type& right) {
+    return left.real() == right && left.imag() == Type();
+}
+
+template<class Type>
+constexpr bool operator==(
+    const Type& left, const complex<Type>& right) {
+    return right == left;
+}
+
+template<class Type>
+constexpr Type real(const complex<Type>& value) {
+    return value.real();
+}
+
+template<class Type>
+    requires is_arithmetic_v<Type>
+constexpr Type real(Type value) {
+    return value;
+}
+
+template<class Type>
+constexpr Type imag(const complex<Type>& value) {
+    return value.imag();
+}
+
+template<class Type>
+    requires is_arithmetic_v<Type>
+constexpr Type imag(Type) {
+    return Type();
+}
+
+template<class Type>
+constexpr Type norm(const complex<Type>& value) {
+    return value.real() * value.real() +
+           value.imag() * value.imag();
+}
+
+template<class Type>
+constexpr Type abs(const complex<Type>& value) {
+    return std::hypot(value.real(), value.imag());
+}
+
+template<class Type>
+constexpr Type arg(const complex<Type>& value) {
+    return std::atan2(value.imag(), value.real());
+}
+
+template<class Type>
+    requires is_arithmetic_v<Type>
+constexpr Type arg(Type value) {
+    return value < Type()
+        ? static_cast<Type>(3.14159265358979323846L)
+        : Type();
+}
+
+template<class Type>
+constexpr complex<Type> conj(const complex<Type>& value) {
+    return complex<Type>(value.real(), -value.imag());
+}
+
+template<class Type>
+    requires is_arithmetic_v<Type>
+constexpr complex<Type> conj(Type value) {
+    return complex<Type>(value);
+}
+
+template<class Type>
+complex<Type> polar(
+    const Type& magnitude,
+    const Type& angle = Type()) {
+    return complex<Type>(
+        magnitude * std::cos(angle),
+        magnitude * std::sin(angle));
+}
+
+template<class Type>
+complex<Type> exp(const complex<Type>& value) {
+    const Type magnitude = std::exp(value.real());
+    return complex<Type>(
+        magnitude * std::cos(value.imag()),
+        magnitude * std::sin(value.imag()));
+}
+
+template<class Type>
+complex<Type> log(const complex<Type>& value) {
+    return complex<Type>(
+        std::log(std::abs(value)),
+        std::arg(value));
+}
+
+template<class Type>
+complex<Type> log10(const complex<Type>& value) {
+    return std::log(value) /
+           static_cast<Type>(2.30258509299404568402L);
+}
+
+template<class Type>
+complex<Type> sqrt(const complex<Type>& value) {
+    if (value.real() == Type() &&
+        value.imag() == Type()) {
+        return complex<Type>(
+            Type(), value.imag());
+    }
+    return std::polar(
+        std::sqrt(std::abs(value)),
+        std::arg(value) / Type(2));
+}
+
+template<class Type>
+complex<Type> pow(
+    const complex<Type>& base,
+    const complex<Type>& exponent) {
+    return std::exp(exponent * std::log(base));
+}
+
+template<class Type>
+complex<Type> pow(
+    const complex<Type>& base,
+    const Type& exponent) {
+    return std::exp(exponent * std::log(base));
+}
+
+template<class Type>
+complex<Type> pow(
+    const Type& base,
+    const complex<Type>& exponent) {
+    return std::exp(exponent * std::log(complex<Type>(base)));
+}
+
+template<class Character, class Traits, class Type>
+basic_ostream<Character, Traits>& operator<<(
+    basic_ostream<Character, Traits>& output,
+    const complex<Type>& value) {
+    basic_ostringstream<Character, Traits> formatted;
+    formatted.copyfmt(output);
+    formatted.width(0);
+    formatted << Character('(') << value.real()
+              << Character(',') << value.imag()
+              << Character(')');
+    return output << formatted.str();
+}
+
+template<class Character, class Traits, class Type>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& input,
+    complex<Type>& value) {
+    Character first{};
+    input >> first;
+    if (!input) {
+        return input;
+    }
+
+    Type real_value{};
+    Type imaginary_value{};
+    if (first == Character('(')) {
+        Character comma{};
+        Character closing{};
+        input >> real_value >> comma >> imaginary_value >> closing;
+        if (!input || comma != Character(',') ||
+            closing != Character(')')) {
+            input.setstate(ios_base::failbit);
+            return input;
+        }
+    } else {
+        input.putback(first);
+        input >> real_value;
+        if (!input) {
+            return input;
+        }
+    }
+    value = complex<Type>(real_value, imaginary_value);
+    return input;
+}
+
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+#endif

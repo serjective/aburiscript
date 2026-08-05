@@ -1,0 +1,1174 @@
+#ifndef ADINKRA_FILESYSTEM
+#define ADINKRA_FILESYSTEM
+
+#include <__adinkra/config>
+#include <cerrno>
+#include <chrono>
+#include <climits>
+#include <cstddef>
+#include <cstdlib>
+#include <dirent.h>
+#include <fcntl.h>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <system_error>
+#include <time.h>
+#include <unistd.h>
+#include <utility>
+#include <vector>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace filesystem {
+
+class path {
+public:
+    using value_type = char;
+    using string_type = string;
+    static constexpr value_type preferred_separator = '/';
+
+    class iterator {
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = path;
+        using difference_type = ptrdiff_t;
+        using pointer = void;
+        using reference = path;
+
+        iterator() noexcept
+            : owner_(nullptr), position_(string::npos) {}
+
+        path operator*() const {
+            size_t last = position_;
+            while (last < owner_->value_.size() &&
+                   owner_->value_[last] != preferred_separator) {
+                ++last;
+            }
+            return path(string_view(
+                owner_->value_.data() + position_,
+                last - position_));
+        }
+
+        iterator& operator++() noexcept {
+            if (owner_ == nullptr || position_ == string::npos) {
+                return *this;
+            }
+            size_t next = position_;
+            while (next < owner_->value_.size() &&
+                   owner_->value_[next] != preferred_separator) {
+                ++next;
+            }
+            while (next < owner_->value_.size() &&
+                   owner_->value_[next] == preferred_separator) {
+                ++next;
+            }
+            position_ = next == owner_->value_.size()
+                ? string::npos
+                : next;
+            return *this;
+        }
+
+        iterator operator++(int) noexcept {
+            iterator result(*this);
+            ++*this;
+            return result;
+        }
+
+        friend bool operator==(
+            const iterator& left, const iterator& right) noexcept {
+            return left.owner_ == right.owner_ &&
+                   left.position_ == right.position_;
+        }
+
+    private:
+        friend class path;
+
+        const path* owner_;
+        size_t position_;
+
+        iterator(const path* owner, size_t position) noexcept
+            : owner_(owner), position_(position) {}
+    };
+
+    path() = default;
+    path(const path&) = default;
+    path(path&&) = default;
+
+    path(const char* value) : value_(value) {}
+    path(const string& value) : value_(value) {}
+    path(string&& value) : value_(std::move(value)) {}
+    path(string_view value) : value_(value) {}
+    path(const u8string& value)
+        : value_(
+              reinterpret_cast<const char*>(value.data()),
+              value.size()) {}
+
+    path& operator=(const path&) = default;
+    path& operator=(path&&) = default;
+
+    path& operator/=(const path& other) {
+        if (other.empty()) {
+            return *this;
+        }
+        if (other.is_absolute()) {
+            value_ = other.value_;
+            return *this;
+        }
+        if (!value_.empty() && value_.back() != preferred_separator) {
+            value_.push_back(preferred_separator);
+        }
+        value_.append(other.value_);
+        return *this;
+    }
+
+    _ADINKRA_NODISCARD const string_type& native() const noexcept {
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD string string() const {
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD std::u8string u8string() const {
+        return std::u8string(
+            reinterpret_cast<const char8_t*>(value_.data()),
+            value_.size());
+    }
+
+    operator string_type() const {
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD const value_type* c_str() const noexcept {
+        return value_.c_str();
+    }
+
+    _ADINKRA_NODISCARD bool empty() const noexcept {
+        return value_.empty();
+    }
+
+    _ADINKRA_NODISCARD bool is_absolute() const noexcept {
+        return !value_.empty() &&
+               value_.front() == preferred_separator;
+    }
+
+    _ADINKRA_NODISCARD path parent_path() const {
+        if (value_.empty()) {
+            return {};
+        }
+        size_t end = value_.size();
+        while (end > 1 &&
+               value_[end - 1] == preferred_separator) {
+            --end;
+        }
+        const size_t separator =
+            value_.rfind(preferred_separator, end - 1);
+        if (separator == string_type::npos) {
+            return {};
+        }
+        if (separator == 0) {
+            return path("/");
+        }
+        return path(string_view(value_.data(), separator));
+    }
+
+    _ADINKRA_NODISCARD path filename() const {
+        if (value_.empty() ||
+            value_.back() == preferred_separator) {
+            return {};
+        }
+        const size_t separator =
+            value_.rfind(preferred_separator);
+        const size_t first = separator == string_type::npos
+            ? 0
+            : separator + 1;
+        return path(string_view(
+            value_.data() + first, value_.size() - first));
+    }
+
+    _ADINKRA_NODISCARD path extension() const {
+        const string_type name = filename().value_;
+        const size_t dot = name.rfind('.');
+        if (dot == string_type::npos || dot == 0) {
+            return {};
+        }
+        return path(string_view(
+            name.data() + dot, name.size() - dot));
+    }
+
+    _ADINKRA_NODISCARD path stem() const {
+        const path name = filename();
+        const string_type extension_value = name.extension().value_;
+        if (extension_value.empty()) {
+            return name;
+        }
+        return path(string_view(
+            name.value_.data(),
+            name.value_.size() - extension_value.size()));
+    }
+
+    _ADINKRA_NODISCARD path lexically_normal() const {
+        const bool absolute = is_absolute();
+        vector<string_type> components;
+        for (auto current = begin(); current != end(); ++current) {
+            string_type component = (*current).string();
+            if (component.empty() || component == ".") {
+                continue;
+            }
+            if (component == "..") {
+                if (!components.empty() &&
+                    components.back() != "..") {
+                    components.pop_back();
+                } else if (!absolute) {
+                    components.push_back(std::move(component));
+                }
+                continue;
+            }
+            components.push_back(std::move(component));
+        }
+
+        string_type result =
+            absolute ? string_type("/") : string_type();
+        for (const string_type& component : components) {
+            if (!result.empty() &&
+                result.back() != preferred_separator) {
+                result.push_back(preferred_separator);
+            }
+            result.append(component);
+        }
+        if (result.empty() && !value_.empty()) {
+            result = ".";
+        }
+        return path(std::move(result));
+    }
+
+    iterator begin() const noexcept {
+        size_t first = 0;
+        while (first < value_.size() &&
+               value_[first] == preferred_separator) {
+            ++first;
+        }
+        return iterator(
+            this,
+            first == value_.size() ? string_type::npos : first);
+    }
+
+    iterator end() const noexcept {
+        return iterator(this, string_type::npos);
+    }
+
+    friend bool operator==(
+        const path& left, const path& right) noexcept {
+        return left.value_ == right.value_;
+    }
+
+    friend auto operator<=>(
+        const path& left, const path& right) noexcept {
+        return left.value_ <=> right.value_;
+    }
+
+    friend path operator/(path left, const path& right) {
+        left /= right;
+        return left;
+    }
+
+private:
+    string_type value_;
+};
+
+using file_time_type = chrono::system_clock::time_point;
+
+enum class file_type {
+    none,
+    not_found,
+    regular,
+    directory,
+    symlink,
+    block,
+    character,
+    fifo,
+    socket,
+    unknown
+};
+
+class file_status {
+public:
+    constexpr file_status() noexcept : type_(file_type::none) {}
+    constexpr explicit file_status(file_type type) noexcept
+        : type_(type) {}
+
+    constexpr file_type type() const noexcept {
+        return type_;
+    }
+
+private:
+    file_type type_;
+};
+
+enum class copy_options : unsigned {
+    none = 0,
+    skip_existing = 1u << 0,
+    overwrite_existing = 1u << 1,
+    recursive = 1u << 2
+};
+
+constexpr copy_options operator|(
+    copy_options left, copy_options right) noexcept {
+    return static_cast<copy_options>(
+        static_cast<unsigned>(left) |
+        static_cast<unsigned>(right));
+}
+
+constexpr copy_options operator&(
+    copy_options left, copy_options right) noexcept {
+    return static_cast<copy_options>(
+        static_cast<unsigned>(left) &
+        static_cast<unsigned>(right));
+}
+
+inline void __set_filesystem_error(error_code& error, int value) noexcept {
+    error.assign(value, generic_category());
+}
+
+inline file_type __file_type(mode_t mode) noexcept {
+    if (S_ISREG(mode)) {
+        return file_type::regular;
+    }
+    if (S_ISDIR(mode)) {
+        return file_type::directory;
+    }
+    if (S_ISLNK(mode)) {
+        return file_type::symlink;
+    }
+    if (S_ISBLK(mode)) {
+        return file_type::block;
+    }
+    if (S_ISCHR(mode)) {
+        return file_type::character;
+    }
+    if (S_ISFIFO(mode)) {
+        return file_type::fifo;
+    }
+    if (S_ISSOCK(mode)) {
+        return file_type::socket;
+    }
+    return file_type::unknown;
+}
+
+_ADINKRA_NODISCARD inline file_status
+status(const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) != 0) {
+        const int status_error = errno;
+        __set_filesystem_error(error, status_error);
+        return file_status(
+            status_error == ENOENT
+                ? file_type::not_found
+                : file_type::none);
+    }
+    error.clear();
+    return file_status(__file_type(information.st_mode));
+}
+
+_ADINKRA_NODISCARD inline file_status
+status(const path& value) noexcept {
+    error_code error;
+    return status(value, error);
+}
+
+_ADINKRA_NODISCARD inline file_status
+symlink_status(const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::lstat(value.c_str(), &information) != 0) {
+        const int status_error = errno;
+        __set_filesystem_error(error, status_error);
+        return file_status(
+            status_error == ENOENT
+                ? file_type::not_found
+                : file_type::none);
+    }
+    error.clear();
+    return file_status(__file_type(information.st_mode));
+}
+
+_ADINKRA_NODISCARD inline file_status
+symlink_status(const path& value) noexcept {
+    error_code error;
+    return symlink_status(value, error);
+}
+
+_ADINKRA_NODISCARD inline bool
+exists(const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) == 0) {
+        error.clear();
+        return true;
+    }
+    __set_filesystem_error(error, errno);
+    return false;
+}
+
+_ADINKRA_NODISCARD inline bool exists(const path& value) noexcept {
+    error_code error;
+    return exists(value, error);
+}
+
+_ADINKRA_NODISCARD inline bool
+is_directory(const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) != 0) {
+        __set_filesystem_error(error, errno);
+        return false;
+    }
+    error.clear();
+    return S_ISDIR(information.st_mode);
+}
+
+_ADINKRA_NODISCARD inline bool
+is_directory(const path& value) noexcept {
+    error_code error;
+    return is_directory(value, error);
+}
+
+_ADINKRA_NODISCARD inline bool
+is_regular_file(const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) != 0) {
+        __set_filesystem_error(error, errno);
+        return false;
+    }
+    error.clear();
+    return S_ISREG(information.st_mode);
+}
+
+_ADINKRA_NODISCARD inline bool
+is_regular_file(const path& value) noexcept {
+    error_code error;
+    return is_regular_file(value, error);
+}
+
+class directory_entry {
+public:
+    directory_entry() = default;
+    explicit directory_entry(filesystem::path value)
+        : value_(std::move(value)) {}
+
+    _ADINKRA_NODISCARD const filesystem::path&
+    path() const noexcept {
+        return value_;
+    }
+
+    _ADINKRA_NODISCARD bool
+    is_directory(error_code& error) const noexcept {
+        return filesystem::is_directory(value_, error);
+    }
+
+    _ADINKRA_NODISCARD bool is_directory() const noexcept {
+        return filesystem::is_directory(value_);
+    }
+
+    _ADINKRA_NODISCARD bool
+    is_regular_file(error_code& error) const noexcept {
+        return filesystem::is_regular_file(value_, error);
+    }
+
+    _ADINKRA_NODISCARD bool is_regular_file() const noexcept {
+        return filesystem::is_regular_file(value_);
+    }
+
+    _ADINKRA_NODISCARD file_status
+    symlink_status(error_code& error) const noexcept {
+        return filesystem::symlink_status(value_, error);
+    }
+
+    _ADINKRA_NODISCARD file_status symlink_status() const noexcept {
+        return filesystem::symlink_status(value_);
+    }
+
+    _ADINKRA_NODISCARD uintmax_t
+    file_size(error_code& error) const noexcept;
+
+private:
+    filesystem::path value_;
+};
+
+class directory_iterator {
+    struct state {
+        DIR* directory;
+        filesystem::path base;
+
+        state(DIR* directory_value, filesystem::path base_value)
+            : directory(directory_value),
+              base(std::move(base_value)) {}
+
+        ~state() {
+            if (directory != nullptr) {
+                ::closedir(directory);
+            }
+        }
+    };
+
+public:
+    using iterator_category = input_iterator_tag;
+    using value_type = directory_entry;
+    using difference_type = ptrdiff_t;
+    using pointer = const directory_entry*;
+    using reference = const directory_entry&;
+
+    directory_iterator() = default;
+
+    explicit directory_iterator(const filesystem::path& value) {
+        error_code error;
+        initialize(value, error);
+    }
+
+    directory_iterator(
+        const filesystem::path& value, error_code& error) {
+        initialize(value, error);
+    }
+
+    reference operator*() const noexcept {
+        return current_;
+    }
+
+    pointer operator->() const noexcept {
+        return std::addressof(current_);
+    }
+
+    directory_iterator& operator++() {
+        error_code error;
+        advance(error);
+        return *this;
+    }
+
+    directory_iterator& increment(error_code& error) {
+        advance(error);
+        return *this;
+    }
+
+    friend bool operator==(
+        const directory_iterator& left,
+        const directory_iterator& right) noexcept {
+        return left.state_ == right.state_;
+    }
+
+    directory_iterator begin() const {
+        return *this;
+    }
+
+    directory_iterator end() const noexcept {
+        return {};
+    }
+
+private:
+    shared_ptr<state> state_;
+    directory_entry current_;
+
+    void initialize(
+        const filesystem::path& value, error_code& error) {
+        DIR* opened = ::opendir(value.c_str());
+        if (opened == nullptr) {
+            __set_filesystem_error(error, errno);
+            return;
+        }
+        error.clear();
+        state_ = make_shared<state>(opened, value);
+        advance(error);
+    }
+
+    void advance(error_code& error) {
+        if (!state_) {
+            error.clear();
+            return;
+        }
+        errno = 0;
+        while (dirent* entry = ::readdir(state_->directory)) {
+            string_view name(entry->d_name);
+            if (name == "." || name == "..") {
+                continue;
+            }
+            current_ = directory_entry(
+                state_->base / filesystem::path(name));
+            error.clear();
+            return;
+        }
+        const int read_error = errno;
+        state_.reset();
+        if (read_error == 0) {
+            error.clear();
+        } else {
+            __set_filesystem_error(error, read_error);
+        }
+    }
+};
+
+class recursive_directory_iterator {
+    struct state {
+        vector<directory_entry> entries;
+        size_t position = 0;
+    };
+
+public:
+    using iterator_category = input_iterator_tag;
+    using value_type = directory_entry;
+    using difference_type = ptrdiff_t;
+    using pointer = const directory_entry*;
+    using reference = const directory_entry&;
+
+    recursive_directory_iterator() = default;
+
+    explicit recursive_directory_iterator(
+        const filesystem::path& value) {
+        error_code error;
+        initialize(value, error);
+    }
+
+    recursive_directory_iterator(
+        const filesystem::path& value, error_code& error) {
+        initialize(value, error);
+    }
+
+    reference operator*() const noexcept {
+        return state_->entries[state_->position];
+    }
+
+    pointer operator->() const noexcept {
+        return std::addressof(operator*());
+    }
+
+    recursive_directory_iterator& operator++() {
+        error_code error;
+        return increment(error);
+    }
+
+    recursive_directory_iterator& increment(error_code& error) {
+        if (!state_) {
+            error.clear();
+            return *this;
+        }
+        ++state_->position;
+        if (state_->position == state_->entries.size()) {
+            state_.reset();
+        }
+        error.clear();
+        return *this;
+    }
+
+    friend bool operator==(
+        const recursive_directory_iterator& left,
+        const recursive_directory_iterator& right) noexcept {
+        return left.state_ == right.state_;
+    }
+
+    recursive_directory_iterator begin() const {
+        return *this;
+    }
+
+    recursive_directory_iterator end() const noexcept {
+        return {};
+    }
+
+private:
+    shared_ptr<state> state_;
+
+    static bool collect(
+        const filesystem::path& value,
+        vector<directory_entry>& entries,
+        error_code& error) {
+        directory_iterator children(value, error);
+        if (error) {
+            return false;
+        }
+        for (const directory_entry& child : children) {
+            entries.push_back(child);
+            error_code status_error;
+            const file_status child_status =
+                child.symlink_status(status_error);
+            if (status_error) {
+                error = status_error;
+                return false;
+            }
+            if (child_status.type() == file_type::directory &&
+                !collect(child.path(), entries, error)) {
+                return false;
+            }
+        }
+        error.clear();
+        return true;
+    }
+
+    void initialize(
+        const filesystem::path& value, error_code& error) {
+        auto created = make_shared<state>();
+        if (!collect(value, created->entries, error)) {
+            return;
+        }
+        if (created->entries.empty()) {
+            error.clear();
+            return;
+        }
+        state_ = std::move(created);
+        error.clear();
+    }
+};
+
+inline directory_iterator begin(directory_iterator iterator) noexcept {
+    return iterator;
+}
+
+inline directory_iterator end(const directory_iterator&) noexcept {
+    return {};
+}
+
+inline recursive_directory_iterator
+begin(recursive_directory_iterator iterator) noexcept {
+    return iterator;
+}
+
+inline recursive_directory_iterator
+end(const recursive_directory_iterator&) noexcept {
+    return {};
+}
+
+_ADINKRA_NODISCARD inline path
+absolute(const path& value, error_code& error) {
+    if (value.is_absolute()) {
+        error.clear();
+        return value.lexically_normal();
+    }
+
+    char current[PATH_MAX];
+    if (::getcwd(current, sizeof(current)) == nullptr) {
+        __set_filesystem_error(error, errno);
+        return {};
+    }
+    error.clear();
+    return (path(current) / value).lexically_normal();
+}
+
+_ADINKRA_NODISCARD inline path absolute(const path& value) {
+    error_code error;
+    return absolute(value, error);
+}
+
+_ADINKRA_NODISCARD inline path
+weakly_canonical(const path& value, error_code& error) {
+    char resolved[PATH_MAX];
+    if (::realpath(value.c_str(), resolved) != nullptr) {
+        error.clear();
+        return path(resolved);
+    }
+    path result = absolute(value, error);
+    if (!result.empty()) {
+        error.clear();
+    }
+    return result.lexically_normal();
+}
+
+_ADINKRA_NODISCARD inline path
+weakly_canonical(const path& value) {
+    error_code error;
+    return weakly_canonical(value, error);
+}
+
+inline bool remove(const path& value, error_code& error) noexcept {
+    if (::remove(value.c_str()) == 0) {
+        error.clear();
+        return true;
+    }
+    if (errno == ENOENT) {
+        error.clear();
+        return false;
+    }
+    __set_filesystem_error(error, errno);
+    return false;
+}
+
+inline bool remove(const path& value) {
+    error_code error;
+    return remove(value, error);
+}
+
+inline uintmax_t remove_all(
+    const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::lstat(value.c_str(), &information) != 0) {
+        if (errno == ENOENT) {
+            error.clear();
+            return 0;
+        }
+        __set_filesystem_error(error, errno);
+        return static_cast<uintmax_t>(-1);
+    }
+
+    uintmax_t removed = 0;
+    if (S_ISDIR(information.st_mode)) {
+        directory_iterator entries(value, error);
+        if (error) {
+            return static_cast<uintmax_t>(-1);
+        }
+        for (const directory_entry& entry : entries) {
+            const uintmax_t child = remove_all(entry.path(), error);
+            if (error) {
+                return static_cast<uintmax_t>(-1);
+            }
+            removed += child;
+        }
+    }
+
+    if (::remove(value.c_str()) != 0) {
+        __set_filesystem_error(error, errno);
+        return static_cast<uintmax_t>(-1);
+    }
+    error.clear();
+    return removed + 1;
+}
+
+inline uintmax_t remove_all(const path& value) {
+    error_code error;
+    return remove_all(value, error);
+}
+
+inline void rename(
+    const path& old_value, const path& new_value,
+    error_code& error) noexcept {
+    if (::rename(old_value.c_str(), new_value.c_str()) != 0) {
+        __set_filesystem_error(error, errno);
+        return;
+    }
+    error.clear();
+}
+
+inline uintmax_t file_size(
+    const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) != 0) {
+        __set_filesystem_error(error, errno);
+        return static_cast<uintmax_t>(-1);
+    }
+    if (!S_ISREG(information.st_mode)) {
+        __set_filesystem_error(error, EINVAL);
+        return static_cast<uintmax_t>(-1);
+    }
+    error.clear();
+    return static_cast<uintmax_t>(information.st_size);
+}
+
+inline uintmax_t file_size(const path& value) noexcept {
+    error_code error;
+    return file_size(value, error);
+}
+
+inline uintmax_t
+directory_entry::file_size(error_code& error) const noexcept {
+    return filesystem::file_size(value_, error);
+}
+
+inline bool create_directories(
+    const path& value, error_code& error) noexcept {
+    if (value.empty()) {
+        __set_filesystem_error(error, EINVAL);
+        return false;
+    }
+    if (filesystem::is_directory(value)) {
+        error.clear();
+        return false;
+    }
+    const path parent = value.parent_path();
+    if (!parent.empty() && parent != value &&
+        !filesystem::is_directory(parent)) {
+        create_directories(parent, error);
+        if (error) {
+            return false;
+        }
+    }
+    if (::mkdir(value.c_str(), 0777) == 0) {
+        error.clear();
+        return true;
+    }
+    if (errno == EEXIST && filesystem::is_directory(value)) {
+        error.clear();
+        return false;
+    }
+    __set_filesystem_error(error, errno);
+    return false;
+}
+
+inline bool create_directories(const path& value) noexcept {
+    error_code error;
+    return create_directories(value, error);
+}
+
+inline bool __has_copy_option(
+    copy_options options, copy_options searched) noexcept {
+    return (static_cast<unsigned>(options & searched) != 0);
+}
+
+inline bool copy_file(
+    const path& source, const path& destination,
+    copy_options options, error_code& error) noexcept {
+    int input = ::open(source.c_str(), O_RDONLY);
+    if (input < 0) {
+        __set_filesystem_error(error, errno);
+        return false;
+    }
+
+    int flags = O_WRONLY | O_CREAT;
+    if (__has_copy_option(
+            options, copy_options::overwrite_existing)) {
+        flags |= O_TRUNC;
+    } else {
+        flags |= O_EXCL;
+    }
+    int output = ::open(destination.c_str(), flags, 0666);
+    if (output < 0) {
+        const int open_error = errno;
+        ::close(input);
+        if (open_error == EEXIST &&
+            __has_copy_option(
+                options, copy_options::skip_existing)) {
+            error.clear();
+            return false;
+        }
+        __set_filesystem_error(error, open_error);
+        return false;
+    }
+
+    bool copied = true;
+    char buffer[16384];
+    while (true) {
+        const ssize_t read_count =
+            ::read(input, buffer, sizeof(buffer));
+        if (read_count == 0) {
+            break;
+        }
+        if (read_count < 0) {
+            __set_filesystem_error(error, errno);
+            copied = false;
+            break;
+        }
+        ssize_t written = 0;
+        while (written < read_count) {
+            const ssize_t write_count = ::write(
+                output, buffer + written,
+                static_cast<size_t>(read_count - written));
+            if (write_count < 0) {
+                __set_filesystem_error(error, errno);
+                copied = false;
+                break;
+            }
+            written += write_count;
+        }
+        if (!copied) {
+            break;
+        }
+    }
+
+    const int input_close = ::close(input);
+    const int output_close = ::close(output);
+    if (copied && (input_close != 0 || output_close != 0)) {
+        __set_filesystem_error(error, errno);
+        return false;
+    }
+    if (copied) {
+        error.clear();
+    }
+    return copied;
+}
+
+inline bool copy_file(
+    const path& source, const path& destination,
+    error_code& error) noexcept {
+    return copy_file(
+        source, destination, copy_options::none, error);
+}
+
+inline void copy(
+    const path& source, const path& destination,
+    copy_options options, error_code& error) noexcept {
+    const file_status source_status =
+        filesystem::symlink_status(source, error);
+    if (error) {
+        return;
+    }
+
+    if (source_status.type() == file_type::directory) {
+        if (!__has_copy_option(options, copy_options::recursive)) {
+            __set_filesystem_error(error, EISDIR);
+            return;
+        }
+        filesystem::create_directories(destination, error);
+        if (error) {
+            return;
+        }
+        directory_iterator children(source, error);
+        if (error) {
+            return;
+        }
+        for (const directory_entry& child : children) {
+            filesystem::copy(
+                child.path(),
+                destination / child.path().filename(),
+                options, error);
+            if (error) {
+                return;
+            }
+        }
+        error.clear();
+        return;
+    }
+
+    if (source_status.type() == file_type::symlink) {
+        char target[PATH_MAX];
+        const ssize_t count = ::readlink(
+            source.c_str(), target, sizeof(target) - 1);
+        if (count < 0) {
+            __set_filesystem_error(error, errno);
+            return;
+        }
+        target[count] = '\0';
+        if (::symlink(target, destination.c_str()) != 0) {
+            __set_filesystem_error(error, errno);
+            return;
+        }
+        error.clear();
+        return;
+    }
+
+    filesystem::copy_file(
+        source, destination, options, error);
+}
+
+inline void create_symlink(
+    const path& target, const path& link,
+    error_code& error) noexcept {
+    if (::symlink(target.c_str(), link.c_str()) != 0) {
+        __set_filesystem_error(error, errno);
+        return;
+    }
+    error.clear();
+}
+
+inline void create_hard_link(
+    const path& target, const path& link,
+    error_code& error) noexcept {
+    if (::link(target.c_str(), link.c_str()) != 0) {
+        __set_filesystem_error(error, errno);
+        return;
+    }
+    error.clear();
+}
+
+inline uintmax_t hard_link_count(
+    const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) != 0) {
+        __set_filesystem_error(error, errno);
+        return static_cast<uintmax_t>(-1);
+    }
+    error.clear();
+    return static_cast<uintmax_t>(information.st_nlink);
+}
+
+struct space_info {
+    uintmax_t capacity;
+    uintmax_t free;
+    uintmax_t available;
+};
+
+inline space_info space(
+    const path& value, error_code& error) noexcept {
+    struct statvfs information {};
+    if (::statvfs(value.c_str(), &information) != 0) {
+        __set_filesystem_error(error, errno);
+        const uintmax_t invalid = static_cast<uintmax_t>(-1);
+        return {invalid, invalid, invalid};
+    }
+    const uintmax_t block_size =
+        static_cast<uintmax_t>(information.f_frsize);
+    error.clear();
+    return {
+        static_cast<uintmax_t>(information.f_blocks) * block_size,
+        static_cast<uintmax_t>(information.f_bfree) * block_size,
+        static_cast<uintmax_t>(information.f_bavail) * block_size
+    };
+}
+
+inline file_time_type last_write_time(
+    const path& value, error_code& error) noexcept {
+    struct stat information {};
+    if (::stat(value.c_str(), &information) != 0) {
+        __set_filesystem_error(error, errno);
+        return file_time_type::min();
+    }
+#if defined(__APPLE__)
+    const timespec modified = information.st_mtimespec;
+#else
+    const timespec modified = information.st_mtim;
+#endif
+    error.clear();
+    return file_time_type(chrono::nanoseconds(
+        static_cast<long long>(modified.tv_sec) * 1000000000LL +
+        static_cast<long long>(modified.tv_nsec)));
+}
+
+inline void last_write_time(
+    const path& value, file_time_type time,
+    error_code& error) noexcept {
+    const long long nanoseconds =
+        time.time_since_epoch().count();
+    timespec times[2] = {
+        {0, UTIME_OMIT},
+        {
+            static_cast<time_t>(nanoseconds / 1000000000LL),
+            static_cast<long>(nanoseconds % 1000000000LL)
+        }
+    };
+    if (::utimensat(
+            AT_FDCWD, value.c_str(), times, 0) != 0) {
+        __set_filesystem_error(error, errno);
+        return;
+    }
+    error.clear();
+}
+
+inline path canonical(
+    const path& value, error_code& error) {
+    char resolved[PATH_MAX];
+    if (::realpath(value.c_str(), resolved) == nullptr) {
+        __set_filesystem_error(error, errno);
+        return {};
+    }
+    error.clear();
+    return path(resolved);
+}
+
+inline path temp_directory_path(error_code& error) {
+    const char* temporary = ::getenv("TMPDIR");
+    path result(
+        temporary != nullptr && temporary[0] != '\0'
+            ? temporary
+            : "/tmp");
+    if (!filesystem::is_directory(result, error)) {
+        return {};
+    }
+    error.clear();
+    if (!result.native().empty() &&
+        result.native().back() != path::preferred_separator) {
+        result /= path("");
+        string native = result.native();
+        native.push_back(path::preferred_separator);
+        result = path(std::move(native));
+    }
+    return result;
+}
+
+} // namespace filesystem
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

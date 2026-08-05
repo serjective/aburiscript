@@ -1,0 +1,382 @@
+#ifndef ADINKRA_BITSET
+#define ADINKRA_BITSET
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<size_t Size>
+class bitset {
+    static constexpr size_t bits_per_word = 64;
+    static constexpr size_t word_count =
+        Size == 0 ? 1 : (Size + bits_per_word - 1) / bits_per_word;
+
+public:
+    class reference {
+    public:
+        reference(const reference&) noexcept = default;
+
+        reference& operator=(bool value) noexcept {
+            owner_->assign(position_, value);
+            return *this;
+        }
+
+        reference& operator=(const reference& other) noexcept {
+            return *this = static_cast<bool>(other);
+        }
+
+        operator bool() const noexcept {
+            return owner_->unchecked_test(position_);
+        }
+
+        bool operator~() const noexcept {
+            return !static_cast<bool>(*this);
+        }
+
+        reference& flip() noexcept {
+            owner_->unchecked_flip(position_);
+            return *this;
+        }
+
+    private:
+        friend class bitset;
+
+        constexpr reference(
+            bitset& owner, size_t position) noexcept
+            : owner_(&owner), position_(position) {}
+
+        bitset* owner_;
+        size_t position_;
+    };
+
+    constexpr bitset() noexcept = default;
+
+    constexpr bitset(unsigned long long value) noexcept
+        : words_{} {
+        words_[0] = static_cast<uint64_t>(value);
+        trim();
+    }
+
+    template<class Character, class Traits, class Allocator>
+    explicit bitset(
+        const basic_string<Character, Traits, Allocator>& value,
+        size_t position = 0,
+        size_t count = basic_string<Character, Traits, Allocator>::npos,
+        Character zero = Character('0'),
+        Character one = Character('1'))
+        : words_{} {
+        if (position > value.size()) {
+            throw out_of_range("bitset string position");
+        }
+        initialize_from_characters(
+            value.data() + position,
+            min(count, value.size() - position), zero, one);
+    }
+
+    template<class Character>
+    explicit bitset(
+        const Character* value,
+        size_t count = basic_string<Character>::npos,
+        Character zero = Character('0'),
+        Character one = Character('1'))
+        : words_{} {
+        const size_t length = char_traits<Character>::length(value);
+        initialize_from_characters(
+            value, count == basic_string<Character>::npos
+                       ? length
+                       : min(count, length),
+            zero, one);
+    }
+
+    constexpr bitset& operator&=(const bitset& other) noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            words_[index] &= other.words_[index];
+        }
+        return *this;
+    }
+
+    constexpr bitset& operator|=(const bitset& other) noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            words_[index] |= other.words_[index];
+        }
+        return *this;
+    }
+
+    constexpr bitset& operator^=(const bitset& other) noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            words_[index] ^= other.words_[index];
+        }
+        return *this;
+    }
+
+    constexpr bitset& operator<<=(size_t shift) noexcept {
+        const bitset original = *this;
+        reset();
+        if (shift < Size) {
+            for (size_t index = shift; index < Size; ++index) {
+                assign(index, original.unchecked_test(index - shift));
+            }
+        }
+        return *this;
+    }
+
+    constexpr bitset& operator>>=(size_t shift) noexcept {
+        const bitset original = *this;
+        reset();
+        if (shift < Size) {
+            for (size_t index = 0; index + shift < Size; ++index) {
+                assign(index, original.unchecked_test(index + shift));
+            }
+        }
+        return *this;
+    }
+
+    constexpr bitset& set() noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            words_[index] = ~uint64_t(0);
+        }
+        trim();
+        return *this;
+    }
+
+    constexpr bitset& set(size_t position, bool value = true) {
+        check(position);
+        assign(position, value);
+        return *this;
+    }
+
+    constexpr bitset& reset() noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            words_[index] = 0;
+        }
+        return *this;
+    }
+
+    constexpr bitset& reset(size_t position) {
+        return set(position, false);
+    }
+
+    constexpr bitset& flip() noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            words_[index] = ~words_[index];
+        }
+        trim();
+        return *this;
+    }
+
+    constexpr bitset& flip(size_t position) {
+        check(position);
+        unchecked_flip(position);
+        return *this;
+    }
+
+    constexpr bool operator[](size_t position) const noexcept {
+        return unchecked_test(position);
+    }
+
+    constexpr reference operator[](size_t position) noexcept {
+        return reference(*this, position);
+    }
+
+    constexpr bool test(size_t position) const {
+        check(position);
+        return unchecked_test(position);
+    }
+
+    constexpr bool all() const noexcept {
+        return count() == Size;
+    }
+
+    constexpr bool any() const noexcept {
+        for (size_t index = 0; index < word_count; ++index) {
+            if (words_[index] != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    constexpr bool none() const noexcept {
+        return !any();
+    }
+
+    constexpr size_t count() const noexcept {
+        size_t result = 0;
+        for (size_t index = 0; index < word_count; ++index) {
+            result += static_cast<size_t>(
+                __builtin_popcountll(words_[index]));
+        }
+        return result;
+    }
+
+    constexpr size_t size() const noexcept {
+        return Size;
+    }
+
+    unsigned long to_ulong() const {
+        constexpr size_t result_bits =
+            numeric_limits<unsigned long>::digits;
+        check_conversion(result_bits);
+        return static_cast<unsigned long>(words_[0]);
+    }
+
+    unsigned long long to_ullong() const {
+        constexpr size_t result_bits =
+            numeric_limits<unsigned long long>::digits;
+        check_conversion(result_bits);
+        return static_cast<unsigned long long>(words_[0]);
+    }
+
+    template<class Character = char,
+             class Traits = char_traits<Character>,
+             class Allocator = allocator<Character>>
+    basic_string<Character, Traits, Allocator> to_string(
+        Character zero = Character('0'),
+        Character one = Character('1')) const {
+        basic_string<Character, Traits, Allocator> result(Size, zero);
+        for (size_t index = 0; index < Size; ++index) {
+            if (unchecked_test(index)) {
+                result[Size - index - 1] = one;
+            }
+        }
+        return result;
+    }
+
+    constexpr bitset operator~() const noexcept {
+        bitset result = *this;
+        result.flip();
+        return result;
+    }
+
+    constexpr bitset operator<<(size_t shift) const noexcept {
+        bitset result = *this;
+        result <<= shift;
+        return result;
+    }
+
+    constexpr bitset operator>>(size_t shift) const noexcept {
+        bitset result = *this;
+        result >>= shift;
+        return result;
+    }
+
+    friend constexpr bool operator==(
+        const bitset&, const bitset&) noexcept = default;
+
+private:
+    uint64_t words_[word_count]{};
+
+    static constexpr uint64_t bit_mask(size_t position) noexcept {
+        return uint64_t(1) << (position % bits_per_word);
+    }
+
+    constexpr bool unchecked_test(size_t position) const noexcept {
+        return (words_[position / bits_per_word] &
+                bit_mask(position)) != 0;
+    }
+
+    constexpr void assign(size_t position, bool value) noexcept {
+        uint64_t& word = words_[position / bits_per_word];
+        const uint64_t mask = bit_mask(position);
+        if (value) {
+            word |= mask;
+        } else {
+            word &= ~mask;
+        }
+    }
+
+    constexpr void unchecked_flip(size_t position) noexcept {
+        words_[position / bits_per_word] ^= bit_mask(position);
+    }
+
+    static constexpr void check(size_t position) {
+        if (position >= Size) {
+            throw out_of_range("bitset position");
+        }
+    }
+
+    constexpr void trim() noexcept {
+        if constexpr (Size == 0) {
+            words_[0] = 0;
+        } else if constexpr (Size % bits_per_word != 0) {
+            words_[word_count - 1] &=
+                (uint64_t(1) << (Size % bits_per_word)) - 1;
+        }
+    }
+
+    void check_conversion(size_t result_bits) const {
+        for (size_t index = result_bits; index < Size; ++index) {
+            if (unchecked_test(index)) {
+                throw overflow_error("bitset conversion overflow");
+            }
+        }
+    }
+
+    template<class Character>
+    void initialize_from_characters(
+        const Character* value, size_t count,
+        Character zero, Character one) {
+        const size_t used = min(Size, count);
+        for (size_t index = 0; index < used; ++index) {
+            const Character character = value[used - index - 1];
+            if (character == one) {
+                assign(index, true);
+            } else if (character != zero) {
+                throw invalid_argument("invalid bitset character");
+            }
+        }
+    }
+};
+
+template<size_t Size>
+constexpr bitset<Size> operator&(
+    bitset<Size> left, const bitset<Size>& right) noexcept {
+    left &= right;
+    return left;
+}
+
+template<size_t Size>
+constexpr bitset<Size> operator|(
+    bitset<Size> left, const bitset<Size>& right) noexcept {
+    left |= right;
+    return left;
+}
+
+template<size_t Size>
+constexpr bitset<Size> operator^(
+    bitset<Size> left, const bitset<Size>& right) noexcept {
+    left ^= right;
+    return left;
+}
+
+template<size_t Size>
+struct hash<bitset<Size>> {
+    using argument_type = bitset<Size>;
+    using result_type = size_t;
+
+    size_t operator()(const bitset<Size>& value) const noexcept {
+        size_t result =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1469598103934665603ULL)
+                : static_cast<size_t>(2166136261U);
+        const size_t prime =
+            sizeof(size_t) == 8
+                ? static_cast<size_t>(1099511628211ULL)
+                : static_cast<size_t>(16777619U);
+        for (size_t index = 0; index < Size; ++index) {
+            result ^= value[index] ? size_t(1) : size_t(0);
+            result *= prime;
+        }
+        return result;
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

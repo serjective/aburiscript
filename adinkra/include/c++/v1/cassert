@@ -1,0 +1,6 @@
+#ifndef ADINKRA_CASSERT
+#define ADINKRA_CASSERT
+
+#include <assert.h>
+
+#endif

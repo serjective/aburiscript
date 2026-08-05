@@ -1,0 +1,354 @@
+#ifndef ADINKRA_NUMERIC
+#define ADINKRA_NUMERIC
+
+#include <__adinkra/config>
+#include <functional>
+#include <iterator>
+#include <limits>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class InputIterator, class Type>
+constexpr Type accumulate(
+    InputIterator first, InputIterator last, Type initial) {
+    for (; first != last; ++first) {
+        initial = std::move(initial) + *first;
+    }
+    return initial;
+}
+
+template<class InputIterator, class Type, class BinaryOperation>
+constexpr Type accumulate(
+    InputIterator first, InputIterator last, Type initial,
+    BinaryOperation operation) {
+    for (; first != last; ++first) {
+        initial = operation(std::move(initial), *first);
+    }
+    return initial;
+}
+
+template<class InputIterator, class Type, class BinaryOperation>
+constexpr Type reduce(
+    InputIterator first, InputIterator last, Type initial,
+    BinaryOperation operation) {
+    for (; first != last; ++first) {
+        initial = operation(std::move(initial), *first);
+    }
+    return initial;
+}
+
+template<class InputIterator, class Type>
+constexpr Type reduce(
+    InputIterator first, InputIterator last, Type initial) {
+    return std::reduce(
+        first, last, std::move(initial), std::plus<>{});
+}
+
+template<class InputIterator>
+constexpr typename iterator_traits<InputIterator>::value_type reduce(
+    InputIterator first, InputIterator last) {
+    using value_type =
+        typename iterator_traits<InputIterator>::value_type;
+    return std::reduce(first, last, value_type{});
+}
+
+template<class FirstIterator, class SecondIterator, class Type>
+constexpr Type inner_product(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, Type initial) {
+    for (; first != last; ++first, ++second) {
+        initial = std::move(initial) + *first * *second;
+    }
+    return initial;
+}
+
+template<class FirstIterator, class SecondIterator, class Type,
+         class Add, class Multiply>
+constexpr Type inner_product(
+    FirstIterator first, FirstIterator last,
+    SecondIterator second, Type initial,
+    Add add, Multiply multiply) {
+    for (; first != last; ++first, ++second) {
+        initial = add(
+            std::move(initial), multiply(*first, *second));
+    }
+    return initial;
+}
+
+template<class InputIterator, class OutputIterator>
+constexpr OutputIterator partial_sum(
+    InputIterator first, InputIterator last,
+    OutputIterator output) {
+    if (first == last) {
+        return output;
+    }
+    auto value = *first;
+    *output = value;
+    while (++first != last) {
+        value = std::move(value) + *first;
+        *++output = value;
+    }
+    return ++output;
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryOperation>
+constexpr OutputIterator partial_sum(
+    InputIterator first, InputIterator last,
+    OutputIterator output, BinaryOperation operation) {
+    if (first == last) {
+        return output;
+    }
+    auto value = *first;
+    *output = value;
+    while (++first != last) {
+        value = operation(std::move(value), *first);
+        *++output = value;
+    }
+    return ++output;
+}
+
+template<class InputIterator, class OutputIterator>
+constexpr OutputIterator adjacent_difference(
+    InputIterator first, InputIterator last,
+    OutputIterator output) {
+    if (first == last) {
+        return output;
+    }
+    auto previous = *first;
+    *output = previous;
+    while (++first != last) {
+        auto current = *first;
+        *++output = current - std::move(previous);
+        previous = std::move(current);
+    }
+    return ++output;
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryOperation>
+constexpr OutputIterator adjacent_difference(
+    InputIterator first, InputIterator last,
+    OutputIterator output, BinaryOperation operation) {
+    if (first == last) {
+        return output;
+    }
+    auto previous = *first;
+    *output = previous;
+    while (++first != last) {
+        auto current = *first;
+        *++output = operation(current, std::move(previous));
+        previous = std::move(current);
+    }
+    return ++output;
+}
+
+template<class ForwardIterator, class Type>
+constexpr void iota(
+    ForwardIterator first, ForwardIterator last, Type value) {
+    while (first != last) {
+        *first++ = value;
+        ++value;
+    }
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryOperation>
+constexpr OutputIterator inclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, BinaryOperation operation) {
+    if (first == last) {
+        return output;
+    }
+    auto value = *first;
+    *output++ = value;
+    while (++first != last) {
+        value = operation(std::move(value), *first);
+        *output++ = value;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator>
+constexpr OutputIterator inclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output) {
+    return std::inclusive_scan(
+        first, last, output, plus<>{});
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryOperation, class Type>
+constexpr OutputIterator inclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, BinaryOperation operation,
+    Type initial) {
+    while (first != last) {
+        initial = operation(std::move(initial), *first++);
+        *output++ = initial;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator,
+         class Type, class BinaryOperation>
+constexpr OutputIterator exclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, Type initial,
+    BinaryOperation operation) {
+    while (first != last) {
+        auto input = *first++;
+        *output++ = initial;
+        initial = operation(std::move(initial), input);
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator, class Type>
+constexpr OutputIterator exclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, Type initial) {
+    return std::exclusive_scan(
+        first, last, output, std::move(initial), plus<>{});
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryOperation, class UnaryOperation>
+constexpr OutputIterator transform_inclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, BinaryOperation binary,
+    UnaryOperation unary) {
+    if (first == last) {
+        return output;
+    }
+    auto value = unary(*first);
+    *output++ = value;
+    while (++first != last) {
+        value = binary(std::move(value), unary(*first));
+        *output++ = value;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator,
+         class BinaryOperation, class UnaryOperation, class Type>
+constexpr OutputIterator transform_inclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, BinaryOperation binary,
+    UnaryOperation unary, Type initial) {
+    while (first != last) {
+        initial = binary(
+            std::move(initial), unary(*first++));
+        *output++ = initial;
+    }
+    return output;
+}
+
+template<class InputIterator, class OutputIterator,
+         class Type, class BinaryOperation, class UnaryOperation>
+constexpr OutputIterator transform_exclusive_scan(
+    InputIterator first, InputIterator last,
+    OutputIterator output, Type initial,
+    BinaryOperation binary, UnaryOperation unary) {
+    while (first != last) {
+        auto input = *first++;
+        *output++ = initial;
+        initial = binary(
+            std::move(initial), unary(input));
+    }
+    return output;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type gcd(Type left, Type right) {
+    static_assert(is_integral_v<Type>);
+    if constexpr (is_signed_v<Type>) {
+        if (left < 0) {
+            left = -left;
+        }
+        if (right < 0) {
+            right = -right;
+        }
+    }
+    while (right != 0) {
+        Type remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    return left;
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr common_type_t<Left, Right>
+gcd(Left left, Right right) {
+    using Result = common_type_t<Left, Right>;
+    return std::gcd(
+        static_cast<Result>(left), static_cast<Result>(right));
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type lcm(Type left, Type right) {
+    static_assert(is_integral_v<Type>);
+    if (left == 0 || right == 0) {
+        return 0;
+    }
+    Type result = left / std::gcd(left, right) * right;
+    if constexpr (is_signed_v<Type>) {
+        if (result < 0) {
+            result = -result;
+        }
+    }
+    return result;
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr common_type_t<Left, Right>
+lcm(Left left, Right right) {
+    using Result = common_type_t<Left, Right>;
+    return std::lcm(
+        static_cast<Result>(left), static_cast<Result>(right));
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr
+enable_if_t<is_integral_v<Type>, Type>
+midpoint(Type left, Type right) noexcept {
+    using Unsigned = make_unsigned_t<Type>;
+    return left > right
+        ? left - static_cast<Type>(
+                     static_cast<Unsigned>(left - right) / 2)
+        : left + static_cast<Type>(
+                     static_cast<Unsigned>(right - left) / 2);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr
+enable_if_t<is_floating_point_v<Type>, Type>
+midpoint(Type left, Type right) noexcept {
+    const Type left_magnitude = left < 0 ? -left : left;
+    const Type right_magnitude = right < 0 ? -right : right;
+    const Type high = (numeric_limits<Type>::max)() / 2;
+    const Type low = (numeric_limits<Type>::min)() * 2;
+    if (left_magnitude <= high && right_magnitude <= high) {
+        return (left + right) / 2;
+    }
+    if (left_magnitude < low) {
+        return left + right / 2;
+    }
+    if (right_magnitude < low) {
+        return left / 2 + right;
+    }
+    return left / 2 + right / 2;
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type*
+midpoint(Type* left, Type* right) noexcept {
+    return left + (right - left) / 2;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

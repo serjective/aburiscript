@@ -1,0 +1,329 @@
+#ifndef ADINKRA_COMPARE
+#define ADINKRA_COMPARE
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __comparison_detail {
+
+struct zero {
+    constexpr zero(zero*) noexcept {}
+};
+
+} // namespace __comparison_detail
+
+class partial_ordering {
+public:
+    static const partial_ordering less;
+    static const partial_ordering equivalent;
+    static const partial_ordering greater;
+    static const partial_ordering unordered;
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator==(partial_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator==(partial_ordering, partial_ordering) noexcept = default;
+
+    _ADINKRA_NODISCARD friend constexpr partial_ordering
+    operator<=>(partial_ordering value, __comparison_detail::zero) noexcept {
+        return value;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr partial_ordering
+    operator<=>(__comparison_detail::zero, partial_ordering value) noexcept {
+        return partial_ordering(value.value_ == 2 ? 2 : -value.value_);
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<(partial_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == -1;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<=(partial_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == -1 || value.value_ == 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>(partial_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == 1;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>=(partial_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == 1 || value.value_ == 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<(__comparison_detail::zero, partial_ordering value) noexcept {
+        return value.value_ == 1;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<=(__comparison_detail::zero, partial_ordering value) noexcept {
+        return value.value_ == 1 || value.value_ == 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>(__comparison_detail::zero, partial_ordering value) noexcept {
+        return value.value_ == -1;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>=(__comparison_detail::zero, partial_ordering value) noexcept {
+        return value.value_ == -1 || value.value_ == 0;
+    }
+
+private:
+    explicit constexpr partial_ordering(signed char value) noexcept
+        : value_(value) {}
+
+    signed char value_;
+};
+
+inline constexpr partial_ordering partial_ordering::less(-1);
+inline constexpr partial_ordering partial_ordering::equivalent(0);
+inline constexpr partial_ordering partial_ordering::greater(1);
+inline constexpr partial_ordering partial_ordering::unordered(2);
+
+class weak_ordering {
+public:
+    static const weak_ordering less;
+    static const weak_ordering equivalent;
+    static const weak_ordering greater;
+
+    constexpr operator partial_ordering() const noexcept {
+        return value_ < 0 ? partial_ordering::less
+             : value_ > 0 ? partial_ordering::greater
+                          : partial_ordering::equivalent;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator==(weak_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator==(weak_ordering, weak_ordering) noexcept = default;
+
+    _ADINKRA_NODISCARD friend constexpr weak_ordering
+    operator<=>(weak_ordering value, __comparison_detail::zero) noexcept {
+        return value;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr weak_ordering
+    operator<=>(__comparison_detail::zero, weak_ordering value) noexcept {
+        return weak_ordering(-value.value_);
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<(weak_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ < 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<=(weak_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ <= 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>(weak_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ > 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>=(weak_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ >= 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<(__comparison_detail::zero, weak_ordering value) noexcept {
+        return value.value_ > 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<=(__comparison_detail::zero, weak_ordering value) noexcept {
+        return value.value_ >= 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>(__comparison_detail::zero, weak_ordering value) noexcept {
+        return value.value_ < 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>=(__comparison_detail::zero, weak_ordering value) noexcept {
+        return value.value_ <= 0;
+    }
+
+private:
+    explicit constexpr weak_ordering(signed char value) noexcept
+        : value_(value) {}
+
+    signed char value_;
+};
+
+inline constexpr weak_ordering weak_ordering::less(-1);
+inline constexpr weak_ordering weak_ordering::equivalent(0);
+inline constexpr weak_ordering weak_ordering::greater(1);
+
+class strong_ordering {
+public:
+    static const strong_ordering less;
+    static const strong_ordering equal;
+    static const strong_ordering equivalent;
+    static const strong_ordering greater;
+
+    constexpr operator partial_ordering() const noexcept {
+        return value_ < 0 ? partial_ordering::less
+             : value_ > 0 ? partial_ordering::greater
+                          : partial_ordering::equivalent;
+    }
+
+    constexpr operator weak_ordering() const noexcept {
+        return value_ < 0 ? weak_ordering::less
+             : value_ > 0 ? weak_ordering::greater
+                          : weak_ordering::equivalent;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator==(strong_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ == 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator==(strong_ordering, strong_ordering) noexcept = default;
+
+    _ADINKRA_NODISCARD friend constexpr strong_ordering
+    operator<=>(strong_ordering value, __comparison_detail::zero) noexcept {
+        return value;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr strong_ordering
+    operator<=>(__comparison_detail::zero, strong_ordering value) noexcept {
+        return strong_ordering(-value.value_);
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<(strong_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ < 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<=(strong_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ <= 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>(strong_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ > 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>=(strong_ordering value, __comparison_detail::zero) noexcept {
+        return value.value_ >= 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<(__comparison_detail::zero, strong_ordering value) noexcept {
+        return value.value_ > 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator<=(__comparison_detail::zero, strong_ordering value) noexcept {
+        return value.value_ >= 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>(__comparison_detail::zero, strong_ordering value) noexcept {
+        return value.value_ < 0;
+    }
+
+    _ADINKRA_NODISCARD friend constexpr bool
+    operator>=(__comparison_detail::zero, strong_ordering value) noexcept {
+        return value.value_ <= 0;
+    }
+
+private:
+    explicit constexpr strong_ordering(signed char value) noexcept
+        : value_(value) {}
+
+    signed char value_;
+};
+
+inline constexpr strong_ordering strong_ordering::less(-1);
+inline constexpr strong_ordering strong_ordering::equal(0);
+inline constexpr strong_ordering strong_ordering::equivalent(0);
+inline constexpr strong_ordering strong_ordering::greater(1);
+
+template<class Type, class Other = Type>
+struct compare_three_way_result {};
+
+template<class Type, class Other>
+    requires requires {
+        declval<const remove_reference_t<Type>&>() <=>
+            declval<const remove_reference_t<Other>&>();
+    }
+struct compare_three_way_result<Type, Other> {
+    using type = decltype(
+        declval<const remove_reference_t<Type>&>() <=>
+        declval<const remove_reference_t<Other>&>());
+};
+
+template<class Type, class Other = Type>
+using compare_three_way_result_t =
+    typename compare_three_way_result<Type, Other>::type;
+
+struct compare_three_way {
+    using is_transparent = void;
+
+    template<class Type, class Other>
+    _ADINKRA_NODISCARD constexpr auto
+    operator()(Type&& left, Other&& right) const
+        noexcept(noexcept(std::forward<Type>(left) <=> std::forward<Other>(right)))
+        -> decltype(std::forward<Type>(left) <=> std::forward<Other>(right)) {
+        return std::forward<Type>(left) <=> std::forward<Other>(right);
+    }
+};
+
+template<class Type>
+concept three_way_comparable =
+    requires(const remove_reference_t<Type>& left,
+             const remove_reference_t<Type>& right) {
+        left <=> right;
+    };
+
+_ADINKRA_NODISCARD constexpr bool is_eq(partial_ordering value) noexcept {
+    return value == 0;
+}
+
+_ADINKRA_NODISCARD constexpr bool is_neq(partial_ordering value) noexcept {
+    return value != 0;
+}
+
+_ADINKRA_NODISCARD constexpr bool is_lt(partial_ordering value) noexcept {
+    return value < 0;
+}
+
+_ADINKRA_NODISCARD constexpr bool is_lteq(partial_ordering value) noexcept {
+    return value <= 0;
+}
+
+_ADINKRA_NODISCARD constexpr bool is_gt(partial_ordering value) noexcept {
+    return value > 0;
+}
+
+_ADINKRA_NODISCARD constexpr bool is_gteq(partial_ordering value) noexcept {
+    return value >= 0;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

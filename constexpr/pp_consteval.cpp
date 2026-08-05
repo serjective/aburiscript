@@ -698,7 +698,7 @@ private:
             return success(make_zero_value());
         }
 
-        return failure("invalid token in preprocessor expression: " + tok.value, tok.loc);
+        return failure("invalid token in preprocessor expression: " + std::string(tok.value), tok.loc);
     }
 };
 }

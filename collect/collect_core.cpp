@@ -1,1785 +1,1137 @@
 #include "collect.h"
-#include "../helpers/auto_type_utils.h"
-#include "../helpers/qualified_name_utils.h"
+#include "collect_template_state.h"
+
 #include "../perf_stats.h"
-#include "lookup_engine.h"
+
 #include <cassert>
-#include <cstdlib>
-#include <iostream>
+#include <utility>
+
+namespace aburi::collect {
+
+void Session::mark_generated_abi_entity(cir::EntityId entity,
+                                        cir::EntityId owner,
+                                        cir::GeneratedSymbolRole role) {
+    if (!entity.valid() || !file_.valid(entity)) {
+        return;
+    }
+    cir::Entity& generated = file_.entity_mut(entity);
+    generated.abi_identity = cir::AbiIdentityKind::Generated;
+    generated.abi_owner = owner;
+    generated.generated_symbol_role = role;
+    if (owner.valid() && file_.valid(owner)) {
+        generated.is_template_pattern =
+            file_.entity(owner).is_template_pattern;
+    }
+}
 
 namespace {
-struct RecordNestedLookupOwner {
-    std::shared_ptr<ObjectType> record_type = nullptr;
-    const ClassTemplateDecl* class_template = nullptr;
-    std::shared_ptr<TemplateSpecializationType> specialization = nullptr;
-};
 
-RecordNestedLookupOwner resolve_record_nested_lookup_owner(
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    RecordNestedLookupOwner owner;
-    if (!owner_type) {
-        return owner;
-    }
-
-    owner.record_type =
-        desugar_type(owner_type, ast_ctx).as_shared<ObjectType>();
-    if (owner.record_type) {
-        return owner;
-    }
-
-    owner.specialization =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_typedefs(owner_type).get_shared());
-    if (!owner.specialization) {
-        return owner;
-    }
-
-    owner.class_template =
-        dyn_cast<ClassTemplateDecl>(owner.specialization->primary_template);
-    const ObjectDecl* pattern_decl = owner.class_template
-        ? owner.class_template->pattern_semantic_decl()
-        : nullptr;
-    if (!pattern_decl) {
-        owner.class_template = nullptr;
-        owner.specialization = nullptr;
-        return owner;
-    }
-
-    owner.record_type = pattern_decl->get_record_type();
-    return owner;
-}
-
-struct CollectTentativeMetrics {
-    uint64_t tentative_begins = 0;
-    uint64_t tentative_commits = 0;
-    uint64_t tentative_rollbacks = 0;
-    uint64_t snapshot_materializations = 0;
-    uint64_t decl_context_clone_roots = 0;
-    uint64_t decl_context_nodes_cloned = 0;
-    uint64_t scope_nodes_cloned = 0;
-};
-
-bool refactor_metrics_enabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("ABURI_REFACTOR_METRICS");
-        return env && env[0] != '\0' && env[0] != '0';
-    }();
-    return enabled;
-}
-
-CollectTentativeMetrics& collect_tentative_metrics() {
-    static CollectTentativeMetrics metrics;
-    return metrics;
-}
-
-void emit_collect_tentative_metrics_at_exit() {
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    const auto& metrics = collect_tentative_metrics();
-    std::cerr
-        << "[refactor-metrics] collect.tentative "
-        << "begins=" << metrics.tentative_begins
-        << " commits=" << metrics.tentative_commits
-        << " rollbacks=" << metrics.tentative_rollbacks
-        << " materializations=" << metrics.snapshot_materializations
-        << " clone_roots=" << metrics.decl_context_clone_roots
-        << " cloned_context_nodes=" << metrics.decl_context_nodes_cloned
-        << " cloned_scope_nodes=" << metrics.scope_nodes_cloned
-        << '\n';
-}
-
-struct CollectTentativeMetricsReporter {
-    ~CollectTentativeMetricsReporter() {
-        emit_collect_tentative_metrics_at_exit();
-    }
-};
-
-CollectTentativeMetricsReporter g_collect_tentative_metrics_reporter;
-
-bool nested_type_matches_equivalent(
-    const RecordSemanticState::NestedType& lhs,
-    const RecordSemanticState::NestedType& rhs) {
-    if (lhs.decl && rhs.decl) {
-        return lhs.decl == rhs.decl;
-    }
-    if (lhs.symbol && rhs.symbol) {
-        return lhs.symbol.get() == rhs.symbol.get();
-    }
-    return lhs.name == rhs.name && lhs.type.equals_qualified(rhs.type);
-}
-
-const ObjectDecl* canonical_record_owner_decl(const ObjectDecl* decl) {
-    if (!decl) {
-        return nullptr;
-    }
-    if (auto record_type = decl->get_record_type()) {
-        if (auto* canonical_decl =
-                dyn_cast<ObjectDecl>(record_type->get_decl())) {
-            return canonical_decl;
-        }
-    }
-    return decl;
-}
-
-void collect_record_base_nested_type_matches(
-    const ObjectDecl* owner_decl,
-    const std::string& name,
-    std::unordered_set<const ObjectDecl*>& active_stack,
-    std::vector<RecordSemanticState::NestedType>& matches) {
-    if (!owner_decl || name.empty()) {
-        return;
-    }
-    if (!active_stack.insert(owner_decl).second) {
-        return;
-    }
-
-    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
-    if (!state) {
-        active_stack.erase(owner_decl);
-        return;
-    }
-
-    for (auto it = state->nested_types.rbegin();
-         it != state->nested_types.rend();
-         ++it) {
-        if (it->name != name) {
-            continue;
-        }
-        bool duplicate = false;
-        for (const auto& existing_match : matches) {
-            if (nested_type_matches_equivalent(existing_match, *it)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate) {
-            matches.push_back(*it);
-        }
-    }
-
-    auto visit_base = [&](const ObjectDecl* base_decl) {
-        if (!base_decl) {
-            return;
-        }
-        collect_record_base_nested_type_matches(
-            base_decl,
-            name,
-            active_stack,
-            matches);
-    };
-
-    for (const auto& base : state->bases) {
-        visit_base(base.record_decl);
-    }
-    for (const auto& virtual_base : state->virtual_bases) {
-        visit_base(virtual_base.record_decl);
-    }
-
-    active_stack.erase(owner_decl);
-}
-
-void bump_snapshot_materializations() {
+void bump_collect_counter(PerfCounter counter) {
     if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::CollectSnapshotMaterializations);
-        return;
+        profiler->add_counter(counter);
     }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++collect_tentative_metrics().snapshot_materializations;
 }
 
-void bump_tentative_begins() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::CollectTentativeBegins);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++collect_tentative_metrics().tentative_begins;
-}
-
-void bump_tentative_commits() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::CollectTentativeCommits);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++collect_tentative_metrics().tentative_commits;
-}
-
-void bump_tentative_rollbacks() {
-    if (auto* profiler = active_perf_profiler()) {
-        profiler->add_counter(PerfCounter::CollectTentativeRollbacks);
-        return;
-    }
-    if (!refactor_metrics_enabled()) {
-        return;
-    }
-    ++collect_tentative_metrics().tentative_rollbacks;
-}
-
-std::shared_ptr<DeclContext> find_decl_context_in_subtree(
-    const std::shared_ptr<DeclContext>& root, const DeclContext* target) {
-    if (!root || !target) {
-        return nullptr;
-    }
-    if (root.get() == target) {
-        return root;
-    }
-    for (const auto& child : root->lexical_children()) {
-        auto found = find_decl_context_in_subtree(child, target);
-        if (found) {
-            return found;
-        }
-    }
-    return nullptr;
-}
-
-void set_scope_decl_context(
-    const std::shared_ptr<Scope>& scope,
-    const std::shared_ptr<DeclContext>& context) {
-    if (!scope) {
-        return;
-    }
-    scope->associated_decl_context = context.get();
-    scope->associated_decl_context_owner = context;
-}
-
-std::shared_ptr<DeclContext> lock_scope_decl_context(
-    const std::shared_ptr<Scope>& scope) {
-    if (!scope || !scope->associated_decl_context) {
-        return nullptr;
-    }
-    auto context = scope->associated_decl_context_owner.lock();
-    if (context && context.get() == scope->associated_decl_context) {
-        return context;
-    }
-    return nullptr;
-}
-
-DeclContextKind context_kind_for_scope_flags(ScopeFlags flags) {
-    if (scope_flags_contains(flags, ScopeFlags::NamespaceScope)) {
-        return DeclContextKind::Namespace;
-    }
-    if (scope_flags_contains(flags, ScopeFlags::RecordScope)) {
-        return DeclContextKind::Record;
-    }
-    if (scope_flags_contains(flags, ScopeFlags::TemplateParameterScope)) {
-        return DeclContextKind::TemplateParameter;
-    }
-    if (scope_flags_contains(flags, ScopeFlags::FunctionScope)) {
-        return DeclContextKind::Function;
-    }
-    if (scope_flags_contains(flags, ScopeFlags::PrototypeScope)) {
-        return DeclContextKind::FunctionPrototype;
-    }
-    return DeclContextKind::Block;
-}
-
-bool lookup_trace_enabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("ABURI_LOOKUP_TRACE");
-        return env && env[0] != '\0' && env[0] != '0';
-    }();
-    return enabled;
-}
-
-void emit_lookup_trace(const char* lookup_kind,
-                       const std::string& name,
-                       const LookupEngine::LookupTrace& trace,
-                       bool found) {
-    if (!lookup_trace_enabled()) {
-        return;
-    }
-    std::cerr << "[lookup] kind=" << lookup_kind
-              << " name=" << name
-              << " result=" << (found ? "hit" : "miss") << '\n';
-    for (const auto& step : trace.steps) {
-        std::cerr << "  " << step << '\n';
-    }
-}
 } // namespace
 
-void Collect::set_lang_options(LangOptions lang_opts) {
+Session::~Session() = default;
 
-    lang_opts_ = lang_opts;
-}
-
-void Collect::materialize_tentative_snapshot(TentativeSnapshot& snapshot) {
-    if (snapshot.materialized) {
+void Session::ClosureAbiContextScope::close() {
+    if (!session_) {
         return;
     }
-    bump_snapshot_materializations();
-    snapshot.materialized = true;
-    snapshot.current_scope = session_.current_scope_;
-    snapshot.translation_unit_decl_context = session_.translation_unit_decl_context_;
-    snapshot.current_decl_context = session_.current_decl_context_;
-    snapshot.current_global_scope_ptr = session_.current_global_scope_;
-    snapshot.func_state = session_.func_state_;
-    snapshot.current_cpp_record_lookup_type = session_.current_cpp_record_lookup_type_;
-    snapshot.function_definition_stack = session_.function_definition_stack_;
+    if (!session_->closure_abi_context_stack_.empty()) {
+        session_->closure_abi_context_stack_.pop_back();
+    }
+    session_ = nullptr;
 }
 
-void Collect::materialize_tentative_snapshot_if_needed() {
-    if (session_.tentative_snapshots_.empty()) {
-        return;
-    }
-    bool needs_materialization = false;
-    for (const auto& snapshot : session_.tentative_snapshots_) {
-        if (!snapshot.materialized) {
-            needs_materialization = true;
-            break;
-        }
-    }
-    if (!needs_materialization) {
-        return;
-    }
-    for (auto& snapshot : session_.tentative_snapshots_) {
-        materialize_tentative_snapshot(snapshot);
-    }
+Session::ClosureAbiContextScope
+Session::enter_variable_initializer_closure_context(
+    std::string_view variable_name) {
+    ActiveClosureAbiContext context;
+    context.kind = cir::ClosureAbiContextKind::VariableInitializer;
+    context.name = file_.intern_name(variable_name);
+    context.declaration_context = current_decl_context();
+    closure_abi_context_stack_.push_back(context);
+    return ClosureAbiContextScope(this);
 }
 
-void Collect::record_decl_context_mutation(
-    const std::shared_ptr<DeclContext>& context) {
-    if (!context || session_.tentative_snapshots_.empty()) {
-        return;
+Session::Session(LangOptions lang_opts, std::shared_ptr<TargetInfo> target)
+    : lang_opts_(std::move(lang_opts)), builder_(file_),
+      template_state_(std::make_unique<TemplateState>()) {
+    file_.set_target_info(std::move(target));
+    builder_.void_type();
+    builder_.int_type();
+    builder_.usize_type();
+    cir::EntityId tu =
+        builder_.add_entity(cir::EntityKind::TranslationUnit, "<translation-unit>");
+    translation_unit_context_ =
+        file_.create_decl_context(cir::DeclContextKind::TranslationUnit, {}, tu);
+    file_.entity_mut(tu).lexical_context = translation_unit_context_;
+    file_.entity_mut(tu).semantic_context = translation_unit_context_;
+
+    scopes_.push_back({});
+    ScopeFrame file_scope;
+    file_scope.flags = ScopeFlags::FileScope;
+    file_scope.context = translation_unit_context_;
+    scopes_.push_back(file_scope);
+    current_scope_ = 1;
+
+    if (lang_opts_.is_objc()) {
+        initialize_objc_mode();
     }
-    materialize_tentative_snapshot_if_needed();
-    const DeclContext* context_key = context.get();
-    for (auto& snapshot : session_.tentative_snapshots_) {
-        if (snapshot.decl_context_mutations.contains(context_key)) {
-            continue;
-        }
-        TentativeSnapshot::DeclContextMutationCheckpoint checkpoint;
-        checkpoint.context = context;
-        checkpoint.declaration_count = context->declaration_count();
-        checkpoint.lexical_child_count = context->lexical_child_count();
-        checkpoint.namespace_binding_count = context->namespace_binding_count();
-        checkpoint.namespace_alias_count = context->namespace_alias_count();
-        checkpoint.namespace_nomination_count =
-            context->namespace_nomination_count();
-        checkpoint.is_inline_namespace = context->is_inline_namespace();
-        checkpoint.inline_enclosing_namespace =
-            context->inline_enclosing_namespace();
-        checkpoint.next_lookup_event_index = context->next_lookup_event_index();
-        snapshot.decl_context_mutations.emplace(context_key, std::move(checkpoint));
+    if (file_.target_info().va_list_kind == VaListKind::CHAR_PTR) {
+        cir::TypeId char_type = file_.builtin_type(cir::BuiltinTypeKind::Char);
+        cir::TypeId va_list_type = pointer_type(type_ref(char_type));
+        (void)declare_typedef("__builtin_va_list", va_list_type, SrcLoc());
+    } else if (file_.target_info().va_list_kind == VaListKind::AARCH64_VA_LIST) {
+        (void)declare_typedef("__builtin_va_list", make_aarch64_va_list_type(),
+                              SrcLoc());
+        declare_sve_builtin_types();
+    } else if (file_.target_info().va_list_kind == VaListKind::X86_64_VA_LIST) {
+        (void)declare_typedef("__builtin_va_list", make_x86_64_va_list_type(),
+                              SrcLoc());
+    } else {
+        (void)declare_typedef("__builtin_va_list", file_.unknown_type(), SrcLoc());
     }
+    file_.mark_prelude();
 }
 
-void Collect::record_scope_mutation(const std::shared_ptr<Scope>& scope) {
-    if (!scope || session_.tentative_snapshots_.empty()) {
-        return;
-    }
-    materialize_tentative_snapshot_if_needed();
-    const Scope* scope_key = scope.get();
-    for (auto& snapshot : session_.tentative_snapshots_) {
-        if (snapshot.scope_mutations.contains(scope_key)) {
-            continue;
-        }
-        TentativeSnapshot::ScopeMutationCheckpoint checkpoint;
-        checkpoint.scope = scope;
-        checkpoint.state = *scope;
-        snapshot.scope_mutations.emplace(scope_key, std::move(checkpoint));
-    }
-}
-
-void Collect::record_global_scope_mutation(
-    const std::shared_ptr<GlobalIdentTracker>& global_scope) {
-    if (!global_scope || session_.tentative_snapshots_.empty()) {
-        return;
-    }
-    materialize_tentative_snapshot_if_needed();
-    const GlobalIdentTracker* global_scope_key = global_scope.get();
-    for (auto& snapshot : session_.tentative_snapshots_) {
-        if (snapshot.global_scope_mutations.contains(global_scope_key)) {
-            continue;
-        }
-        TentativeSnapshot::GlobalScopeMutationCheckpoint checkpoint;
-        checkpoint.scope = global_scope;
-        checkpoint.all_variables = global_scope->all_variables;
-        snapshot.global_scope_mutations.emplace(
-            global_scope_key, std::move(checkpoint));
-    }
-}
-
-void Collect::collect_begin_session_isolation() {
-    TentativeSnapshot snapshot;
-    session_.tentative_snapshots_.push_back(std::move(snapshot));
-}
-
-void Collect::collect_commit_session_isolation() {
-    if (session_.tentative_snapshots_.empty()) {
-        return;
-    }
-    session_.tentative_snapshots_.pop_back();
-}
-
-void Collect::collect_rollback_session_isolation() {
-    if (session_.tentative_snapshots_.empty()) {
-        return;
-    }
-    TentativeSnapshot snapshot = std::move(session_.tentative_snapshots_.back());
-    session_.tentative_snapshots_.pop_back();
-    if (!snapshot.materialized) {
-        return;
-    }
-
-    for (auto& entry : snapshot.global_scope_mutations) {
-        auto& checkpoint = entry.second;
-        if (checkpoint.scope) {
-            checkpoint.scope->all_variables = std::move(checkpoint.all_variables);
-        }
-    }
-    for (auto& entry : snapshot.scope_mutations) {
-        auto& checkpoint = entry.second;
-        if (checkpoint.scope) {
-            *checkpoint.scope = std::move(checkpoint.state);
-        }
-    }
-    for (auto& entry : snapshot.decl_context_mutations) {
-        auto& checkpoint = entry.second;
-        if (!checkpoint.context) {
-            continue;
-        }
-        checkpoint.context->truncate_declarations(checkpoint.declaration_count);
-        checkpoint.context->truncate_lexical_children(checkpoint.lexical_child_count);
-        checkpoint.context->truncate_namespace_bindings(
-            checkpoint.namespace_binding_count);
-        checkpoint.context->truncate_namespace_aliases(
-            checkpoint.namespace_alias_count);
-        checkpoint.context->truncate_namespace_nominations(
-            checkpoint.namespace_nomination_count);
-        checkpoint.context->set_inline_namespace(
-            checkpoint.is_inline_namespace,
-            checkpoint.inline_enclosing_namespace);
-        checkpoint.context->set_next_lookup_event_index(
-            checkpoint.next_lookup_event_index);
-    }
-
-    session_.current_scope_ = std::move(snapshot.current_scope);
-    session_.translation_unit_decl_context_ = std::move(snapshot.translation_unit_decl_context);
-    session_.current_decl_context_ = std::move(snapshot.current_decl_context);
-    session_.current_global_scope_ = snapshot.current_global_scope_ptr;
-    session_.func_state_ = std::move(snapshot.func_state);
-    session_.current_cpp_record_lookup_type_ =
-        std::move(snapshot.current_cpp_record_lookup_type);
-    session_.function_definition_stack_ = std::move(snapshot.function_definition_stack);
-    sync_decl_context_from_current_scope();
-}
-
-bool Collect::collect_is_session_isolating() const {
-    return !session_.tentative_snapshots_.empty();
-}
-
-void Collect::collect_begin_speculative_parse() {
-    bump_tentative_begins();
-    collect_begin_session_isolation();
-    query_context_.begin_tentative_overlay();
-}
-
-void Collect::collect_commit_speculative_parse() {
-    if (session_.tentative_snapshots_.empty() ||
-        !query_context_.has_tentative_overlay()) {
-        return;
-    }
-    bump_tentative_commits();
-    query_context_.commit_tentative_overlay(ast_ctx_->semantic_store());
-    collect_commit_session_isolation();
-}
-
-void Collect::collect_rollback_speculative_parse() {
-    if (session_.tentative_snapshots_.empty() ||
-        !query_context_.has_tentative_overlay()) {
-        return;
-    }
-    bump_tentative_rollbacks();
-    query_context_.rollback_tentative_overlay();
-    collect_rollback_session_isolation();
-}
-
-bool Collect::collect_is_speculative_parsing() const {
-    return query_context_.has_tentative_overlay();
-}
-
-
-void Collect::collect_start_translation_unit() {
-    query_context_.clear();
-    lookup_generation_ = 1;
-
-    session_.func_state_.in_function = false;
-    session_.current_scope_ = std::make_shared<Scope>();
-    session_.translation_unit_decl_context_ =
-        DeclContext::create_translation_unit(ast_ctx_);
-    session_.current_decl_context_ = session_.translation_unit_decl_context_;
-    session_.current_scope_->flags = ScopeFlags::FileScope;
-    set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
-    session_.current_global_scope_ = ast_ctx_ ? ast_ctx_->global_tracker : nullptr;
-    session_.func_state_.current_function_name.clear();
-    session_.func_state_.current_pretty_function_name.clear();
-    session_.func_state_.current_function_type = nullptr;
-    session_.func_state_.current_function_return_type = nullptr;
-    session_.func_state_.current_function_has_return_statement = false;
-    session_.func_state_.current_function_has_cxx_auto_return_deduction = false;
-    session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
-    session_.func_state_.current_function_cxx_auto_return_pattern = nullptr;
-    session_.func_state_.loop_depth = 0;
-    session_.func_state_.switch_depth = 0;
-    session_.func_state_.delayed_diagnostics.clear();
-    session_.func_state_.unevaluated_depth = 0;
-    session_.func_state_.unevaluated_context_stack.clear();
-    session_.func_state_.constexpr_if_branch_stack.clear();
-    session_.func_state_.switch_context_stack.clear();
-    session_.func_state_.labels_defined.clear();
-    session_.func_state_.labels_referenced.clear();
-    session_.func_state_.label_definition_locs.clear();
-    session_.func_state_.label_reference_locs.clear();
-    session_.func_state_.current_function_is_cpp_member = false;
-    session_.func_state_.current_function_is_static_cpp_member = false;
-    session_.func_state_.current_function_is_template_pattern_body = false;
-    session_.func_state_.current_function_cpp_this_type = nullptr;
-    session_.func_state_.current_function_cpp_friend_access_type = nullptr;
-    session_.func_state_.current_function_cpp_access_context_type = nullptr;
-    session_.current_cpp_record_lookup_type_ = nullptr;
-    session_.tentative_snapshots_.clear();
-    session_.function_definition_stack_.clear();
-    session_.function_tentative_snapshot_stack_.clear();
-    record_semantics_cache_clear(ast_ctx_.get());
-    enum_semantics_cache_clear(ast_ctx_.get());
-}
-
-
-std::unique_ptr<TranslationUnit> Collect::collect_finish_translation_unit(std::vector<std::unique_ptr<Decl>> decls, SrcLoc loc) {
-
-    auto tu = collect_make<TranslationUnit>(std::move(decls), loc);
-
-    // Finalize tentative definitions for linkage objects.
-    // If a linkage-visible object has at least one non-extern declaration,
-    // and its symbol type is an incomplete array, complete it as size 1.
-    std::unordered_set<Symbol*> has_non_extern_decl;
-    for (auto& d : tu->declarations) {
-        auto* var = dyn_cast<VariableDecl>(d.get());
-        if (!var || !var->sym) {
-            continue;
-        }
-        if (var->sym->linkage == VariableLinkage::NONE) {
-            continue;
-        }
-        if (var->storage_class != StorageClass::EXTERN) {
-            has_non_extern_decl.insert(var->sym.get());
-        }
-    }
-
-    for (auto& d : tu->declarations) {
-        auto* var = dyn_cast<VariableDecl>(d.get());
-        if (!var || !var->sym) {
-            continue;
-        }
-        if (var->sym->linkage == VariableLinkage::NONE) {
-            continue;
-        }
-        if (!has_non_extern_decl.contains(var->sym.get())) {
-            continue;
-        }
-        auto sym_arr = var->sym->type.as_shared<ArrayType>();
-        if (sym_arr && (sym_arr->size_kind != ArraySizeKind::Constant || !sym_arr->size.has_value())) {
-            sym_arr->size_kind = ArraySizeKind::Constant;
-            sym_arr->size = 1;
-        }
-    }
-
-    // Keep declaration node types synchronized with finalized symbol types.
-    // Preserve typedef sugar on declaration nodes when possible so AST-level
-    // spelling remains explicit, while still propagating finalized tentative
-    // array bounds.
-    for (auto& d : tu->declarations) {
-        auto* var = dyn_cast<VariableDecl>(d.get());
-        if (!var || !var->sym) {
-            continue;
-        }
-        if (var->sym->linkage != VariableLinkage::NONE) {
-            if (var->type && var->type->kind == TypeKind::Typedef) {
-                auto decl_arr =
-                    desugar_type(var->type, ast_ctx_.get()).as_shared<ArrayType>();
-                auto sym_arr = var->sym->type.as_shared<ArrayType>();
-                if (decl_arr && sym_arr) {
-                    decl_arr->size_kind = sym_arr->size_kind;
-                    decl_arr->size = sym_arr->size;
-                    decl_arr->size_expr = sym_arr->size_expr;
-                }
-                continue;
-            }
-            var->type = var->sym->type;
-        }
-    }
-
-    instantiate_pending_required_function_template_specializations();
-    flush_delayed_diagnostics();
-    return tu;
-}
-
-
-void Collect::collect_start_function_definition(const std::string& name,
-                                                QualType function_type,
-                                                CppThisContext cpp_this_context,
-                                                bool is_template_pattern_body) {
-
-    if (session_.func_state_.in_function) {
-        session_.function_definition_stack_.push_back(
-            capture_current_function_definition_state());
-        session_.function_tentative_snapshot_stack_.push_back(
-            std::move(session_.tentative_snapshots_));
-        session_.tentative_snapshots_.clear();
-    }
-
-    session_.func_state_.in_function = true;
-    session_.func_state_.current_function_name = name;
-    session_.func_state_.current_pretty_function_name = name;
-    session_.func_state_.current_function_type = function_type;
-    session_.func_state_.current_function_return_type = nullptr;
-    session_.func_state_.current_function_has_return_statement = false;
-    session_.func_state_.current_function_has_cxx_auto_return_deduction = false;
-    session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
-    session_.func_state_.current_function_cxx_auto_return_pattern = nullptr;
-    session_.func_state_.current_function_is_cpp_member = cpp_this_context.is_member_function;
-    session_.func_state_.current_function_is_static_cpp_member =
-        cpp_this_context.is_static_member_function;
-    session_.func_state_.current_function_is_template_pattern_body =
-        is_template_pattern_body;
-    session_.func_state_.current_function_cpp_this_type = cpp_this_context.this_type;
-    session_.func_state_.current_function_cpp_friend_access_type =
-        cpp_this_context.friend_access_type;
-    session_.func_state_.current_function_cpp_access_context_type =
-        cpp_this_context.access_context_type;
-    if (auto func_ty = function_type.as_shared<FunctionType>()) {
-        session_.func_state_.current_function_return_type = func_ty->ret_type;
-        if (session_.func_state_.current_function_return_type &&
-            auto_type_utils::has_cxx_auto_type(
-                session_.func_state_.current_function_return_type.get_shared())) {
-            session_.func_state_.current_function_has_cxx_auto_return_deduction = true;
-            session_.func_state_.current_function_cxx_auto_return_pattern = session_.func_state_.current_function_return_type;
-        }
-        std::string pretty;
-        pretty += func_ty->ret_type ? func_ty->ret_type.to_string() : "int";
-        pretty += " ";
-        pretty += name;
-        pretty += "(";
-        bool printed = false;
-        if (func_ty->parameters.size() == 1 &&
-            func_ty->parameters[0] &&
-            func_ty->parameters[0]->isVoid() &&
-            !func_ty->is_variadic) {
-            pretty += "void";
-            printed = true;
-        } else {
-            for (size_t i = 0; i < func_ty->parameters.size(); ++i) {
-                if (i) pretty += ", ";
-                pretty += func_ty->parameters[i].to_string();
-                printed = true;
-            }
-        }
-        if (func_ty->is_variadic) {
-            if (printed) pretty += ", ";
-            pretty += "...";
-        }
-        pretty += ")";
-        session_.func_state_.current_pretty_function_name = std::move(pretty);
-    }
-    session_.func_state_.loop_depth = 0;
-    session_.func_state_.switch_depth = 0;
-    session_.func_state_.delayed_diagnostics.clear();
-    session_.func_state_.unevaluated_depth = 0;
-    session_.func_state_.unevaluated_context_stack.clear();
-    session_.func_state_.switch_context_stack.clear();
-    session_.func_state_.labels_defined.clear();
-    session_.func_state_.labels_referenced.clear();
-    session_.func_state_.label_definition_locs.clear();
-    session_.func_state_.label_reference_locs.clear();
-    session_.tentative_snapshots_.clear();
-}
-
-
-void Collect::collect_finish_function_definition(const std::shared_ptr<Scope>& function_scope) {
-
-    if (session_.func_state_.current_function_has_cxx_auto_return_deduction &&
-        session_.func_state_.current_function_return_type &&
-        auto_type_utils::has_cxx_auto_type(session_.func_state_.current_function_return_type.get_shared())) {
-        if (session_.func_state_.current_function_has_return_statement &&
-            session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction) {
-            if (auto func_ty = session_.func_state_.current_function_type.as_shared<FunctionType>()) {
-                func_ty->ret_type = session_.func_state_.current_function_return_type;
-            }
-        } else {
-            QualType implicit_void(get_builtin_void());
-            QualType finalized_return = implicit_void;
-
-            auto deduced = auto_type_utils::extract_auto_placeholder_replacement(
-                session_.func_state_.current_function_cxx_auto_return_pattern,
-                implicit_void);
-            bool can_finalize = deduced.has_value() &&
-                deduced->get_shared() &&
-                auto_type_utils::auto_type_flavors_in(deduced->get_shared()) == 0;
-            if (can_finalize) {
-                auto replacement_raw =
-                    desugar_type(*deduced, ast_ctx_.get()).get_shared();
-                if (replacement_raw) {
-                    auto finalized_raw = replace_auto_type(
-                        session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
-                        replacement_raw);
-                    finalized_return = QualType(
-                        finalized_raw,
-                        session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
-                }
-            } else {
-                report_error(
-                    "cannot deduce return type '" +
-                        session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
-                        "' for function '" + session_.func_state_.current_function_name +
-                        "' with no return statements",
-                    SrcLoc());
-                auto fallback_raw = replace_auto_type(
-                    session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
-                    implicit_void.get_shared());
-                if (fallback_raw) {
-                    finalized_return = QualType(
-                        fallback_raw,
-                        session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
-                }
-            }
-
-            session_.func_state_.current_function_return_type = finalized_return;
-            if (auto func_ty = session_.func_state_.current_function_type.as_shared<FunctionType>()) {
-                func_ty->ret_type = finalized_return;
-            }
-        }
-    }
-
-    auto label_lookup_scope = function_scope
-        ? function_scope
-        : find_enclosing_scope_with_flags(ScopeFlags::FunctionScope);
-    for (const auto& label : session_.func_state_.labels_referenced) {
-        if (label_lookup_scope &&
-            LookupEngine::lookup_label(label, label_lookup_scope, true)) {
-            continue;
-        }
-        SrcLoc loc;
-        auto ref_it = session_.func_state_.label_reference_locs.find(label);
-        if (ref_it != session_.func_state_.label_reference_locs.end()) {
-            loc = ref_it->second;
-        }
-        queue_delayed_error("use of undeclared label '" + label + "'", loc);
-    }
-    flush_delayed_diagnostics();
-    session_.tentative_snapshots_.clear();
-    if (!session_.function_definition_stack_.empty()) {
-        restore_current_function_definition_state(
-            std::move(session_.function_definition_stack_.back()));
-        session_.function_definition_stack_.pop_back();
-        if (!session_.function_tentative_snapshot_stack_.empty()) {
-            session_.tentative_snapshots_ =
-                std::move(session_.function_tentative_snapshot_stack_.back());
-            session_.function_tentative_snapshot_stack_.pop_back();
-        }
-        return;
-    }
-    reset_current_function_definition_state();
-}
-
-void Collect::collect_mark_current_function_body_semantics_skipped() {
-
-    session_.func_state_.current_function_has_cxx_auto_return_deduction = false;
-    session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
-    session_.func_state_.current_function_has_return_statement = true;
-}
-
-
-void Collect::collect_abort_function_definition() {
-
-    session_.tentative_snapshots_.clear();
-    if (!session_.function_definition_stack_.empty()) {
-        restore_current_function_definition_state(
-            std::move(session_.function_definition_stack_.back()));
-        session_.function_definition_stack_.pop_back();
-        if (!session_.function_tentative_snapshot_stack_.empty()) {
-            session_.tentative_snapshots_ =
-                std::move(session_.function_tentative_snapshot_stack_.back());
-            session_.function_tentative_snapshot_stack_.pop_back();
-        }
-        return;
-    }
-    reset_current_function_definition_state();
-}
-
-bool Collect::collect_is_in_function_definition() const {
-
-    return session_.func_state_.in_function;
-}
-
-
-std::shared_ptr<Scope> Collect::collect_current_scope() const {
-
-    return session_.current_scope_;
-}
-
-std::shared_ptr<DeclContext> Collect::get_translation_unit_decl_context() const {
-
-    return session_.translation_unit_decl_context_;
-}
-
-std::shared_ptr<DeclContext> Collect::get_current_decl_context() const {
-
-    return session_.current_decl_context_;
-}
-
-void Collect::collect_register_namespace_binding(
-    const std::shared_ptr<DeclContext>& owner_context,
-    NamespaceBindingEntry binding) {
-
-    if (!owner_context) {
-        return;
-    }
-    record_decl_context_mutation(owner_context);
-    owner_context->add_namespace_binding(std::move(binding));
-    bump_lookup_generation();
-}
-
-void Collect::collect_register_namespace_alias(
-    const std::shared_ptr<DeclContext>& owner_context,
-    NamespaceBindingEntry alias) {
-
-    if (!owner_context) {
-        return;
-    }
-    record_decl_context_mutation(owner_context);
-    owner_context->add_namespace_alias(std::move(alias));
-    bump_lookup_generation();
-}
-
-void Collect::collect_register_namespace_nomination(
-    const std::shared_ptr<DeclContext>& owner_context,
-    NamespaceNominationRecord nomination) {
-
-    if (!owner_context) {
-        return;
-    }
-    record_decl_context_mutation(owner_context);
-    owner_context->add_namespace_nomination(std::move(nomination));
-    bump_lookup_generation();
-}
-
-void Collect::collect_set_namespace_inline_metadata(
-    const std::shared_ptr<DeclContext>& namespace_context,
-    bool is_inline,
-    DeclContext* enclosing_namespace) {
-
-    if (!namespace_context) {
-        return;
-    }
-
-    auto target_context = namespace_context;
-    if (target_context->primary_context() &&
-        target_context->primary_context() != target_context.get()) {
-        target_context = target_context->primary_context()->shared_from_this();
-    }
-
-    DeclContext* effective_enclosing = is_inline ? enclosing_namespace : nullptr;
-    if (target_context->is_inline_namespace() == is_inline &&
-        target_context->inline_enclosing_namespace() == effective_enclosing) {
-        return;
-    }
-
-    record_decl_context_mutation(target_context);
-    target_context->set_inline_namespace(is_inline, effective_enclosing);
-    bump_lookup_generation();
-}
-
-CppThisContext Collect::collect_current_cpp_this_context() const {
-
-    return CppThisContext{
-        session_.func_state_.current_function_is_cpp_member,
-        session_.func_state_.current_function_is_static_cpp_member,
-        session_.func_state_.current_function_cpp_this_type,
-        session_.func_state_.current_function_cpp_friend_access_type,
-        session_.func_state_.current_function_cpp_access_context_type
+void Session::declare_sve_builtin_types() {
+    static const char* const kSveTypeNames[] = {
+        "__SVBool_t",     "__SVCount_t",    "__SVInt8_t",
+        "__SVInt16_t",    "__SVInt32_t",    "__SVInt64_t",
+        "__SVUint8_t",    "__SVUint16_t",   "__SVUint32_t",
+        "__SVUint64_t",   "__SVFloat16_t",  "__SVBFloat16_t",
+        "__SVFloat32_t",  "__SVFloat64_t",  "__SVMfloat8_t",
     };
-}
-
-QualType Collect::collect_current_cpp_record_lookup_type() const {
-
-    return session_.current_cpp_record_lookup_type_;
-}
-
-void Collect::collect_set_current_cpp_record_lookup_type(QualType record_type) {
-
-    materialize_tentative_snapshot_if_needed();
-    session_.current_cpp_record_lookup_type_ = record_type;
-}
-
-bool Collect::with_function_definition_state(
-    const FuncDecl* function_decl,
-    const std::function<bool()>& action,
-    QualType friend_access_type) {
-    if (!action) {
-        return false;
+    for (const char* name : kSveTypeNames) {
+        RecordDeclResult record = create_record_tag(cir::RecordKind::Struct,
+                                                    name,
+                                                    SrcLoc(),
+                                                    /*bind_tag=*/false);
+        (void)declare_typedef(name, record.type, SrcLoc());
     }
+}
 
-    auto saved_state = capture_current_function_definition_state();
-    QualType saved_record_lookup_type = session_.current_cpp_record_lookup_type_;
-    struct FunctionStateGuard {
-        Collect* collect = nullptr;
-        FunctionDefinitionState saved_state;
-        QualType saved_record_lookup_type = nullptr;
-        ~FunctionStateGuard() {
-            if (collect) {
-                collect->restore_current_function_definition_state(
-                    std::move(saved_state));
-                collect->session_.current_cpp_record_lookup_type_ =
-                    saved_record_lookup_type;
-            }
+cir::TypeId Session::make_aarch64_va_list_type() {
+    RecordDeclResult record = create_record_tag(cir::RecordKind::Struct,
+                                                "__va_list",
+                                                SrcLoc(),
+                                                /*bind_tag=*/false);
+    cir::TypeId void_ptr = pointer_type(type_ref(builder_.void_type()));
+    cir::TypeId int_type = builder_.int_type();
+    struct FieldSpec {
+        const char* name;
+        cir::TypeId type;
+        size_t offset;
+    };
+    const FieldSpec specs[] = {
+        {"__stack", void_ptr, 0},
+        {"__gr_top", void_ptr, 8},
+        {"__vr_top", void_ptr, 16},
+        {"__gr_offs", int_type, 24},
+        {"__vr_offs", int_type, 28},
+    };
+    cir::RecordFacts facts = *file_.record_facts(record.entity);
+    for (const FieldSpec& spec : specs) {
+        cir::EntityId field = builder_.add_entity(cir::EntityKind::Field,
+                                                  spec.name,
+                                                  spec.type,
+                                                  record.entity,
+                                                  SrcLoc());
+        cir::RecordFieldFact fact;
+        fact.name = file_.intern_name(spec.name);
+        fact.entity = field;
+        fact.type = file_.type_ref(spec.type);
+        fact.offset = spec.offset;
+        facts.fields.push_back(std::move(fact));
+    }
+    facts.is_incomplete = false;
+    facts.is_literal_class_type = true;
+    facts.size_bits = 256;
+    facts.alignment = 8;
+    facts.non_virtual_size_bits = 256;
+    facts.non_virtual_alignment = 8;
+    file_.set_record_facts(record.entity, std::move(facts));
+    return record.type;
+}
+
+cir::TypeId Session::make_x86_64_va_list_type() {
+    RecordDeclResult record = create_record_tag(cir::RecordKind::Struct,
+                                                "__va_list_tag",
+                                                SrcLoc(),
+                                                /*bind_tag=*/false);
+    cir::TypeId void_ptr = pointer_type(type_ref(builder_.void_type()));
+    cir::TypeId uint_type = file_.builtin_type(cir::BuiltinTypeKind::UInt);
+    struct FieldSpec {
+        const char* name;
+        cir::TypeId type;
+        size_t offset;
+    };
+    const FieldSpec specs[] = {
+        {"gp_offset", uint_type, 0},
+        {"fp_offset", uint_type, 4},
+        {"overflow_arg_area", void_ptr, 8},
+        {"reg_save_area", void_ptr, 16},
+    };
+    cir::RecordFacts facts = *file_.record_facts(record.entity);
+    for (const FieldSpec& spec : specs) {
+        cir::EntityId field = builder_.add_entity(cir::EntityKind::Field,
+                                                  spec.name,
+                                                  spec.type,
+                                                  record.entity,
+                                                  SrcLoc());
+        cir::RecordFieldFact fact;
+        fact.name = file_.intern_name(spec.name);
+        fact.entity = field;
+        fact.type = file_.type_ref(spec.type);
+        fact.offset = spec.offset;
+        facts.fields.push_back(std::move(fact));
+    }
+    facts.is_incomplete = false;
+    facts.is_literal_class_type = true;
+    facts.size_bits = 192;
+    facts.alignment = 8;
+    facts.non_virtual_size_bits = 192;
+    facts.non_virtual_alignment = 8;
+    file_.set_record_facts(record.entity, std::move(facts));
+    return array_type(record.type, size_t{1});
+}
+
+cir::File Session::finish_file() {
+    drain_weak_pragmas();
+    check_deferred_incomplete_tentative_defs();
+    return std::move(file_);
+}
+
+void Session::report_error(std::string message, SrcLoc loc) {
+    file_.add_error(std::move(message), loc);
+}
+
+void Session::report_warning(std::string message, SrcLoc loc) {
+    file_.add_warning(std::move(message), loc);
+}
+
+void Session::report_note(std::string message, SrcLoc loc) {
+    file_.add_note(std::move(message), loc);
+}
+
+void Session::report_warning(WarningId id, std::string message, SrcLoc loc) {
+    DiagnosticSeverity severity = DiagnosticSeverity::Warning;
+    if (source_manager_) {
+        severity = source_manager_->getDiagnosticState(loc).get(id);
+    }
+    if (severity == DiagnosticSeverity::Ignored) {
+        return;
+    }
+    if (severity == DiagnosticSeverity::Error) {
+        report_error(std::move(message), loc);
+        return;
+    }
+    report_warning(std::move(message), loc);
+}
+
+Session::SpeculativeParseGuard::SpeculativeParseGuard(Session& session)
+    : session_(&session) {
+    session_->begin_speculative_parse();
+    depth_ = session_->speculative_snapshots_.size();
+}
+
+Session::SpeculativeParseGuard::SpeculativeParseGuard(
+    SpeculativeParseGuard&& other) noexcept
+    : session_(other.session_), depth_(other.depth_) {
+    other.session_ = nullptr;
+    other.depth_ = 0;
+}
+
+Session::SpeculativeParseGuard::~SpeculativeParseGuard() {
+    finish(false);
+}
+
+void Session::SpeculativeParseGuard::commit() {
+    finish(true);
+}
+
+void Session::SpeculativeParseGuard::rollback() {
+    finish(false);
+}
+
+void Session::SpeculativeParseGuard::finish(bool commit) {
+    if (!session_) {
+        return;
+    }
+    assert(session_->speculative_snapshots_.size() == depth_ &&
+           "speculative parse guards must finish in LIFO order");
+    if (session_->speculative_snapshots_.size() != depth_) {
+        return;
+    }
+    Session* session = session_;
+    session_ = nullptr;
+    depth_ = 0;
+    if (commit) {
+        session->commit_speculative_parse();
+    } else {
+        session->rollback_speculative_parse();
+    }
+}
+
+Session::SpeculativeParseGuard Session::speculative_parse() {
+    return SpeculativeParseGuard(*this);
+}
+
+void Session::begin_speculative_parse() {
+    bump_collect_counter(PerfCounter::CollectTentativeBegins);
+    SpeculativeSnapshot snapshot;
+    snapshot.file_transaction = file_.begin_transaction();
+    snapshot.builder_checkpoint = builder_.checkpoint();
+    snapshot.constraint_environment_revision =
+        tstate().constraint_environment_revision_;
+    snapshot.scopes_size = scopes_.size();
+    snapshot.current_scope = current_scope_;
+    snapshot.control_stack = control_stack_;
+    snapshot.switch_stack_size = switch_stack_.size();
+    snapshot.switch_contexts_size = switch_contexts_.size();
+    snapshot.control_flow_regions = control_flow_regions_;
+    snapshot.lambda_stack_size = lambda_stack_.size();
+    snapshot.lambda_frame_states.reserve(lambda_stack_.size());
+    for (const LambdaFrame& frame : lambda_stack_) {
+        snapshot.lambda_frame_states.push_back(
+            LambdaFrameRollbackState{frame.captures.size(),
+                                     frame.capture_memo,
+                                     frame.this_capture});
+    }
+    snapshot.lambda_context_stack_size = lambda_context_stack_.size();
+    snapshot.anonymous_record_counter = anonymous_record_counter_;
+    snapshot.current_prologue = current_prologue_;
+    snapshot.current_result_type = current_result_type_;
+    snapshot.current_function = current_function_;
+    snapshot.unevaluated_operand_depth = unevaluated_operand_depth_;
+    snapshot.typeid_capture_discovery_depth =
+        typeid_capture_discovery_depth_;
+    snapshot.default_argument_boundary_function =
+        default_argument_boundary_function_;
+    snapshot.compound_literal_counter = compound_literal_counter_;
+    snapshot.global_init_counter = global_init_counter_;
+    snapshot.global_init_functions_size = global_init_functions_.size();
+    snapshot.function_labels = function_labels_;
+    snapshot.local_label_scopes = local_label_scopes_;
+    snapshot.pending_orphan_label_blocks = pending_orphan_label_blocks_;
+    snapshot.cleanup_scopes = cleanup_scopes_;
+    snapshot.eh_cleanup_steps = eh_cleanup_steps_;
+    snapshot.destructor_lifecycle_region =
+        current_destructor_lifecycle_region_;
+    snapshot.lifetime_obligations = lifetime_obligations_;
+    snapshot.active_lifetime_boundaries = active_lifetime_boundaries_;
+    snapshot.active_try_move_boundaries = active_try_move_boundaries_;
+    snapshot.nrvo_return_candidates = nrvo_return_candidates_;
+    snapshot.nrvo_has_incompatible_return = nrvo_has_incompatible_return_;
+    snapshot.active_catch_handlers = active_catch_handlers_;
+    snapshot.active_constructor_function_try_handlers =
+        active_constructor_function_try_handlers_;
+    snapshot.discarded_statement_validation_depth =
+        discarded_statement_validation_depth_;
+    snapshot.expansion_label_region_depth =
+        expansion_label_region_depth_;
+    snapshot.collecting_pattern = collecting_pattern_;
+    snapshot.pattern_usable = pattern_usable_;
+    snapshot.pattern_taint = pattern_taint_;
+    snapshot.member_pattern_active = member_pattern_active_;
+    snapshot.member_pattern_taint_start = member_pattern_taint_start_;
+    snapshot.member_pattern_holes_start = member_pattern_holes_start_;
+    snapshot.member_pattern_events_start = member_pattern_events_start_;
+    snapshot.pattern_holes = tstate().pattern_holes_;
+    snapshot.pattern_events = pattern_events_;
+    snapshot.pattern_members = tstate().pattern_members_;
+    snapshot.pattern_holed_locals = tstate().pattern_holed_locals_;
+    snapshot.function_parameter_pack_names =
+        tstate().function_parameter_pack_names_;
+    snapshot.function_parameter_pack_elements =
+        tstate().function_parameter_pack_elements_;
+    snapshot.function_parameter_pack_template_indices =
+        tstate().function_parameter_pack_template_indices_;
+    snapshot.function_parameter_pack_scope_stack =
+        tstate().function_parameter_pack_scope_stack_;
+    snapshot.access_captures_size = access_captures_.size();
+    snapshot.active_access_captures_size = active_access_captures_.size();
+    snapshot.active_access_obligation_sizes.reserve(
+        active_access_captures_.size());
+    for (uint32_t capture_index : active_access_captures_) {
+        snapshot.active_access_obligation_sizes.push_back(
+            capture_index < access_captures_.size()
+                ? access_captures_[capture_index].obligations.size()
+                : 0);
+    }
+    speculative_snapshots_.push_back(std::move(snapshot));
+}
+
+void Session::commit_speculative_parse() {
+    if (speculative_snapshots_.empty()) {
+        return;
+    }
+    bump_collect_counter(PerfCounter::CollectTentativeCommits);
+    SpeculativeSnapshot snapshot = std::move(speculative_snapshots_.back());
+    speculative_snapshots_.pop_back();
+    file_.commit_transaction(snapshot.file_transaction);
+    if (!speculative_snapshots_.empty()) {
+        auto& outer = speculative_snapshots_.back().memo_rollbacks;
+        outer.insert(outer.end(),
+                     std::make_move_iterator(snapshot.memo_rollbacks.begin()),
+                     std::make_move_iterator(snapshot.memo_rollbacks.end()));
+    }
+}
+
+void Session::track_speculative_rollback(std::function<void()> undo) {
+    track_speculative_rollback("custom speculative state", std::move(undo));
+}
+
+void Session::track_speculative_rollback(std::string_view label,
+                                         std::function<void()> undo) {
+    if (!speculative_snapshots_.empty()) {
+        assert(!label.empty() && "rollback journal actions need a label");
+        speculative_snapshots_.back().memo_rollbacks.push_back(
+            RollbackAction{std::string(label), std::move(undo)});
+    }
+}
+
+void Session::rollback_speculative_parse() {
+    if (speculative_snapshots_.empty()) {
+        return;
+    }
+    bump_collect_counter(PerfCounter::CollectTentativeRollbacks);
+    SpeculativeSnapshot snapshot = std::move(speculative_snapshots_.back());
+    speculative_snapshots_.pop_back();
+    for (auto it = snapshot.memo_rollbacks.rbegin();
+         it != snapshot.memo_rollbacks.rend(); ++it) {
+        it->undo();
+    }
+    file_.rollback_transaction(snapshot.file_transaction);
+    builder_.rollback_to(snapshot.builder_checkpoint);
+    tstate().constraint_environment_revision_ =
+        snapshot.constraint_environment_revision;
+    scopes_.resize(snapshot.scopes_size);
+    current_scope_ = snapshot.current_scope;
+    bump_lookup_generation();
+    control_stack_ = std::move(snapshot.control_stack);
+    switch_stack_.resize(snapshot.switch_stack_size);
+    switch_contexts_.resize(snapshot.switch_contexts_size);
+    control_flow_regions_ = std::move(snapshot.control_flow_regions);
+    while (lambda_context_stack_.size() > snapshot.lambda_context_stack_size) {
+        std::unique_ptr<BlockContextState> saved =
+            std::move(lambda_context_stack_.back());
+        lambda_context_stack_.pop_back();
+        restore_function_context(std::move(saved));
+    }
+    if (lambda_stack_.size() > snapshot.lambda_stack_size) {
+        lambda_stack_.resize(snapshot.lambda_stack_size);
+    }
+    for (size_t i = 0;
+         i < lambda_stack_.size() &&
+         i < snapshot.lambda_frame_states.size();
+         ++i) {
+        const LambdaFrameRollbackState& state =
+            snapshot.lambda_frame_states[i];
+        lambda_stack_[i].captures.resize(state.captures_size);
+        lambda_stack_[i].capture_memo = state.capture_memo;
+        lambda_stack_[i].this_capture = state.this_capture;
+    }
+    anonymous_record_counter_ = snapshot.anonymous_record_counter;
+    current_prologue_ = std::move(snapshot.current_prologue);
+    current_result_type_ = snapshot.current_result_type;
+    current_function_ = snapshot.current_function;
+    unevaluated_operand_depth_ = snapshot.unevaluated_operand_depth;
+    typeid_capture_discovery_depth_ =
+        snapshot.typeid_capture_discovery_depth;
+    default_argument_boundary_function_ =
+        snapshot.default_argument_boundary_function;
+    compound_literal_counter_ = snapshot.compound_literal_counter;
+    global_init_counter_ = snapshot.global_init_counter;
+    if (global_init_functions_.size() >
+        snapshot.global_init_functions_size) {
+        global_init_functions_.resize(snapshot.global_init_functions_size);
+    }
+    function_labels_ = std::move(snapshot.function_labels);
+    local_label_scopes_ = std::move(snapshot.local_label_scopes);
+    pending_orphan_label_blocks_ = std::move(snapshot.pending_orphan_label_blocks);
+    cleanup_scopes_ = std::move(snapshot.cleanup_scopes);
+    eh_cleanup_steps_ = std::move(snapshot.eh_cleanup_steps);
+    current_destructor_lifecycle_region_ =
+        std::move(snapshot.destructor_lifecycle_region);
+    lifetime_obligations_ = std::move(snapshot.lifetime_obligations);
+    active_lifetime_boundaries_ =
+        std::move(snapshot.active_lifetime_boundaries);
+    active_try_move_boundaries_ =
+        std::move(snapshot.active_try_move_boundaries);
+    nrvo_return_candidates_ =
+        std::move(snapshot.nrvo_return_candidates);
+    nrvo_has_incompatible_return_ =
+        snapshot.nrvo_has_incompatible_return;
+    active_catch_handlers_ = snapshot.active_catch_handlers;
+    active_constructor_function_try_handlers_ =
+        snapshot.active_constructor_function_try_handlers;
+    discarded_statement_validation_depth_ =
+        snapshot.discarded_statement_validation_depth;
+    expansion_label_region_depth_ =
+        snapshot.expansion_label_region_depth;
+    collecting_pattern_ = snapshot.collecting_pattern;
+    pattern_usable_ = snapshot.pattern_usable;
+    pattern_taint_ = snapshot.pattern_taint;
+    member_pattern_active_ = snapshot.member_pattern_active;
+    member_pattern_taint_start_ = snapshot.member_pattern_taint_start;
+    member_pattern_holes_start_ = snapshot.member_pattern_holes_start;
+    member_pattern_events_start_ = snapshot.member_pattern_events_start;
+    tstate().pattern_holes_ = std::move(snapshot.pattern_holes);
+    pattern_events_ = std::move(snapshot.pattern_events);
+    tstate().pattern_members_ = std::move(snapshot.pattern_members);
+    tstate().pattern_holed_locals_ = std::move(snapshot.pattern_holed_locals);
+    tstate().function_parameter_pack_names_ =
+        std::move(snapshot.function_parameter_pack_names);
+    tstate().function_parameter_pack_elements_ =
+        std::move(snapshot.function_parameter_pack_elements);
+    tstate().function_parameter_pack_template_indices_ =
+        std::move(snapshot.function_parameter_pack_template_indices);
+    tstate().function_parameter_pack_scope_stack_ =
+        std::move(snapshot.function_parameter_pack_scope_stack);
+    for (size_t i = 0;
+         i < snapshot.active_access_captures_size &&
+         i < active_access_captures_.size() &&
+         i < snapshot.active_access_obligation_sizes.size();
+         ++i) {
+        uint32_t capture_index = active_access_captures_[i];
+        if (capture_index < access_captures_.size()) {
+            access_captures_[capture_index].obligations.resize(
+                snapshot.active_access_obligation_sizes[i]);
         }
-    } state_guard{this, std::move(saved_state), saved_record_lookup_type};
-
-    FunctionDefinitionState new_state;
-    QualType function_record_lookup_type = nullptr;
-    new_state.in_function = function_decl != nullptr;
-    new_state.current_function_cpp_friend_access_type = friend_access_type;
-    if (function_decl) {
-        new_state.current_function_name = function_decl->name;
-        new_state.current_pretty_function_name = function_decl->name;
-        new_state.current_function_type = QualType(function_decl->type);
-        auto function_type =
-            QualType(function_decl->type).as_shared<FunctionType>();
-        if (function_type) {
-            new_state.current_function_return_type = function_type->ret_type;
-            if (auto_type_utils::has_cxx_auto_type(
-                    function_type->ret_type.get_shared())) {
-                new_state.current_function_has_cxx_auto_return_deduction =
-                    true;
-                new_state.current_function_cxx_auto_return_pattern =
-                    function_type->ret_type;
-            }
-            bool is_cpp_member_function =
-                isa<CppMethodDecl>(const_cast<FuncDecl*>(function_decl)) ||
-                isa<CppConstructorDecl>(const_cast<FuncDecl*>(function_decl)) ||
-                isa<CppDestructorDecl>(const_cast<FuncDecl*>(function_decl));
-            bool is_static_cpp_member_function = false;
-            if (auto* method = dyn_cast<CppMethodDecl>(
-                    const_cast<FuncDecl*>(function_decl))) {
-                is_static_cpp_member_function =
-                    method->storage_class == StorageClass::STATIC;
-            }
-            if (is_cpp_member_function) {
-                new_state.current_function_is_cpp_member = true;
-                new_state.current_function_is_static_cpp_member =
-                    is_static_cpp_member_function;
-                QualType this_type = nullptr;
-                if (!is_static_cpp_member_function &&
-                    !function_type->parameters.empty()) {
-                    this_type = function_type->parameters.front();
-                }
-                if (QualType owner_type =
-                        get_func_decl_owner_record_type(function_decl)) {
-                    function_record_lookup_type = owner_type;
-                    uint8_t pointee_quals = QUAL_NONE;
-                    if (auto this_ptr = this_type.as_shared<PointerType>()) {
-                        pointee_quals = this_ptr->pointed_type.get_qualifiers();
-                    }
-                    QualType qualified_owner(
-                        owner_type.get_shared(),
-                        static_cast<uint8_t>(
-                            owner_type.get_qualifiers() | pointee_quals));
-                    this_type = QualType(
-                        std::make_shared<PointerType>(qualified_owner));
-                }
-                new_state.current_function_cpp_this_type = this_type;
-            }
-        }
     }
-
-    restore_current_function_definition_state(std::move(new_state));
-    session_.current_cpp_record_lookup_type_ = function_record_lookup_type;
-    return action();
+    active_access_captures_.resize(
+        snapshot.active_access_captures_size);
+    access_captures_.resize(snapshot.access_captures_size);
+    builder_.set_mark_template_pattern(collecting_pattern_);
 }
 
-bool Collect::with_cpp_declarator_expression_context(
-    CppThisContext cpp_this_context,
-    QualType record_lookup_type,
-    const std::function<bool()>& action) {
-    if (!action) {
-        return false;
-    }
-
-    auto saved_state = capture_current_function_definition_state();
-    QualType saved_record_lookup_type = session_.current_cpp_record_lookup_type_;
-    struct FunctionStateGuard {
-        Collect* collect = nullptr;
-        FunctionDefinitionState saved_state;
-        QualType saved_record_lookup_type = nullptr;
-        ~FunctionStateGuard() {
-            if (!collect) {
-                return;
-            }
-            collect->restore_current_function_definition_state(
-                std::move(saved_state));
-            collect->session_.current_cpp_record_lookup_type_ =
-                saved_record_lookup_type;
-        }
-    } state_guard{this, std::move(saved_state), saved_record_lookup_type};
-
-    FunctionDefinitionState new_state;
-    new_state.in_function = cpp_this_context.is_member_function;
-    new_state.current_function_is_cpp_member =
-        cpp_this_context.is_member_function;
-    new_state.current_function_is_static_cpp_member =
-        cpp_this_context.is_static_member_function;
-    new_state.current_function_cpp_this_type = cpp_this_context.this_type;
-    new_state.current_function_cpp_friend_access_type =
-        cpp_this_context.friend_access_type;
-    new_state.current_function_cpp_access_context_type =
-        cpp_this_context.access_context_type;
-
-    restore_current_function_definition_state(std::move(new_state));
-    session_.current_cpp_record_lookup_type_ = record_lookup_type;
-    return action();
+size_t Session::begin_discarded_statement_validation() {
+    ++discarded_statement_validation_depth_;
+    return discarded_control_flow_events_.size();
 }
 
-Collect::FunctionDefinitionState
-Collect::capture_current_function_definition_state() const {
-
-    return session_.func_state_;
-}
-
-void Collect::restore_current_function_definition_state(
-    FunctionDefinitionState state) {
-
-    session_.func_state_ = std::move(state);
-}
-
-void Collect::reset_current_function_definition_state() {
-
-    restore_current_function_definition_state(FunctionDefinitionState{});
-}
-
-CppConstexprIfBranchState Collect::current_constexpr_if_branch_state() const {
-    CppConstexprIfBranchState effective = CppConstexprIfBranchState::Active;
-    for (CppConstexprIfBranchState state :
-         session_.func_state_.constexpr_if_branch_stack) {
-        if (state == CppConstexprIfBranchState::Discarded) {
-            return CppConstexprIfBranchState::Discarded;
-        }
-        if (state == CppConstexprIfBranchState::Deferred) {
-            effective = CppConstexprIfBranchState::Deferred;
-        }
-    }
-    return effective;
-}
-
-bool Collect::current_constexpr_if_branch_suppresses_returns() const {
-    return current_constexpr_if_branch_state() !=
-           CppConstexprIfBranchState::Active;
-}
-
-void Collect::set_current_decl_context(std::shared_ptr<DeclContext> decl_context) {
-
-    materialize_tentative_snapshot_if_needed();
-    session_.current_decl_context_ = std::move(decl_context);
-    if (session_.current_scope_) {
-        set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
+void Session::end_discarded_statement_validation() {
+    if (discarded_statement_validation_depth_ > 0) {
+        --discarded_statement_validation_depth_;
     }
 }
 
-
-void Collect::collect_set_current_scope(std::shared_ptr<Scope> scope) {
-
-    materialize_tentative_snapshot_if_needed();
-    session_.current_scope_ = std::move(scope);
-    sync_decl_context_from_current_scope();
-}
-
-std::shared_ptr<DeclContext> Collect::find_decl_context(const DeclContext* target) const {
-
-    return find_decl_context_in_subtree(session_.translation_unit_decl_context_, target);
-}
-
-std::shared_ptr<DeclContext> Collect::resolve_scope_decl_context(const std::shared_ptr<Scope>& scope) const {
-
-    if (!scope) {
-        return nullptr;
+void Session::merge_discarded_control_flow_events(size_t event_watermark) {
+    if (event_watermark > discarded_control_flow_events_.size()) {
+        return;
     }
-    for (auto it = scope; it; it = it->parent) {
-        if (!it->associated_decl_context) {
+    for (size_t i = event_watermark;
+         i < discarded_control_flow_events_.size(); ++i) {
+        const DiscardedControlFlowEvent& event =
+            discarded_control_flow_events_[i];
+        if (event.declared_local || event.function != current_function_) {
             continue;
         }
-        if (auto locked = lock_scope_decl_context(it)) {
-            return locked;
+        LabelInfo& label = function_label(event.name, event.loc);
+        if (event.kind ==
+            DiscardedControlFlowEvent::Kind::LabelDefinition) {
+            if (!label.defined) {
+                label.defined = true;
+                label.loc = event.loc;
+                label.control_flow_regions = event.control_flow_regions;
+            }
+            continue;
         }
-        auto resolved = find_decl_context(it->associated_decl_context);
-        if (resolved) {
-            return resolved;
+        label.referenced = true;
+        if (label.first_reference.isInvalid()) {
+            label.first_reference = event.loc;
         }
+        LabelReference reference;
+        reference.loc = event.loc;
+        reference.control_flow_regions = event.control_flow_regions;
+        label.references.push_back(std::move(reference));
     }
-    if (scope.get() == session_.current_scope_.get()) {
-        return session_.current_decl_context_;
-    }
-    return session_.translation_unit_decl_context_;
+    discarded_control_flow_events_.resize(event_watermark);
 }
 
-std::shared_ptr<Scope> Collect::find_enclosing_scope_with_flags(ScopeFlags flags) const {
+ScopeEnterResult Session::enter_scope(ScopeFlags flags) {
+    return enter_scope_impl(flags);
+}
 
-    for (auto scope = session_.current_scope_; scope; scope = scope->parent) {
-        if (scope_flags_contains(scope->flags, flags)) {
-            return scope;
+ScopeEnterResult Session::enter_record_scope(cir::EntityId record_entity, SrcLoc loc) {
+    if (!file_.valid(record_entity)) {
+        return enter_scope_impl(ScopeFlags::RecordScope, record_entity, loc);
+    }
+    cir::DeclContextId record_context = file_.entity(record_entity).semantic_context;
+    if (!record_context.valid()) {
+        record_context =
+            file_.create_decl_context(cir::DeclContextKind::Record,
+                                      current_decl_context(),
+                                      record_entity,
+                                      loc);
+        file_.entity_mut(record_entity).semantic_context = record_context;
+    }
+
+    cleanup_scopes_.push_back(CleanupScope{control_stack_.size(),
+                                           {},
+                                           builder_.current_unwind_target()});
+    ScopeFrame frame;
+    frame.parent = current_scope_;
+    frame.flags = ScopeFlags::RecordScope;
+    frame.context = record_context;
+    scopes_.push_back(frame);
+    current_scope_ = static_cast<ScopeId>(scopes_.size() - 1);
+    return ScopeEnterResult{current_scope_, true};
+}
+
+void Session::set_current_record_pending_bases(
+    const std::vector<RecordBaseInput>& bases) {
+    if (current_scope_ == InvalidScopeId || current_scope_ >= scopes_.size()) {
+        return;
+    }
+    scopes_[current_scope_].pending_bases = bases;
+}
+
+void Session::leave_scope() {
+    if (!cleanup_scopes_.empty()) {
+
+        if (cleanup_scopes_.back().suppress_lifetimes) {
+            for (const LifetimeRecord& record :
+                 cleanup_scopes_.back().lifetime_records) {
+                if (record.start.valid()) {
+                    file_.inst_mut(record.start).operands = cir::OperandRange{};
+                }
+            }
+        }
+        builder_.set_current_unwind_target(
+            cleanup_scopes_.back().entry_unwind_target);
+        cleanup_scopes_.pop_back();
+    }
+    if (current_scope_ == InvalidScopeId ||
+        current_scope_ >= scopes_.size() ||
+        scopes_[current_scope_].parent == InvalidScopeId) {
+        return;
+    }
+    for (const auto& [name, declaration] :
+         scopes_[current_scope_].structured_binding_packs) {
+        auto elements = tstate().function_parameter_pack_elements_.find(name);
+        if (elements != tstate().function_parameter_pack_elements_.end()) {
+            for (const FunctionParameterPackElement& element :
+                 elements->second) {
+                tstate().function_parameter_pack_params_.erase(
+                    static_cast<uint64_t>(element.entity.index));
+            }
+            tstate().function_parameter_pack_elements_.erase(elements);
+        }
+        tstate().function_parameter_pack_names_.erase(name);
+        tstate().function_parameter_pack_params_.erase(
+            static_cast<uint64_t>(declaration.index));
+    }
+    current_scope_ = scopes_[current_scope_].parent;
+}
+
+cir::DeclContextId Session::current_decl_context() const {
+    if (current_scope_ == InvalidScopeId || current_scope_ >= scopes_.size()) {
+        return {};
+    }
+    return scopes_[current_scope_].context;
+}
+
+ScopeId Session::find_enclosing_scope(ScopeFlags flags) const {
+    for (ScopeId id = current_scope_;
+         id != InvalidScopeId && id < scopes_.size();
+         id = scopes_[id].parent) {
+        if (scope_flags_contains(scopes_[id].flags, flags)) {
+            return id;
+        }
+    }
+    return InvalidScopeId;
+}
+
+bool Session::is_file_scope() const {
+    ScopeId id = current_scope_;
+    while (id != InvalidScopeId &&
+           id < scopes_.size() &&
+           scope_flags_contains(scopes_[id].flags, ScopeFlags::TemplateParameterScope)) {
+        id = scopes_[id].parent;
+    }
+    return id != InvalidScopeId &&
+           id < scopes_.size() &&
+           scope_flags_contains(scopes_[id].flags, ScopeFlags::FileScope);
+}
+
+void Session::apply_visibility_pragma(bool is_push,
+                                      std::string_view value,
+                                      SrcLoc loc) {
+    if (!is_push) {
+        if (!pragma_visibility_stack_.empty()) {
+            pragma_visibility_stack_.pop_back();
+        }
+        return;
+    }
+
+    if (value == "internal") {
+        pragma_visibility_stack_.push_back("hidden");
+    } else if (value == "default" || value == "hidden" || value == "protected") {
+        pragma_visibility_stack_.emplace_back(value);
+    } else {
+        report_error("visibility pragma expects 'default', 'hidden', 'protected', or 'internal'",
+                     loc);
+    }
+}
+
+void Session::apply_pragma_visibility_default(cir::EntityId entity) {
+    if (pragma_visibility_stack_.empty() || !entity.valid()) {
+        return;
+    }
+    cir::Entity& record = file_.entity_mut(entity);
+    if (!record.attr_facts.visibility.empty()) {
+        return;
+    }
+    record.attr_facts.visibility = pragma_visibility_stack_.back();
+}
+
+void Session::begin_scope() {
+    enter_scope(ScopeFlags::BlockScope);
+    if (collecting_pattern_ && current_function_.valid()) {
+        pattern_events_.push_back(
+            PatternScopeEvent{PatternScopeEvent::Kind::EnterScope, {}, {}});
+    }
+}
+
+void Session::end_scope() {
+    if (collecting_pattern_ && current_function_.valid()) {
+        pattern_events_.push_back(
+            PatternScopeEvent{PatternScopeEvent::Kind::LeaveScope, {}, {}});
+    }
+    leave_scope();
+}
+
+ScopeEnterResult Session::enter_scope_impl(ScopeFlags flags,
+                                           cir::EntityId owner,
+                                           SrcLoc loc) {
+    cleanup_scopes_.push_back(CleanupScope{control_stack_.size(),
+                                           {},
+                                           builder_.current_unwind_target()});
+    ScopeFrame frame;
+    frame.parent = current_scope_;
+    frame.flags = flags;
+    frame.context =
+        file_.create_decl_context(context_kind_for_scope_flags(flags),
+                                  current_decl_context(),
+                                  owner,
+                                  loc);
+    scopes_.push_back(frame);
+    current_scope_ = static_cast<ScopeId>(scopes_.size() - 1);
+    return ScopeEnterResult{current_scope_, true};
+}
+
+cir::DeclContextKind Session::context_kind_for_scope_flags(ScopeFlags flags) const {
+    if (scope_flags_contains(flags, ScopeFlags::NamespaceScope)) {
+        return cir::DeclContextKind::Namespace;
+    }
+    if (scope_flags_contains(flags, ScopeFlags::RecordScope)) {
+        return cir::DeclContextKind::Record;
+    }
+    if (scope_flags_contains(flags, ScopeFlags::EnumScope)) {
+        return cir::DeclContextKind::Enum;
+    }
+    if (scope_flags_contains(flags, ScopeFlags::FunctionScope)) {
+        return cir::DeclContextKind::Function;
+    }
+    if (scope_flags_contains(flags, ScopeFlags::PrototypeScope)) {
+        return cir::DeclContextKind::Prototype;
+    }
+    if (scope_flags_contains(flags, ScopeFlags::TemplateParameterScope)) {
+        return cir::DeclContextKind::TemplateParameter;
+    }
+    return cir::DeclContextKind::Block;
+}
+
+const cir::Binding* Session::lookup_ordinary_binding(std::string_view name,
+                                                     bool include_parents) const {
+    const cir::Binding* binding =
+        file_.lookup_ordinary_binding(current_decl_context(),
+                                      name,
+                                      include_parents);
+    if (binding || !include_parents) {
+        return binding;
+    }
+    for (ScopeId id = current_scope_;
+         id != InvalidScopeId && id < scopes_.size();
+         id = scopes_[id].parent) {
+        if (!scope_flags_contains(scopes_[id].flags,
+                                  ScopeFlags::TemplateParameterScope)) {
+            continue;
+        }
+        binding = file_.lookup_ordinary_binding(scopes_[id].context,
+                                                name,
+                                                /*include_parents=*/false);
+        if (binding) {
+            return binding;
         }
     }
     return nullptr;
 }
 
-void Collect::bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
-                                   const std::string& name,
-                                   const std::shared_ptr<Symbol>& sym) {
-
-    if (!scope || name.empty() || !sym) {
-        return;
+const cir::Binding* Session::lookup_type_name_binding(std::string_view name,
+                                                      bool include_parents) const {
+    const cir::Binding* binding =
+        file_.lookup_type_name_binding(current_decl_context(),
+                                       name,
+                                       include_parents);
+    if (!binding && lang_opts_.is_cxx_mode()) {
+        binding = file_.lookup_tag_binding(current_decl_context(),
+                                           name,
+                                           include_parents);
     }
-    materialize_tentative_snapshot_if_needed();
-
-    auto context = resolve_scope_decl_context(scope);
-    if (!context) {
-        return;
+    if (binding || !include_parents) {
+        return binding;
     }
-    DeclBinding binding;
-    binding.name = name;
-    binding.lookup_namespace = LookupNamespace::Ordinary;
-    binding.symbol_kind = sym->kind;
-    binding.storage_class = sym->storage_class;
-    binding.linkage = sym->linkage;
-    binding.type = sym->type;
-    binding.is_definition = (sym->kind == SymbolKind::FUNCTION) ? sym->is_defined : false;
-    binding.symbol = sym;
-    record_decl_context_mutation(context);
-    context->add_declaration(std::move(binding));
-    bump_lookup_generation();
-}
-
-void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
-                                          const std::string& name,
-                                          const Decl* decl,
-                                          LookupNamespace lookup_namespace) {
-
-    if (!scope || name.empty() || !decl) {
-        return;
-    }
-    materialize_tentative_snapshot_if_needed();
-
-    auto context = resolve_scope_decl_context(scope);
-    if (!context) {
-        return;
-    }
-    DeclBinding binding;
-    binding.name = name;
-    binding.lookup_namespace = lookup_namespace;
-    binding.symbol_kind = SymbolKind::FUNCTION;
-    if (lookup_namespace == LookupNamespace::Tag ||
-        isa<TemplateTemplateParmDecl>(decl)) {
-        binding.symbol_kind = SymbolKind::TYPE;
-    } else if (isa<ConceptDecl>(decl)) {
-        binding.symbol_kind = SymbolKind::TYPE;
-    } else if (isa<VariableTemplateDecl>(decl)) {
-        binding.symbol_kind = SymbolKind::VARIABLE;
-    }
-    binding.ast_decl = decl;
-    binding.template_decl = decl;
-
-    const TemplateDecl* template_decl = nullptr;
-    switch (decl->get_kind()) {
-        case DeclKind::AliasTemplateDecl:
-        case DeclKind::FunctionTemplateDecl:
-        case DeclKind::VariableTemplateDecl:
-        case DeclKind::ClassTemplateDecl:
-        case DeclKind::ConceptDecl:
-        case DeclKind::VariableTemplatePartialSpecializationDecl:
-        case DeclKind::ClassTemplatePartialSpecializationDecl:
-            template_decl = static_cast<const TemplateDecl*>(decl);
-            break;
-        default:
-            break;
-    }
-    if (template_decl) {
-        if (auto ns_prefix =
-                qualified_name_utils::namespace_prefix_from_effective_decl_scope(
-                    scope)) {
-            set_template_decl_cxx_qualifier_prefix(
-                template_decl,
-                std::move(*ns_prefix));
+    for (ScopeId id = current_scope_;
+         id != InvalidScopeId && id < scopes_.size();
+         id = scopes_[id].parent) {
+        if (!scope_flags_contains(scopes_[id].flags,
+                                  ScopeFlags::TemplateParameterScope)) {
+            continue;
+        }
+        binding = file_.lookup_type_name_binding(scopes_[id].context,
+                                                 name,
+                                                 /*include_parents=*/false);
+        if (!binding && lang_opts_.is_cxx_mode()) {
+            binding = file_.lookup_tag_binding(scopes_[id].context,
+                                               name,
+                                               /*include_parents=*/false);
+        }
+        if (binding) {
+            return binding;
         }
     }
-
-    record_decl_context_mutation(context);
-    context->add_declaration(std::move(binding));
-    bump_lookup_generation();
+    return nullptr;
 }
 
-void Collect::collect_bind_template_decl(const std::string& name,
-                                         const Decl* decl,
-                                         LookupNamespace lookup_namespace) {
-    bind_template_decl_in_scope(session_.current_scope_, name, decl, lookup_namespace);
-}
-
-void Collect::collect_bind_template_decl_in_scope(
-    const std::shared_ptr<Scope>& scope,
-    const std::string& name,
-    const Decl* decl,
-    LookupNamespace lookup_namespace) {
-    bind_template_decl_in_scope(scope, name, decl, lookup_namespace);
-}
-
-void Collect::collect_add_function_template_decl(const std::string& name,
-                                                 const Decl* decl) {
-    collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
-}
-
-void Collect::collect_add_class_template_decl(const std::string& name,
-                                              const Decl* decl) {
-    collect_bind_template_decl(name, decl, LookupNamespace::Tag);
-}
-
-void Collect::collect_add_alias_template_decl(const std::string& name,
-                                              const Decl* decl) {
-    collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
-}
-
-void Collect::collect_add_variable_template_decl(const std::string& name,
-                                                 const Decl* decl) {
-    collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
-}
-
-void Collect::collect_add_concept_decl(const std::string& name,
-                                       const Decl* decl) {
-    collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
-}
-
-void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
-                                     const std::string& tag,
-                                     TagDecl* decl) {
-
-    if (!scope || tag.empty() || !decl) {
-        return;
+const cir::Binding*
+Session::lookup_template_name_binding(std::string_view name,
+                                      bool include_parents) const {
+    const cir::Binding* binding =
+        file_.lookup_template_name_binding(current_decl_context(),
+                                           name,
+                                           include_parents);
+    if (binding || !include_parents) {
+        return binding;
     }
-    materialize_tentative_snapshot_if_needed();
-    record_scope_mutation(scope);
-
-    auto context = resolve_scope_decl_context(scope);
-    if (!context) {
-        return;
-    }
-    DeclBinding binding;
-    binding.name = tag;
-    binding.lookup_namespace = LookupNamespace::Tag;
-    binding.symbol_kind = SymbolKind::TYPE;
-    binding.type = decl->get_tag_type();
-    binding.is_definition = decl->is_complete_definition();
-    binding.ast_decl = decl;
-    if (auto* object_decl = dyn_cast<ObjectDecl>(decl)) {
-        if (auto ns_prefix =
-                qualified_name_utils::namespace_prefix_from_effective_decl_scope(
-                    scope)) {
-            set_object_decl_cxx_qualifier_prefix(
-                object_decl,
-                std::move(*ns_prefix));
+    for (ScopeId id = current_scope_;
+         id != InvalidScopeId && id < scopes_.size();
+         id = scopes_[id].parent) {
+        if (!scope_flags_contains(scopes_[id].flags,
+                                  ScopeFlags::TemplateParameterScope)) {
+            continue;
+        }
+        binding = file_.lookup_template_name_binding(scopes_[id].context,
+                                                     name,
+                                                     /*include_parents=*/false);
+        if (binding) {
+            return binding;
         }
     }
-    record_decl_context_mutation(context);
-    context->add_declaration(std::move(binding));
-    bump_lookup_generation();
+    return nullptr;
 }
 
-void Collect::bind_label_in_scope(const std::shared_ptr<Scope>& scope,
-                                  const std::string& label,
-                                  SrcLoc loc) {
+const cir::Binding* Session::lookup_tag_binding(std::string_view name,
+                                                bool include_parents) const {
+    const cir::Binding* binding = file_.lookup_tag_binding(
+        current_decl_context(), name, include_parents);
+    if ((!binding || binding->entities.empty()) && file_.has_module_units()) {
 
-    if (!scope || label.empty()) {
-        return;
+        cir::File::ModuleVisibilityBypass bypass(file_);
+        const cir::Binding* merged = file_.lookup_tag_binding(
+            current_decl_context(), name, include_parents);
+        if (merged && !merged->entities.empty() &&
+            file_.valid(merged->entities.back())) {
+            const cir::Entity& candidate =
+                file_.entity(merged->entities.back());
+            if (!candidate.module_attachment.valid() &&
+                candidate.origin_unit.valid()) {
+                file_.note_module_entity_redeclared(merged->entities.back());
+                binding = merged;
+            }
+        }
     }
-    materialize_tentative_snapshot_if_needed();
-    auto context = resolve_scope_decl_context(scope);
-    if (!context) {
-        return;
-    }
-    DeclBinding binding;
-    binding.name = label;
-    binding.lookup_namespace = LookupNamespace::Label;
-    binding.symbol_kind = SymbolKind::VARIABLE;
-    binding.type = QualType(get_builtin_void());
-    binding.is_definition = true;
-    binding.ast_decl = nullptr;
-    record_decl_context_mutation(context);
-    context->add_declaration(std::move(binding));
-    bump_lookup_generation();
-    (void)loc;
+    return binding;
 }
 
-void Collect::bump_lookup_generation() {
+void Session::bump_lookup_generation() {
     ++lookup_generation_;
     if (lookup_generation_ == 0) {
         lookup_generation_ = 1;
     }
 }
 
-void Collect::sync_decl_context_from_current_scope() {
+uint64_t Session::current_point_lookup_generation() const {
+    if (!active_instantiations_.empty()) {
+        return active_instantiations_.back().point_lookup_generation;
+    }
+    return 0;
+}
 
-    if (!session_.current_scope_) {
-        session_.current_decl_context_ = nullptr;
+uint64_t Session::binding_entity_lookup_generation(
+    const cir::Binding& binding,
+    size_t index) const {
+    uint64_t generation = index < binding.entity_generations.size()
+        ? binding.entity_generations[index]
+        : 0;
+    if (generation == 0 && binding.generation != 0) {
+        generation = binding.generation;
+    }
+    return generation;
+}
+
+bool Session::binding_entity_visible_at_generation(
+    const cir::Binding& binding,
+    size_t index,
+    uint64_t ceiling) const {
+    if (ceiling == 0) {
+        return true;
+    }
+    if (binding_entity_lookup_generation(binding, index) <= ceiling) {
+        return true;
+    }
+
+    if (index < binding.entities.size()) {
+        cir::EntityId candidate = binding.entities[index];
+        if (current_function_.valid() && file_.valid(current_function_) &&
+            file_.function(current_function_).entity == candidate) {
+            return true;
+        }
+        uint64_t entity_index = static_cast<uint64_t>(candidate.index);
+        for (auto it = active_instantiations_.rbegin();
+             it != active_instantiations_.rend(); ++it) {
+            if (it->template_entity_index != 0) {
+                return it->template_entity_index == entity_index;
+            }
+        }
+    }
+    return false;
+}
+
+void Session::record_member_declaration(cir::EntityId entity,
+                                        cir::EntityId owner,
+                                        cir::RecordMemberAccess access,
+                                        SrcLoc loc) {
+    if (!entity.valid() || !file_.valid(entity) || !owner.valid() ||
+        !file_.valid(owner) || entity == owner) {
         return;
     }
-    if (session_.current_scope_->associated_decl_context) {
-        if (auto locked = lock_scope_decl_context(session_.current_scope_)) {
-            session_.current_decl_context_ = locked;
-            return;
+    cir::Entity& declaration = file_.entity_mut(entity);
+    if (declaration.is_record_member) {
+        if (declaration.declaring_record == owner &&
+            declaration.declared_member_access != access) {
+            report_error("member '" +
+                             std::string(declaration.name.valid()
+                                             ? file_.name(declaration.name)
+                                             : std::string_view("<anonymous>")) +
+                             "' redeclared with different access",
+                         loc);
         }
-        auto resolved = find_decl_context(session_.current_scope_->associated_decl_context);
-        if (resolved) {
-            session_.current_decl_context_ = resolved;
-            set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
-            return;
-        }
+        return;
     }
-    if (!session_.current_decl_context_) {
-        session_.current_decl_context_ = session_.translation_unit_decl_context_;
-    }
-    set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
+    declaration.is_record_member = true;
+    declaration.declaring_record = owner;
+    declaration.declared_member_access = access;
 }
 
-
-bool Collect::collect_is_file_scope() const {
-    auto scope = session_.current_scope_;
-    while (scope &&
-           scope_flags_contains(scope->flags, ScopeFlags::TemplateParameterScope) &&
-           scope->parent) {
-        scope = scope->parent;
+void Session::set_current_record_member_access(
+    std::optional<cir::RecordMemberAccess> access) {
+    cir::DeclContextId context = current_decl_context();
+    if (!context.valid() || !file_.valid(context) ||
+        file_.decl_context(context).kind != cir::DeclContextKind::Record) {
+        return;
     }
-    return scope && scope_flags_contains(scope->flags, ScopeFlags::FileScope);
+    uint64_t key = static_cast<uint64_t>(context.index);
+    if (access.has_value()) {
+        record_member_access_by_context_[key] = *access;
+    } else {
+        record_member_access_by_context_.erase(key);
+    }
 }
 
-uint64_t Collect::collect_lookup_generation() const {
-    return lookup_generation_;
+std::optional<cir::RecordMemberAccess>
+Session::current_record_member_access() const {
+    cir::DeclContextId context = current_decl_context();
+    if (!context.valid() || !file_.valid(context) ||
+        file_.decl_context(context).kind != cir::DeclContextKind::Record) {
+        return std::nullopt;
+    }
+    auto found = record_member_access_by_context_.find(
+        static_cast<uint64_t>(context.index));
+    if (found == record_member_access_by_context_.end()) {
+        return std::nullopt;
+    }
+    return found->second;
 }
 
-
-Collect::ScopeEnterResult Collect::collect_enter_scope(std::shared_ptr<Scope> current_scope, std::shared_ptr<Scope> use_scope) const {
-
-    ScopeEnterResult result;
-    if (use_scope) {
-        result.scope = std::move(use_scope);
-        result.created_new = false;
-        return result;
-    }
-    auto new_scope = std::make_shared<Scope>();
-    new_scope->parent = std::move(current_scope);
-    new_scope->flags = ScopeFlags::BlockScope;
-    result.scope = std::move(new_scope);
-    result.created_new = true;
-    return result;
-}
-
-Collect::ScopeEnterResult Collect::collect_enter_scope(ScopeFlags scope_flags, std::shared_ptr<Scope> use_scope) {
-
-    auto result = collect_enter_scope(session_.current_scope_, std::move(use_scope));
-    materialize_tentative_snapshot_if_needed();
-    session_.current_scope_ = result.scope;
-    if (!session_.current_scope_) {
-        session_.current_decl_context_ = nullptr;
-        return result;
-    }
-    if (result.created_new) {
-        session_.current_scope_->flags = scope_flags;
-        auto parent_context = session_.current_decl_context_ ? session_.current_decl_context_
-                                                    : session_.translation_unit_decl_context_;
-        if (parent_context) {
-            record_decl_context_mutation(parent_context);
-            auto entered_context = parent_context->add_lexical_child(
-                context_kind_for_scope_flags(scope_flags));
-            session_.current_decl_context_ = entered_context;
-            set_scope_decl_context(session_.current_scope_, entered_context);
-        } else {
-            session_.current_scope_->associated_decl_context = nullptr;
-            session_.current_scope_->associated_decl_context_owner.reset();
-        }
-        return result;
-    }
-
-    if (session_.current_scope_->flags == ScopeFlags::None) {
-        record_scope_mutation(session_.current_scope_);
-        session_.current_scope_->flags = scope_flags;
-    }
-    sync_decl_context_from_current_scope();
-    return result;
-}
-
-
-Collect::ScopeEnterResult Collect::collect_enter_scope(std::shared_ptr<Scope> use_scope) {
-
-    return collect_enter_scope(ScopeFlags::BlockScope, std::move(use_scope));
-}
-
-
-std::shared_ptr<Scope> Collect::collect_leave_scope(std::shared_ptr<Scope> current_scope) const {
-
-    if (!current_scope) {
-        return nullptr;
-    }
-    return current_scope->parent;
-}
-
-
-std::shared_ptr<Scope> Collect::collect_leave_scope() {
-
-    materialize_tentative_snapshot_if_needed();
-    session_.current_scope_ = collect_leave_scope(session_.current_scope_);
-    sync_decl_context_from_current_scope();
-    return session_.current_scope_;
-}
-
-
-std::shared_ptr<Symbol> Collect::collect_lookup_typedef_symbol(const std::string& name, bool look_parents) const {
-
-    if (!session_.current_scope_) {
-        return nullptr;
-    }
-    LookupEngine::LookupTrace trace;
-    auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto lookup = LookupEngine::lookup_unqualified_ordinary(
-        name, session_.current_scope_, look_parents, LookupEngine::OrdinaryFilter::TypedefOnly, trace_ptr);
-    emit_lookup_trace("typedef", name, trace, lookup != nullptr);
-    return lookup;
-}
-
-QualType Collect::collect_lookup_type_name(const std::string& name,
-                                           bool look_parents,
-                                           bool include_tag_types) const {
-
-    if (name.empty()) {
-        return QualType();
-    }
-    if (auto typedef_sym = collect_lookup_typedef_symbol(name, look_parents)) {
-        return typedef_sym->type;
-    }
-    if (include_tag_types) {
-        if (auto tag_type = collect_lookup_tag_type(name, look_parents)) {
-            return QualType(tag_type);
-        }
-    }
-    return QualType();
-}
-
-
-std::shared_ptr<Symbol> Collect::collect_lookup_variable_symbol(const std::string& name, bool look_parents) const {
-    return collect_lookup_variable_symbol_result(name, look_parents).symbol;
-}
-
-LookupEngine::UnqualifiedOrdinaryLookupResult Collect::collect_lookup_variable_symbol_result(
-    const std::string& name,
-    bool look_parents) const {
-
-    if (!session_.current_scope_) {
+cir::BindingId Session::bind_entity(std::string_view name,
+                                    cir::LookupNamespace lookup_namespace,
+                                    cir::EntityId entity,
+                                    cir::TypeId type,
+                                    bool is_type_name,
+                                    bool is_template_name,
+                                    bool is_definition,
+                                    cir::InstId place,
+                                    SrcLoc loc) {
+    cir::DeclContextId context = current_decl_context();
+    if (!context.valid()) {
         return {};
     }
-    LookupEngine::LookupTrace trace;
-    auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto lookup = LookupEngine::lookup_unqualified_ordinary_result(
-        name, session_.current_scope_, look_parents, LookupEngine::OrdinaryFilter::Any, trace_ptr);
-    emit_lookup_trace("ordinary", name, trace, lookup.found());
-    return lookup;
-}
-
-TagDecl* Collect::collect_lookup_tag_decl(const std::string& tag, bool look_parents) const {
-
-    if (!session_.current_scope_) {
-        return nullptr;
+    diagnose_template_parameter_hiding(name, loc, context);
+    cir::NameId name_id = file_.intern_name(name);
+    cir::TypeRef type_ref = type.valid() ? file_.type_ref(type) : cir::TypeRef{};
+    if (lookup_namespace == cir::LookupNamespace::Ordinary &&
+        file_.decl_context(context).kind == cir::DeclContextKind::Record &&
+        entity.valid() && file_.valid(entity)) {
+        cir::EntityId owner = file_.decl_context(context).owner;
+        cir::EntityKind entity_kind = file_.entity(entity).kind;
+        bool member_declaration_kind =
+            entity_kind == cir::EntityKind::TypeAlias ||
+            entity_kind == cir::EntityKind::Record ||
+            entity_kind == cir::EntityKind::Enum ||
+            entity_kind == cir::EntityKind::Enumerator ||
+            entity_kind == cir::EntityKind::Field ||
+            entity_kind == cir::EntityKind::Method ||
+            entity_kind == cir::EntityKind::Constructor ||
+            entity_kind == cir::EntityKind::Destructor ||
+            (entity_kind == cir::EntityKind::Variable &&
+             file_.entity(entity).parent == owner);
+        auto active_access = record_member_access_by_context_.find(
+            static_cast<uint64_t>(context.index));
+        if (active_access != record_member_access_by_context_.end() &&
+            member_declaration_kind) {
+            record_member_declaration(entity, owner,
+                                      active_access->second, loc);
+        }
+        bool prohibited_member_category =
+            entity_kind == cir::EntityKind::TypeAlias ||
+            entity_kind == cir::EntityKind::Record ||
+            entity_kind == cir::EntityKind::Enum ||
+            entity_kind == cir::EntityKind::Enumerator ||
+            is_template_name;
+        if (prohibited_member_category && owner.valid() &&
+            file_.valid(owner) && entity != owner &&
+            file_.entity(owner).kind == cir::EntityKind::Record &&
+            file_.entity(owner).name.valid() &&
+            file_.name(file_.entity(owner).name) == name) {
+            report_error("member '" + std::string(name) +
+                             "' has the same name as its class",
+                         loc);
+        }
     }
-    LookupEngine::LookupTrace trace;
-    auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto* lookup = LookupEngine::lookup_tag_decl(tag, session_.current_scope_, look_parents, trace_ptr);
-    emit_lookup_trace("tag", tag, trace, lookup != nullptr);
-    return lookup;
-}
+    cir::BindingId binding =
+        file_.bind_entity(context,
+                          name_id,
+                          lookup_namespace,
+                          entity,
+                          type_ref,
+                          is_type_name,
+                          is_template_name,
+                          is_definition,
+                          place,
+                          loc);
+    if (binding.valid()) {
+        file_.entity_mut(entity).lexical_context = context;
 
-
-std::shared_ptr<CType> Collect::collect_lookup_tag_type(const std::string& tag, bool look_parents) const {
-
-    LookupEngine::LookupTrace trace;
-    auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto lookup = LookupEngine::lookup_tag_type(tag, session_.current_scope_, look_parents, trace_ptr);
-    emit_lookup_trace("tag-type", tag, trace, lookup != nullptr);
-    return lookup;
-}
-
-QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
-                                                    const std::string& name) const {
-    if (!owner_type || name.empty()) {
-        return QualType();
-    }
-
-    auto lookup_owner =
-        resolve_record_nested_lookup_owner(owner_type, ast_ctx_.get());
-    auto record_type = lookup_owner.record_type;
-    if (!record_type) {
-        return QualType();
-    }
-
-    auto* owner_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
-    if (!owner_decl) {
-        return QualType();
-    }
-    owner_decl = const_cast<ObjectDecl*>(canonical_record_owner_decl(owner_decl));
-
-    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
-    if (!state) {
-        return QualType();
-    }
-
-    for (auto it = state->nested_types.rbegin(); it != state->nested_types.rend(); ++it) {
-        if (it->name == name) {
-            if (lookup_owner.class_template && lookup_owner.specialization) {
-                return const_cast<Collect*>(this)->partially_substitute_template_type(
-                    it->type,
-                    lookup_owner.class_template->parameters,
-                    lookup_owner.specialization->arguments,
-                    SrcLoc());
+        cir::EntityKind kind = file_.entity(entity).kind;
+        if (kind != cir::EntityKind::NamespaceAlias &&
+            ((kind != cir::EntityKind::Record &&
+              kind != cir::EntityKind::Enum &&
+              kind != cir::EntityKind::Namespace) ||
+             !file_.entity(entity).semantic_context.valid())) {
+            file_.entity_mut(entity).semantic_context = context;
+        }
+        cir::EntityKind bound_kind = file_.entity(entity).kind;
+        if (bound_kind == cir::EntityKind::Variable ||
+            bound_kind == cir::EntityKind::Parameter ||
+            bound_kind == cir::EntityKind::StructuredBinding) {
+            cir::DeclContextId owner_context = context;
+            while (owner_context.valid() && file_.valid(owner_context)) {
+                const cir::DeclContext& declaration_context =
+                    file_.decl_context(owner_context);
+                if (declaration_context.kind ==
+                    cir::DeclContextKind::Function) {
+                    file_.entity_mut(entity).owning_function =
+                        declaration_context.owner;
+                    break;
+                }
+                owner_context = declaration_context.parent;
             }
-            return it->type;
+        }
+        bump_lookup_generation();
+        cir::Binding* record = file_.binding_mut(binding);
+        record->generation = lookup_generation_;
+        if (!record->entity_generations.empty()) {
+            record->entity_generations.back() = lookup_generation_;
         }
     }
-
-    std::unordered_set<const ObjectDecl*> active_stack;
-    active_stack.insert(owner_decl);
-    std::vector<RecordSemanticState::NestedType> base_matches;
-    auto visit_base = [&](const ObjectDecl* base_decl) {
-        if (!base_decl) {
-            return;
-        }
-        collect_record_base_nested_type_matches(
-            base_decl,
-            name,
-            active_stack,
-            base_matches);
-    };
-    for (const auto& base : state->bases) {
-        visit_base(base.record_decl);
-    }
-    for (const auto& virtual_base : state->virtual_bases) {
-        visit_base(virtual_base.record_decl);
-    }
-    if (base_matches.size() == 1) {
-        QualType nested_type = base_matches.front().type;
-        if (lookup_owner.class_template && lookup_owner.specialization) {
-            nested_type = const_cast<Collect*>(this)->partially_substitute_template_type(
-                nested_type,
-                lookup_owner.class_template->parameters,
-                lookup_owner.specialization->arguments,
-                SrcLoc());
-        }
-        return nested_type;
-    }
-    return QualType();
+    return binding;
 }
 
-std::shared_ptr<Symbol> Collect::collect_lookup_record_enumerator(
-    QualType owner_type,
-    const std::string& name) const {
-    if (!owner_type || name.empty()) {
-        return nullptr;
-    }
-
-    auto record_type =
-        resolve_record_nested_lookup_owner(owner_type, ast_ctx_.get())
-            .record_type;
-    if (!record_type) {
-        return nullptr;
-    }
-
-    auto* owner_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
-    if (!owner_decl) {
-        return nullptr;
-    }
-
-    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
-    if (!state) {
-        return nullptr;
-    }
-
-    for (auto it = state->enumerator_members.rbegin();
-         it != state->enumerator_members.rend();
-         ++it) {
-        if (it->name == name) {
-            return it->symbol;
-        }
-    }
-    return nullptr;
-}
-
-std::shared_ptr<Symbol> Collect::collect_lookup_enum_enumerator(
-    QualType owner_type,
-    const std::string& name) const {
-    if (!owner_type || name.empty()) {
-        return nullptr;
-    }
-
-    auto enum_type =
-        desugar_type(owner_type, ast_ctx_.get()).as_shared<EnumType>();
-    if (!enum_type) {
-        return nullptr;
-    }
-
-    auto* owner_decl = dyn_cast<EnumDecl>(enum_type->get_decl());
-    if (!owner_decl) {
-        return nullptr;
-    }
-
-    EnumSemanticState state;
-    if (!query_lookup_enum_semantics(owner_decl, state)) {
-        return nullptr;
-    }
-    for (auto it = state.enumerators.rbegin();
-         it != state.enumerators.rend();
-         ++it) {
-        if (it->name == name) {
-            return it->symbol;
-        }
-    }
-    return nullptr;
-}
-
-const RecordSemanticState::NestedTemplate*
-Collect::collect_lookup_record_nested_template(QualType owner_type,
-                                               const std::string& name) const {
-    if (!owner_type || name.empty()) {
-        return nullptr;
-    }
-
-    auto record_type =
-        resolve_record_nested_lookup_owner(owner_type, ast_ctx_.get())
-            .record_type;
-    if (!record_type) {
-        return nullptr;
-    }
-
-    auto* owner_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
-    if (!owner_decl) {
-        return nullptr;
-    }
-
-    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
-    if (!state) {
-        return nullptr;
-    }
-
-    for (auto it = state->nested_templates.rbegin();
-         it != state->nested_templates.rend();
-         ++it) {
-        if (it->name == name) {
-            return &(*it);
-        }
-    }
-    return nullptr;
-}
-
-
-void Collect::collect_add_tag_decl(const std::string& tag, TagDecl* decl) {
-
-    if (!session_.current_scope_ || tag.empty() || !decl) {
+void Session::diagnose_template_parameter_hiding(std::string_view name,
+                                                 SrcLoc loc,
+                                                 cir::DeclContextId context) {
+    if (name.empty() || !context.valid()) {
         return;
     }
-    bind_tag_decl_in_scope(session_.current_scope_, tag, decl);
-}
-
-
-void Collect::collect_bind_symbol_in_current_scope(const std::string& name, std::shared_ptr<Symbol> sym) {
-
-    if (!session_.current_scope_ || name.empty() || !sym) {
+    if (binding_out_of_line_member_head_) {
         return;
     }
-    bind_symbol_in_scope(session_.current_scope_, name, sym);
-}
-
-
-void Collect::collect_add_global_symbol(std::shared_ptr<Symbol> sym) {
-
-    if (!session_.current_global_scope_ || !sym) {
-        return;
-    }
-    materialize_tentative_snapshot_if_needed();
-    record_global_scope_mutation(session_.current_global_scope_);
-    session_.current_global_scope_->add_to_global_scope(std::move(sym));
-}
-
-
-void Collect::collect_enter_loop() {
-
-    materialize_tentative_snapshot_if_needed();
-    ++session_.func_state_.loop_depth;
-}
-
-
-void Collect::collect_leave_loop() {
-
-    if (session_.func_state_.loop_depth > 0) {
-        materialize_tentative_snapshot_if_needed();
-        --session_.func_state_.loop_depth;
+    const cir::Binding* hidden_template_parameter =
+        file_.lookup_ordinary_binding(context,
+                                      name,
+                                      /*include_parents=*/true);
+    if (hidden_template_parameter &&
+        hidden_template_parameter->context != context &&
+        file_.valid(hidden_template_parameter->context) &&
+        file_.decl_context(hidden_template_parameter->context).kind ==
+            cir::DeclContextKind::TemplateParameter) {
+        report_error("declaration of '" + std::string(name) +
+                         "' shadows template parameter",
+                     loc);
     }
 }
 
-
-void Collect::collect_enter_switch() {
-
-    materialize_tentative_snapshot_if_needed();
-    session_.func_state_.switch_context_stack.push_back(SwitchContext{});
-    ++session_.func_state_.switch_depth;
+cir::BlockId Session::begin_fragment_block(std::string_view name) {
+    cir::BlockId block = builder_.create_detached_block(name);
+    builder_.switch_to_block(block);
+    return block;
 }
 
-
-void Collect::collect_leave_switch() {
-
-    if (!session_.func_state_.switch_context_stack.empty() || session_.func_state_.switch_depth > 0) {
-        materialize_tentative_snapshot_if_needed();
-    }
-    if (!session_.func_state_.switch_context_stack.empty()) {
-        session_.func_state_.switch_context_stack.pop_back();
-    }
-    if (session_.func_state_.switch_depth > 0) {
-        --session_.func_state_.switch_depth;
-    }
+cir::Fragment Session::finish_fragment_block(cir::BlockId block, cir::BlockId previous) {
+    cir::Fragment fragment = builder_.block_fragment(block);
+    builder_.switch_to_block(previous);
+    return fragment;
 }
 
-
-void Collect::collect_register_label_definition(const std::string& label, SrcLoc loc) {
-
-    auto function_scope = find_enclosing_scope_with_flags(ScopeFlags::FunctionScope);
-    if (function_scope &&
-        LookupEngine::lookup_label(label, function_scope, false)) {
-        report_error("redefinition of label '" + label + "'", loc);
-        return;
+cir::Fragment Session::adopt_or_create_fragment_entry(cir::Fragment fragment, std::string_view name) {
+    if (fragment.empty()) {
+        cir::BlockId block = builder_.create_detached_block(name);
+        return builder_.block_fragment(block);
     }
-    materialize_tentative_snapshot_if_needed();
-    session_.func_state_.labels_defined.insert(label);
-    if (!loc.isInvalid()) {
-        session_.func_state_.label_definition_locs[label] = loc;
-    }
-    if (function_scope) {
-        bind_label_in_scope(function_scope, label, loc);
-    }
+    builder_.rename_block(fragment.entry, name);
+    return fragment;
 }
 
-
-void Collect::collect_register_label_reference(const std::string& label, SrcLoc loc) {
-
-    materialize_tentative_snapshot_if_needed();
-    session_.func_state_.labels_referenced.insert(label);
-    if (!loc.isInvalid() && !session_.func_state_.label_reference_locs.contains(label)) {
-        session_.func_state_.label_reference_locs[label] = loc;
-    }
+cir::Fragment Session::chain(cir::Fragment first, cir::Fragment second, SrcLoc loc) {
+    return builder_.concat(std::move(first), std::move(second), loc);
 }
+
+StmtResult Session::make_stmt_result(cir::Fragment fragment,
+                                     bool always_returns,
+                                     bool has_error) const {
+    StmtResult result;
+    result.falls_through = fragment.empty() ? true : fragment.falls_through;
+    result.always_returns = always_returns;
+    result.has_error = has_error;
+    result.fragment = std::move(fragment);
+    return result;
+}
+
+} // namespace aburi::collect

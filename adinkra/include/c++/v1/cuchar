@@ -1,0 +1,13 @@
+#ifndef ADINKRA_CUCHAR
+#define ADINKRA_CUCHAR
+
+#include <__adinkra/config>
+#include <uchar.h>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+using ::mbstate_t;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

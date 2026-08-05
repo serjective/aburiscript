@@ -1,0 +1,502 @@
+#ifndef ADINKRA_DEQUE
+#define ADINKRA_DEQUE
+
+#include <__adinkra/config>
+#include <compare>
+#include <cstddef>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type, class Allocator = allocator<Type>>
+class deque {
+    struct storage_node {
+        template<class... Arguments>
+        explicit storage_node(Arguments&&... arguments)
+            : value(std::forward<Arguments>(arguments)...) {}
+
+        Type value;
+    };
+
+    using storage_type = vector<unique_ptr<storage_node>>;
+
+    template<bool IsConst>
+    class basic_iterator {
+        friend class deque;
+        template<bool>
+        friend class basic_iterator;
+
+        using storage_pointer = conditional_t<
+            IsConst,
+            const unique_ptr<storage_node>*,
+            unique_ptr<storage_node>*>;
+
+    public:
+        using iterator_category = random_access_iterator_tag;
+        using iterator_concept = random_access_iterator_tag;
+        using value_type = Type;
+        using difference_type = ptrdiff_t;
+        using pointer = conditional_t<IsConst, const Type*, Type*>;
+        using reference = conditional_t<IsConst, const Type&, Type&>;
+
+        basic_iterator() noexcept : current_(nullptr) {}
+
+        template<bool OtherConst>
+            requires IsConst && (!OtherConst)
+        basic_iterator(
+            const basic_iterator<OtherConst>& other) noexcept
+            : current_(other.current_) {}
+
+        reference operator*() const noexcept {
+            if constexpr (IsConst) {
+                return static_cast<const Type&>((*current_)->value);
+            } else {
+                return (*current_)->value;
+            }
+        }
+
+        pointer operator->() const noexcept {
+            return std::addressof(operator*());
+        }
+
+        reference operator[](difference_type offset) const noexcept {
+            return *(*this + offset);
+        }
+
+        basic_iterator& operator++() noexcept {
+            ++current_;
+            return *this;
+        }
+
+        basic_iterator operator++(int) noexcept {
+            basic_iterator result(*this);
+            ++*this;
+            return result;
+        }
+
+        basic_iterator& operator--() noexcept {
+            --current_;
+            return *this;
+        }
+
+        basic_iterator operator--(int) noexcept {
+            basic_iterator result(*this);
+            --*this;
+            return result;
+        }
+
+        basic_iterator& operator+=(difference_type offset) noexcept {
+            current_ += offset;
+            return *this;
+        }
+
+        basic_iterator& operator-=(difference_type offset) noexcept {
+            current_ -= offset;
+            return *this;
+        }
+
+        friend basic_iterator operator+(
+            basic_iterator iterator, difference_type offset) noexcept {
+            iterator += offset;
+            return iterator;
+        }
+
+        friend basic_iterator operator+(
+            difference_type offset, basic_iterator iterator) noexcept {
+            iterator += offset;
+            return iterator;
+        }
+
+        friend basic_iterator operator-(
+            basic_iterator iterator, difference_type offset) noexcept {
+            iterator -= offset;
+            return iterator;
+        }
+
+        template<bool OtherConst>
+        difference_type operator-(
+            const basic_iterator<OtherConst>& other) const noexcept {
+            return current_ - other.current_;
+        }
+
+        template<bool OtherConst>
+        bool operator==(
+            const basic_iterator<OtherConst>& other) const noexcept {
+            return current_ == other.current_;
+        }
+
+        template<bool OtherConst>
+        auto operator<=>(
+            const basic_iterator<OtherConst>& other) const noexcept {
+            return current_ <=> other.current_;
+        }
+
+    private:
+        explicit basic_iterator(storage_pointer current) noexcept
+            : current_(current) {}
+
+        storage_pointer current_;
+    };
+
+public:
+    using value_type = Type;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = Type&;
+    using const_reference = const Type&;
+    using pointer = Type*;
+    using const_pointer = const Type*;
+    using iterator = basic_iterator<false>;
+    using const_iterator = basic_iterator<true>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator =
+        std::reverse_iterator<const_iterator>;
+
+    deque() = default;
+
+    explicit deque(const Allocator& allocator)
+        : values_(), allocator_(allocator) {}
+
+    explicit deque(
+        size_type count,
+        const Allocator& allocator = Allocator())
+        : deque(allocator) {
+        resize(count);
+    }
+
+    deque(
+        size_type count, const Type& value,
+        const Allocator& allocator = Allocator())
+        : deque(allocator) {
+        while (size() < count) {
+            push_back(value);
+        }
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    deque(
+        InputIterator first, InputIterator last,
+        const Allocator& allocator = Allocator())
+        : deque(allocator) {
+        for (; first != last; ++first) {
+            push_back(*first);
+        }
+    }
+
+    deque(
+        initializer_list<Type> values,
+        const Allocator& allocator = Allocator())
+        : deque(values.begin(), values.end(), allocator) {}
+
+    deque(const deque& other)
+        : deque(allocator_traits<Allocator>::
+                    select_on_container_copy_construction(
+                        other.allocator_)) {
+        for (const auto& value : other) {
+            push_back(value);
+        }
+    }
+
+    deque(deque&&) noexcept = default;
+
+    deque& operator=(const deque& other) {
+        if (this != std::addressof(other)) {
+            clear();
+            for (const auto& value : other) {
+                push_back(value);
+            }
+        }
+        return *this;
+    }
+
+    deque& operator=(deque&&) noexcept = default;
+
+    allocator_type get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    reference at(size_type position) {
+        if (position >= size()) {
+            throw out_of_range("deque::at");
+        }
+        return values_[position]->value;
+    }
+
+    const_reference at(size_type position) const {
+        if (position >= size()) {
+            throw out_of_range("deque::at");
+        }
+        return values_[position]->value;
+    }
+
+    reference operator[](size_type position) noexcept {
+        return values_[position]->value;
+    }
+
+    const_reference operator[](size_type position) const noexcept {
+        return values_[position]->value;
+    }
+
+    reference front() noexcept { return values_.front()->value; }
+    const_reference front() const noexcept {
+        return values_.front()->value;
+    }
+    reference back() noexcept { return values_.back()->value; }
+    const_reference back() const noexcept {
+        return values_.back()->value;
+    }
+
+    iterator begin() noexcept {
+        return iterator(values_.begin().base());
+    }
+    const_iterator begin() const noexcept {
+        return const_iterator(values_.begin().base());
+    }
+    const_iterator cbegin() const noexcept {
+        return begin();
+    }
+    iterator end() noexcept {
+        return iterator(values_.end().base());
+    }
+    const_iterator end() const noexcept {
+        return const_iterator(values_.end().base());
+    }
+    const_iterator cend() const noexcept {
+        return end();
+    }
+    reverse_iterator rbegin() noexcept {
+        return reverse_iterator(end());
+    }
+    const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    reverse_iterator rend() noexcept {
+        return reverse_iterator(begin());
+    }
+    const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    bool empty() const noexcept { return values_.empty(); }
+    size_type size() const noexcept { return values_.size(); }
+    size_type max_size() const noexcept {
+        return values_.max_size();
+    }
+    void shrink_to_fit() { values_.shrink_to_fit(); }
+
+    void clear() noexcept { values_.clear(); }
+
+    iterator insert(const_iterator position, const Type& value) {
+        return emplace(position, value);
+    }
+
+    iterator insert(const_iterator position, Type&& value) {
+        return emplace(position, std::move(value));
+    }
+
+    iterator insert(
+        const_iterator position, size_type count,
+        const Type& value) {
+        const size_type offset =
+            static_cast<size_type>(position - cbegin());
+        for (size_type index = 0; index < count; ++index) {
+            emplace(cbegin() + offset + index, value);
+        }
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    iterator insert(
+        const_iterator position,
+        InputIterator first, InputIterator last) {
+        const size_type offset =
+            static_cast<size_type>(position - cbegin());
+        size_type inserted = 0;
+        for (; first != last; ++first, ++inserted) {
+            emplace(
+                cbegin() + static_cast<difference_type>(
+                               offset + inserted),
+                *first);
+        }
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    iterator insert(
+        const_iterator position,
+        initializer_list<Type> values) {
+        return insert(position, values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    iterator emplace(
+        const_iterator position, Arguments&&... arguments) {
+        const size_type offset =
+            static_cast<size_type>(position - cbegin());
+        values_.emplace(
+            values_.begin() + static_cast<difference_type>(offset),
+            make_unique<storage_node>(
+                std::forward<Arguments>(arguments)...));
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    iterator erase(const_iterator position) {
+        const size_type offset =
+            static_cast<size_type>(position - cbegin());
+        values_.erase(
+            values_.begin() + static_cast<difference_type>(offset));
+        return begin() + static_cast<difference_type>(offset);
+    }
+
+    iterator erase(
+        const_iterator first, const_iterator last) {
+        const size_type first_offset =
+            static_cast<size_type>(first - cbegin());
+        const size_type last_offset =
+            static_cast<size_type>(last - cbegin());
+        values_.erase(
+            values_.begin() +
+                static_cast<difference_type>(first_offset),
+            values_.begin() +
+                static_cast<difference_type>(last_offset));
+        return begin() +
+               static_cast<difference_type>(first_offset);
+    }
+
+    void push_back(const Type& value) {
+        values_.push_back(make_unique<storage_node>(value));
+    }
+    void push_back(Type&& value) {
+        values_.push_back(
+            make_unique<storage_node>(std::move(value)));
+    }
+
+    template<class... Arguments>
+    reference emplace_back(Arguments&&... arguments) {
+        values_.push_back(make_unique<storage_node>(
+            std::forward<Arguments>(arguments)...));
+        return back();
+    }
+
+    void pop_back() { values_.pop_back(); }
+
+    void push_front(const Type& value) {
+        emplace(begin(), value);
+    }
+    void push_front(Type&& value) {
+        emplace(begin(), std::move(value));
+    }
+
+    template<class... Arguments>
+    reference emplace_front(Arguments&&... arguments) {
+        return *emplace(
+            begin(), std::forward<Arguments>(arguments)...);
+    }
+
+    void pop_front() { erase(begin()); }
+
+    void resize(size_type count) {
+        while (size() > count) {
+            pop_back();
+        }
+        while (size() < count) {
+            emplace_back();
+        }
+    }
+
+    void resize(size_type count, const Type& value) {
+        while (size() > count) {
+            pop_back();
+        }
+        while (size() < count) {
+            push_back(value);
+        }
+    }
+
+    void swap(deque& other)
+        noexcept(noexcept(values_.swap(other.values_))) {
+        values_.swap(other.values_);
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_swap::value) {
+            std::swap(allocator_, other.allocator_);
+        }
+    }
+
+    friend bool operator==(
+        const deque& left, const deque& right) {
+        return left.size() == right.size() &&
+               std::equal(
+                   left.begin(), left.end(), right.begin());
+    }
+
+    friend auto operator<=>(
+        const deque& left, const deque& right) {
+        auto left_iterator = left.begin();
+        auto right_iterator = right.begin();
+        while (left_iterator != left.end() &&
+               right_iterator != right.end()) {
+            if (auto result =
+                    *left_iterator <=> *right_iterator;
+                result != 0) {
+                return result;
+            }
+            ++left_iterator;
+            ++right_iterator;
+        }
+        return left.size() <=> right.size();
+    }
+
+private:
+    storage_type values_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+};
+
+template<class Type, class Allocator>
+void swap(
+    deque<Type, Allocator>& left,
+    deque<Type, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Type, class Allocator, class Value>
+typename deque<Type, Allocator>::size_type erase(
+    deque<Type, Allocator>& container, const Value& value) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (*current == value) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Type, class Allocator, class Predicate>
+typename deque<Type, Allocator>::size_type erase_if(
+    deque<Type, Allocator>& container, Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

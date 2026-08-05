@@ -1,0 +1,124 @@
+#ifndef ADINKRA_IOSFWD
+#define ADINKRA_IOSFWD
+
+#include <__adinkra/char_traits>
+#include <__adinkra/config>
+#include <cstddef>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+using streamoff = long long;
+using streamsize = ptrdiff_t;
+using streampos = long long;
+using wstreampos = long long;
+
+template<class State>
+class fpos {
+public:
+    constexpr fpos() : offset_(0), state_() {}
+    constexpr fpos(streamoff offset) : offset_(offset), state_() {}
+
+    constexpr operator streamoff() const { return offset_; }
+    constexpr State state() const { return state_; }
+    constexpr void state(State value) { state_ = value; }
+
+    constexpr fpos& operator+=(streamoff offset) {
+        offset_ += offset;
+        return *this;
+    }
+    constexpr fpos& operator-=(streamoff offset) {
+        offset_ -= offset;
+        return *this;
+    }
+
+private:
+    streamoff offset_;
+    State state_;
+};
+
+class ios_base;
+
+template<class Character, class Traits = char_traits<Character>>
+class basic_ios;
+template<class Character, class Traits = char_traits<Character>>
+class basic_streambuf;
+template<class Character, class Traits = char_traits<Character>>
+class basic_istream;
+template<class Character, class Traits = char_traits<Character>>
+class basic_ostream;
+template<class Character, class Traits = char_traits<Character>>
+class basic_iostream;
+template<class Character, class Traits = char_traits<Character>>
+class ostreambuf_iterator;
+template<class Character, class Traits = char_traits<Character>>
+class basic_filebuf;
+template<class Character, class Traits = char_traits<Character>>
+class basic_ifstream;
+template<class Character, class Traits = char_traits<Character>>
+class basic_ofstream;
+template<class Character, class Traits = char_traits<Character>>
+class basic_fstream;
+template<class Type>
+class allocator;
+template<class Character, class Traits, class Allocator>
+class basic_istringstream;
+template<class Character, class Traits, class Allocator>
+class basic_ostringstream;
+template<class Character, class Traits, class Allocator>
+class basic_stringstream;
+template<class Character, class Traits, class Allocator>
+class basic_stringbuf;
+template<class Character, class Traits, class Allocator>
+class basic_string;
+
+using string =
+    basic_string<char, char_traits<char>, allocator<char>>;
+using wstring =
+    basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>;
+#if defined(__cpp_char8_t)
+using u8string =
+    basic_string<char8_t, char_traits<char8_t>, allocator<char8_t>>;
+#endif
+using u16string =
+    basic_string<char16_t, char_traits<char16_t>, allocator<char16_t>>;
+using u32string =
+    basic_string<char32_t, char_traits<char32_t>, allocator<char32_t>>;
+
+using ios = basic_ios<char, char_traits<char>>;
+using wios = basic_ios<wchar_t, char_traits<wchar_t>>;
+using streambuf = basic_streambuf<char, char_traits<char>>;
+using wstreambuf = basic_streambuf<wchar_t, char_traits<wchar_t>>;
+using istream = basic_istream<char, char_traits<char>>;
+using wistream = basic_istream<wchar_t, char_traits<wchar_t>>;
+using ostream = basic_ostream<char, char_traits<char>>;
+using wostream = basic_ostream<wchar_t, char_traits<wchar_t>>;
+using iostream = basic_iostream<char, char_traits<char>>;
+using wiostream = basic_iostream<wchar_t, char_traits<wchar_t>>;
+using filebuf = basic_filebuf<char, char_traits<char>>;
+using wfilebuf = basic_filebuf<wchar_t, char_traits<wchar_t>>;
+using ifstream = basic_ifstream<char, char_traits<char>>;
+using wifstream = basic_ifstream<wchar_t, char_traits<wchar_t>>;
+using ofstream = basic_ofstream<char, char_traits<char>>;
+using wofstream = basic_ofstream<wchar_t, char_traits<wchar_t>>;
+using fstream = basic_fstream<char, char_traits<char>>;
+using wfstream = basic_fstream<wchar_t, char_traits<wchar_t>>;
+using istringstream =
+    basic_istringstream<char, char_traits<char>, allocator<char>>;
+using wistringstream =
+    basic_istringstream<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>;
+using ostringstream =
+    basic_ostringstream<char, char_traits<char>, allocator<char>>;
+using wostringstream =
+    basic_ostringstream<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>;
+using stringstream =
+    basic_stringstream<char, char_traits<char>, allocator<char>>;
+using wstringstream =
+    basic_stringstream<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>;
+using stringbuf =
+    basic_stringbuf<char, char_traits<char>, allocator<char>>;
+using wstringbuf =
+    basic_stringbuf<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

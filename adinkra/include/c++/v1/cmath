@@ -1,0 +1,612 @@
+#ifndef ADINKRA_CMATH
+#define ADINKRA_CMATH
+
+#include <__adinkra/config>
+#include <type_traits>
+#include <math.h>
+
+#ifdef isinf
+#undef isinf
+#endif
+#ifdef isfinite
+#undef isfinite
+#endif
+#ifdef isnan
+#undef isnan
+#endif
+#ifdef fpclassify
+#undef fpclassify
+#endif
+#ifdef signbit
+#undef signbit
+#endif
+#ifdef isnormal
+#undef isnormal
+#endif
+#ifdef isunordered
+#undef isunordered
+#endif
+
+#ifndef ADINKRA_FLOAT_ABS_DEFINED
+#define ADINKRA_FLOAT_ABS_DEFINED
+inline constexpr float abs(float value) noexcept {
+    return __builtin_fabsf(value);
+}
+
+inline constexpr double abs(double value) noexcept {
+    return __builtin_fabs(value);
+}
+
+inline constexpr long double abs(long double value) noexcept {
+    return __builtin_fabsl(value);
+}
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+using ::abs;
+using ::acos;
+using ::acosh;
+using ::asin;
+using ::asinh;
+using ::atan;
+using ::atan2;
+using ::atanh;
+using ::cbrt;
+using ::ceil;
+using ::copysign;
+using ::copysignf;
+using ::cos;
+using ::cosh;
+using ::erf;
+using ::erfc;
+using ::exp;
+using ::exp2;
+using ::expm1;
+using ::fabs;
+using ::fma;
+using ::floor;
+using ::fmax;
+using ::fmin;
+using ::fmod;
+using ::frexp;
+using ::hypot;
+using ::hypotl;
+using ::ilogb;
+using ::ldexp;
+using ::lgamma;
+using ::log;
+using ::log10;
+using ::log1p;
+using ::log2;
+using ::logb;
+using ::lrint;
+using ::lrintf;
+using ::lrintl;
+using ::llround;
+using ::llroundf;
+using ::llroundl;
+using ::lround;
+using ::modf;
+using ::nan;
+using ::nanf;
+using ::nanl;
+using ::nearbyint;
+using ::nearbyintf;
+using ::nearbyintl;
+using ::nextafter;
+using ::nextafterf;
+using ::nextafterl;
+using ::nexttoward;
+using ::pow;
+using ::remainder;
+using ::remquo;
+using ::rint;
+using ::round;
+using ::roundf;
+using ::roundl;
+using ::scalbn;
+using ::sin;
+using ::sinh;
+using ::sqrt;
+using ::tan;
+using ::tanf;
+using ::tanl;
+using ::tanh;
+using ::tgamma;
+using ::trunc;
+using ::truncf;
+
+inline float nexttoward(float value, long double direction) noexcept {
+    return ::nexttowardf(value, direction);
+}
+
+inline long double nexttoward(
+    long double value, long double direction) noexcept {
+    return ::nexttowardl(value, direction);
+}
+
+#define ADINKRA_MATH_UNARY_OVERLOADS(function)                    \
+    inline float function(float value) noexcept {                   \
+        return __builtin_##function##f(value);                      \
+    }                                                               \
+    inline long double function(long double value) noexcept {       \
+        return __builtin_##function##l(value);                      \
+    }
+
+#define ADINKRA_MATH_BINARY_OVERLOADS(function)                   \
+    inline float function(float left, float right) noexcept {       \
+        return __builtin_##function##f(left, right);                \
+    }                                                               \
+    inline long double function(                                   \
+        long double left, long double right) noexcept {             \
+        return __builtin_##function##l(left, right);                \
+    }
+
+ADINKRA_MATH_UNARY_OVERLOADS(acos)
+ADINKRA_MATH_UNARY_OVERLOADS(acosh)
+ADINKRA_MATH_UNARY_OVERLOADS(asin)
+ADINKRA_MATH_UNARY_OVERLOADS(asinh)
+ADINKRA_MATH_UNARY_OVERLOADS(atan)
+ADINKRA_MATH_UNARY_OVERLOADS(atanh)
+ADINKRA_MATH_UNARY_OVERLOADS(cbrt)
+ADINKRA_MATH_UNARY_OVERLOADS(ceil)
+ADINKRA_MATH_UNARY_OVERLOADS(cos)
+ADINKRA_MATH_UNARY_OVERLOADS(cosh)
+ADINKRA_MATH_UNARY_OVERLOADS(erf)
+ADINKRA_MATH_UNARY_OVERLOADS(erfc)
+ADINKRA_MATH_UNARY_OVERLOADS(exp)
+ADINKRA_MATH_UNARY_OVERLOADS(exp2)
+ADINKRA_MATH_UNARY_OVERLOADS(expm1)
+ADINKRA_MATH_UNARY_OVERLOADS(fabs)
+ADINKRA_MATH_UNARY_OVERLOADS(floor)
+ADINKRA_MATH_UNARY_OVERLOADS(lgamma)
+ADINKRA_MATH_UNARY_OVERLOADS(log)
+ADINKRA_MATH_UNARY_OVERLOADS(log10)
+ADINKRA_MATH_UNARY_OVERLOADS(log1p)
+ADINKRA_MATH_UNARY_OVERLOADS(log2)
+ADINKRA_MATH_UNARY_OVERLOADS(nearbyint)
+ADINKRA_MATH_UNARY_OVERLOADS(rint)
+ADINKRA_MATH_UNARY_OVERLOADS(round)
+ADINKRA_MATH_UNARY_OVERLOADS(sin)
+ADINKRA_MATH_UNARY_OVERLOADS(sinh)
+ADINKRA_MATH_UNARY_OVERLOADS(sqrt)
+ADINKRA_MATH_UNARY_OVERLOADS(tan)
+ADINKRA_MATH_UNARY_OVERLOADS(tanh)
+ADINKRA_MATH_UNARY_OVERLOADS(tgamma)
+ADINKRA_MATH_UNARY_OVERLOADS(trunc)
+
+#define ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(function)             \
+    template<class Type>                                             \
+        requires is_integral_v<Type>                                 \
+    inline double function(Type value) noexcept {                    \
+        return ::function(static_cast<double>(value));               \
+    }
+
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(acos)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(acosh)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(asin)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(asinh)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(atan)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(atanh)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(cbrt)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(ceil)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(cos)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(cosh)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(erf)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(erfc)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(exp)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(exp2)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(expm1)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(fabs)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(floor)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(lgamma)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(log)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(log10)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(log1p)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(log2)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(nearbyint)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(rint)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(round)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(sin)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(sinh)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(sqrt)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(tan)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(tanh)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(tgamma)
+ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD(trunc)
+
+#undef ADINKRA_MATH_INTEGRAL_UNARY_OVERLOAD
+
+ADINKRA_MATH_BINARY_OVERLOADS(atan2)
+ADINKRA_MATH_BINARY_OVERLOADS(copysign)
+ADINKRA_MATH_BINARY_OVERLOADS(fmax)
+ADINKRA_MATH_BINARY_OVERLOADS(fmin)
+ADINKRA_MATH_BINARY_OVERLOADS(fmod)
+ADINKRA_MATH_BINARY_OVERLOADS(hypot)
+ADINKRA_MATH_BINARY_OVERLOADS(pow)
+ADINKRA_MATH_BINARY_OVERLOADS(remainder)
+
+#undef ADINKRA_MATH_BINARY_OVERLOADS
+#undef ADINKRA_MATH_UNARY_OVERLOADS
+
+#define ADINKRA_MATH_MIXED_BINARY_OVERLOAD(function)                    \
+    template<class Left, class Right>                                     \
+        requires (                                                        \
+            is_arithmetic_v<Left> && is_arithmetic_v<Right> &&            \
+            !(is_integral_v<Left> && is_integral_v<Right>) &&             \
+            !is_same_v<remove_cv_t<Left>, remove_cv_t<Right>>)            \
+    inline auto function(Left left, Right right) noexcept {                \
+        using result = conditional_t<                                     \
+            is_integral_v<Left> && is_integral_v<Right>,                  \
+            double, common_type_t<Left, Right>>;                          \
+        return std::function(                                             \
+            static_cast<result>(left), static_cast<result>(right));       \
+    }
+
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(atan2)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(copysign)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(fmax)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(fmin)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(fmod)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(hypot)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(pow)
+ADINKRA_MATH_MIXED_BINARY_OVERLOAD(remainder)
+
+#undef ADINKRA_MATH_MIXED_BINARY_OVERLOAD
+
+#define ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(function)            \
+    template<class Left, class Right>                                \
+        requires (is_integral_v<Left> && is_integral_v<Right>)       \
+    inline double function(Left left, Right right) noexcept {         \
+        return ::function(                                           \
+            static_cast<double>(left), static_cast<double>(right));  \
+    }
+
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(atan2)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(copysign)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(fmax)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(fmin)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(fmod)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(hypot)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(pow)
+ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD(remainder)
+
+#undef ADINKRA_MATH_INTEGRAL_BINARY_OVERLOAD
+
+inline float hypot(
+    float first, float second, float third) noexcept {
+    return std::hypot(std::hypot(first, second), third);
+}
+
+inline double hypot(
+    double first, double second, double third) noexcept {
+    return std::hypot(std::hypot(first, second), third);
+}
+
+inline long double hypot(
+    long double first,
+    long double second,
+    long double third) noexcept {
+    return std::hypot(std::hypot(first, second), third);
+}
+
+template<class First, class Second, class Third>
+    requires (
+        is_arithmetic_v<First> &&
+        is_arithmetic_v<Second> &&
+        is_arithmetic_v<Third>)
+inline auto hypot(
+    First first, Second second, Third third) noexcept {
+    using result = conditional_t<
+        is_integral_v<First> &&
+        is_integral_v<Second> &&
+        is_integral_v<Third>,
+        double,
+        common_type_t<First, Second, Third>>;
+    return std::hypot(
+        static_cast<result>(first),
+        static_cast<result>(second),
+        static_cast<result>(third));
+}
+
+inline float frexp(float value, int* exponent) noexcept {
+    return __builtin_frexpf(value, exponent);
+}
+
+inline long double frexp(
+    long double value, int* exponent) noexcept {
+    return __builtin_frexpl(value, exponent);
+}
+
+inline float ldexp(float value, int exponent) noexcept {
+    return __builtin_ldexpf(value, exponent);
+}
+
+inline long double ldexp(
+    long double value, int exponent) noexcept {
+    return __builtin_ldexpl(value, exponent);
+}
+
+template<class Type>
+    requires is_integral_v<Type>
+inline double ldexp(Type value, int exponent) noexcept {
+    return __builtin_ldexp(
+        static_cast<double>(value), exponent);
+}
+
+inline float modf(float value, float* integer) noexcept {
+    return __builtin_modff(value, integer);
+}
+
+inline long double modf(
+    long double value, long double* integer) noexcept {
+    return __builtin_modfl(value, integer);
+}
+
+inline float remquo(
+    float left, float right, int* quotient) noexcept {
+    return __builtin_remquof(left, right, quotient);
+}
+
+inline long double remquo(
+    long double left,
+    long double right,
+    int* quotient) noexcept {
+    return __builtin_remquol(left, right, quotient);
+}
+
+inline float scalbn(float value, int exponent) noexcept {
+    return __builtin_scalbnf(value, exponent);
+}
+
+inline long double scalbn(
+    long double value, int exponent) noexcept {
+    return __builtin_scalbnl(value, exponent);
+}
+
+inline float fma(float left, float right, float addend) noexcept {
+    return __builtin_fmaf(left, right, addend);
+}
+
+inline long double fma(
+    long double left,
+    long double right,
+    long double addend) noexcept {
+    return __builtin_fmal(left, right, addend);
+}
+
+inline float nextafter(float from, float to) noexcept {
+    return __builtin_nextafterf(from, to);
+}
+
+inline long double nextafter(
+    long double from, long double to) noexcept {
+    return __builtin_nextafterl(from, to);
+}
+
+template<class From, class To>
+    requires (
+        (is_integral_v<From> || is_floating_point_v<From>) &&
+        (is_integral_v<To> || is_floating_point_v<To>) &&
+        !(is_same_v<remove_cv_t<From>, float> &&
+          is_same_v<remove_cv_t<To>, float>) &&
+        !(is_same_v<remove_cv_t<From>, double> &&
+          is_same_v<remove_cv_t<To>, double>) &&
+        !(is_same_v<remove_cv_t<From>, long double> &&
+          is_same_v<remove_cv_t<To>, long double>))
+inline auto nextafter(From from, To to) noexcept {
+    using result = conditional_t<
+        is_integral_v<From> && is_integral_v<To>,
+        double,
+        common_type_t<From, To>>;
+    return std::nextafter(
+        static_cast<result>(from), static_cast<result>(to));
+}
+
+template<class Floating>
+constexpr Floating __lerp(
+    Floating left, Floating right, Floating amount) noexcept {
+    if ((left <= 0 && right >= 0) ||
+        (left >= 0 && right <= 0)) {
+        return amount * right + (1 - amount) * left;
+    }
+    if (amount == 1) {
+        return right;
+    }
+    const Floating result = left + amount * (right - left);
+    if ((amount > 1) == (right > left)) {
+        return right < result ? result : right;
+    }
+    return result < right ? result : right;
+}
+
+inline constexpr float lerp(
+    float left, float right, float amount) noexcept {
+    return std::__lerp(left, right, amount);
+}
+
+inline constexpr double lerp(
+    double left, double right, double amount) noexcept {
+    return std::__lerp(left, right, amount);
+}
+
+inline constexpr long double lerp(
+    long double left, long double right,
+    long double amount) noexcept {
+    return std::__lerp(left, right, amount);
+}
+
+template<class Left, class Right, class Amount>
+    requires (
+        is_arithmetic_v<Left> &&
+        is_arithmetic_v<Right> &&
+        is_arithmetic_v<Amount> &&
+        !(is_same_v<remove_cv_t<Left>, remove_cv_t<Right>> &&
+          is_same_v<remove_cv_t<Left>, remove_cv_t<Amount>>))
+inline constexpr auto lerp(
+    Left left, Right right, Amount amount) noexcept {
+    using result = conditional_t<
+        is_integral_v<Left> &&
+        is_integral_v<Right> &&
+        is_integral_v<Amount>,
+        double,
+        common_type_t<Left, Right, Amount>>;
+    return std::__lerp(
+        static_cast<result>(left),
+        static_cast<result>(right),
+        static_cast<result>(amount));
+}
+
+template<class Type>
+    requires is_integral_v<Type> && is_signed_v<Type>
+constexpr Type abs(Type value) noexcept {
+    return value < 0 ? static_cast<Type>(-value) : value;
+}
+
+template<class Type>
+    requires is_integral_v<Type>
+constexpr bool isinf(Type value) noexcept {
+    return __builtin_isinf(static_cast<double>(value));
+}
+
+inline constexpr bool isinf(float value) noexcept {
+    return __builtin_isinf(value);
+}
+
+inline constexpr bool isinf(double value) noexcept {
+    return __builtin_isinf(value);
+}
+
+inline constexpr bool isinf(long double value) noexcept {
+    return __builtin_isinf(value);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> || is_floating_point_v<Type>)
+constexpr bool isfinite(Type value) noexcept {
+    return __builtin_isfinite(value);
+}
+
+inline constexpr bool isfinite(float value) noexcept {
+    return __builtin_isfinite(value);
+}
+
+inline constexpr bool isfinite(double value) noexcept {
+    return __builtin_isfinite(value);
+}
+
+inline constexpr bool isfinite(long double value) noexcept {
+    return __builtin_isfinite(value);
+}
+
+template<class Type>
+    requires is_integral_v<Type>
+constexpr bool isnan(Type) noexcept {
+    return false;
+}
+
+inline constexpr bool isnan(float value) noexcept {
+    return __builtin_isnan(value);
+}
+
+inline constexpr bool isnan(double value) noexcept {
+    return __builtin_isnan(value);
+}
+
+inline constexpr bool isnan(long double value) noexcept {
+    return __builtin_isnan(value);
+}
+
+template<class Type>
+    requires (
+        !is_integral_v<Type> &&
+        !is_same_v<remove_cv_t<Type>, float> &&
+        !is_same_v<remove_cv_t<Type>, double> &&
+        !is_same_v<remove_cv_t<Type>, long double> &&
+        requires(Type value) {
+            __builtin_isnan(value);
+        })
+inline constexpr bool isnan(Type value) noexcept {
+    return __builtin_isnan(value);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> || is_floating_point_v<Type>)
+constexpr bool isnormal(Type value) noexcept {
+    return __builtin_isnormal(value);
+}
+
+template<class Left, class Right>
+    requires (
+        (is_integral_v<Left> || is_floating_point_v<Left>) &&
+        (is_integral_v<Right> || is_floating_point_v<Right>))
+constexpr bool isunordered(Left left, Right right) noexcept {
+    return __builtin_isunordered(left, right);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> || is_floating_point_v<Type>)
+constexpr int fpclassify(Type value) noexcept {
+    return __builtin_fpclassify(
+        FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO,
+        value);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> || is_floating_point_v<Type>)
+constexpr bool signbit(Type value) noexcept {
+    return __builtin_signbit(value);
+}
+_ADINKRA_END_NAMESPACE_STD
+
+using std::acos;
+using std::acosh;
+using std::asin;
+using std::asinh;
+using std::atan;
+using std::atan2;
+using std::atanh;
+using std::cbrt;
+using std::ceil;
+using std::fpclassify;
+using std::copysign;
+using std::cos;
+using std::cosh;
+using std::erf;
+using std::erfc;
+using std::exp;
+using std::exp2;
+using std::expm1;
+using std::fabs;
+using std::floor;
+using std::fmax;
+using std::fmin;
+using std::fmod;
+using std::hypot;
+using std::isfinite;
+using std::isinf;
+using std::isnan;
+using std::isnormal;
+using std::isunordered;
+using std::lgamma;
+using std::log;
+using std::log10;
+using std::log1p;
+using std::log2;
+using std::nearbyint;
+using std::nextafter;
+using std::nexttoward;
+using std::pow;
+using std::remainder;
+using std::rint;
+using std::round;
+using std::signbit;
+using std::sin;
+using std::sinh;
+using std::sqrt;
+using std::tan;
+using std::tanh;
+using std::tgamma;
+using std::trunc;
+
+#endif

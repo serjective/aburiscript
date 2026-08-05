@@ -1,0 +1,38 @@
+#ifndef ADINKRA_IOSTREAM
+#define ADINKRA_IOSTREAM
+
+#include <istream>
+#include <ostream>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits>
+class basic_iostream
+    : public basic_istream<Character, Traits>,
+      public basic_ostream<Character, Traits> {
+public:
+    template<class NativeStream>
+        requires (!is_base_of_v<
+            basic_streambuf<Character, Traits>,
+            remove_cv_t<NativeStream>>)
+    explicit basic_iostream(NativeStream* stream)
+        : basic_istream<Character, Traits>(stream),
+          basic_ostream<Character, Traits>(stream) {}
+
+    explicit basic_iostream(
+        basic_streambuf<Character, Traits>* buffer)
+        : basic_istream<Character, Traits>(buffer),
+          basic_ostream<Character, Traits>(buffer) {}
+
+    basic_iostream(basic_iostream&&) = default;
+    basic_iostream& operator=(basic_iostream&&) = default;
+};
+
+extern _ADINKRA_EXPORT istream cin;
+extern _ADINKRA_EXPORT ostream cout;
+extern _ADINKRA_EXPORT ostream cerr;
+extern _ADINKRA_EXPORT ostream clog;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

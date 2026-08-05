@@ -37,6 +37,10 @@ enum class PerfPhase {
     SourceRead,
     IncludeSearch,
     IncludeGuardScan,
+    CollectFinish,
+    Verify,
+    CirDump,
+    AirLowering,
     Count
 };
 
@@ -47,8 +51,11 @@ enum class PerfCounter {
     FileOpenAttempts,
     FileOpenFailures,
     MissingFileCacheHits,
+    DirEntryCacheBuilds,
+    DirEntryCacheSkips,
     FrameworkLookupAttempts,
     FrameworkLookupHits,
+    FrameworkProbesSkipped,
     IncludeRequests,
     IncludeSystemRequests,
     IncludeQuoteRequests,
@@ -194,6 +201,27 @@ enum class PerfCounter {
     OverloadViableCandidates,
     OverloadConversionCacheHits,
     OverloadConversionCacheMisses,
+    TypesInterned,
+    TypeInternHits,
+    NamesInterned,
+    NameInternHits,
+    TemplateInstantiationRequests,
+    InstantiationCacheHits,
+    InstantiationCacheMisses,
+    PartialSpecSelections,
+    MaxInstantiationDepth,
+    ConstraintSatisfactionRequests,
+    ConstraintSatisfactionCacheHits,
+    ConstraintSatisfactionCacheMisses,
+    MaxConstraintSatisfactionDepth,
+    TemplateFunctionCloneInstantiations,
+    TemplateFunctionCloneFallbacks,
+    TemplateFunctionTokenReplays,
+    TemplateMemberCloneInstantiations,
+    TemplateMemberCloneFallbacks,
+    TemplateMemberTokenReplays,
+    ConversionRankCalls,
+    ConstexprEvalCalls,
     Count
 };
 
@@ -214,6 +242,9 @@ public:
     void add_phase_duration(PerfPhase phase, std::chrono::steady_clock::duration duration);
     void add_counter(PerfCounter counter, uint64_t amount = 1);
     void set_counter_max(PerfCounter counter, uint64_t value);
+    uint64_t counter_value(PerfCounter counter) const {
+        return counters_[static_cast<size_t>(counter)];
+    }
 
     void record_header_request(std::string_view include_name);
     void record_resolved_header_request(std::string_view header_key);

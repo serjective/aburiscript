@@ -2,20 +2,18 @@
 #define ABURI_LEXER_H
 
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include <deque>
 #include "source_mgnt.h"
 #include "lang_options.h"
+#include <memory>
 #include <set>
 #include <unordered_set>
-// Note: We always assume the source document is in UTF-8
-
-
 
 enum class TokenType {
     UNKNOWN,
-    // Literals
     IDENTIFIER,
     INTEGER_CONST,
     UNSIGNED_INTEGER_CONST,
@@ -23,54 +21,58 @@ enum class TokenType {
     UNSIGNED_LONG_CONST,
     LONG_LONG_CONST,
     UNSIGNED_LONG_LONG_CONST,
+    BITINT_CONST,
+    UNSIGNED_BITINT_CONST,
     FLOAT_CONST,
     DOUBLE_CONST,
     LONG_DOUBLE_CONST,
     CHAR_LITERAL,
     STRING_LITERAL,
-    // Delimiters
-    LEFT_PAREN, // (
-    RIGHT_PAREN, // )
-    LEFT_BRACE,     // {
-    RIGHT_BRACE,    // }
-    LEFT_BRACKET,   // [
-    RIGHT_BRACKET,  // ]
-    SEMICOLON, // ;
-    // Arithmetic/Logical
-    NEGATE, // -
-    BITWISE_NOT, // ~
-    LOGICAL_NOT, // !
-    INCREMENT, // ++
-    DECREMENT, // --
-    PLUS, // +
-    MULTIPLY, // *
-    DIVIDE, // /
-    MODULO, // %
-    BITWISE_AND, // &
-    BITWISE_OR, // |
-    BITWISE_XOR, // ^
-    LOGICAL_AND, // &&
-    LOGICAL_OR, // ||
-    LEFT_SHIFT, // <<
-    RIGHT_SHIFT, // >>
-    QUESTION, // ?
-    COLON, // :
-    COMMA, // ,
-    DOT, // .
-    DOT_STAR, // .*
-    ELLIPSIS, // ...
-    ARROW, // ->
-    ARROW_STAR, // ->*
-    SCOPE_RESOLUTION, // ::
-    POUND, // #
-    BACKSLASH, // \
-    // Type specifiers
+    LEFT_PAREN,
+    RIGHT_PAREN,
+    LEFT_BRACE,
+    RIGHT_BRACE,
+    LEFT_BRACKET,
+    RIGHT_BRACKET,
+    AT,
+    SEMICOLON,
+    NEGATE,
+    BITWISE_NOT,
+    LOGICAL_NOT,
+    INCREMENT,
+    DECREMENT,
+    PLUS,
+    MULTIPLY,
+    DIVIDE,
+    MODULO,
+    BITWISE_AND,
+    BITWISE_OR,
+    BITWISE_XOR,
+    LOGICAL_AND,
+    LOGICAL_OR,
+    LEFT_SHIFT,
+    RIGHT_SHIFT,
+    QUESTION,
+    COLON,
+    COMMA,
+    DOT,
+    DOT_STAR,
+    ELLIPSIS,
+    ARROW,
+    ARROW_STAR,
+    SCOPE_RESOLUTION,
+    REFLECT,
+    SPLICE_OPEN,
+    SPLICE_CLOSE,
+    POUND,
+    BACKSLASH,
     INT,
     LONG,
     SIGNED,
     UNSIGNED,
     BOOL,
     WCHAR_T,
+    CHAR8_T,
     CHAR16_T,
     CHAR32_T,
     FLOAT,
@@ -81,18 +83,15 @@ enum class TokenType {
     STRUCT,
     UNION,
     ENUM,
-    // Type Qualifiers
     CONST,
     VOLATILE,
     RESTRICT,
-    ATOMIC, // _Atomic
-    // Storage Class Specifiers
+    ATOMIC,
     STATIC,
     EXTERN,
     AUTO,
     REGISTER,
     TYPEDEF,
-    // Control flow keywords
     RETURN,
     IF,
     ELSE,
@@ -100,21 +99,18 @@ enum class TokenType {
     CASE,
     DEFAULT,
     GOTO,
-    // Loops
     DO,
     WHILE,
     CONTINUE,
     BREAK,
     FOR,
     INLINE,
-    // C11 keywords
-    NORETURN_KW,     // _Noreturn
-    STATIC_ASSERT,   // _Static_assert
-    ALIGNOF,         // _Alignof
-    ALIGNAS,         // _Alignas
-    THREAD_LOCAL,    // _Thread_local
-    GENERIC,         // _Generic
-    // C++ keywords
+    NORETURN_KW,
+    STATIC_ASSERT,
+    ALIGNOF,
+    ALIGNAS,
+    THREAD_LOCAL,
+    GENERIC,
     CLASS,
     USING,
     NAMESPACE,
@@ -132,6 +128,7 @@ enum class TokenType {
     FALSE_KW,
     NULLPTR_KW,
     DECLTYPE_KW,
+    TYPEID_KW,
     PUBLIC_KW,
     PRIVATE_KW,
     PROTECTED_KW,
@@ -141,63 +138,69 @@ enum class TokenType {
     MUTABLE_KW,
     CONSTEXPR_KW,
     CONSTEVAL_KW,
+    CONSTINIT_KW,
     CONCEPT_KW,
     REQUIRES_KW,
-    // GCC extensions
-    EXTENSION_KW,    // __extension__
-    TYPEOF_KW,       // typeof, __typeof__, __typeof
-    LABEL_KW,        // __label__
-    INT128,          // __int128, __int128_t
-    UINT128_T,       // __uint128_t
-    AUTO_TYPE,       // __auto_type
-    COMPLEX,         // _Complex, __complex__, __complex
-    FLOAT16,         // _Float16, __fp16
-    REAL_PART,       // __real__, __real
-    IMAG_PART,       // __imag__, __imag
-    IMAG_FLOAT_CONST,  // 1.0fi, 1.0fj
-    IMAG_DOUBLE_CONST, // 1.0i, 1.0j
-    IMAG_LONG_DOUBLE_CONST, // 1.0li, 1.0lj
-    IMAG_INTEGER_CONST,             // 1i, 1j
-    IMAG_UNSIGNED_INTEGER_CONST,    // 1ui
-    IMAG_LONG_CONST,                // 1li
-    IMAG_UNSIGNED_LONG_CONST,       // 1uli
-    IMAG_LONG_LONG_CONST,           // 1lli
-    IMAG_UNSIGNED_LONG_LONG_CONST,  // 1ulli
-    NULLABILITY_QUALIFIER, // _Nonnull, _Nullable, _Null_unspecified, _Nullable_result
-    // Operators
+    CO_AWAIT_KW,
+    CO_YIELD_KW,
+    CO_RETURN_KW,
+    EXTENSION_KW,
+    TYPEOF_KW,
+    TYPEOF_UNQUAL_KW,
+    LABEL_KW,
+    INT128,
+    UINT128_T,
+    BITINT_KW,
+    AUTO_TYPE,
+    COMPLEX,
+    FLOAT16,
+    REAL_PART,
+    IMAG_PART,
+    IMAG_FLOAT_CONST,
+    IMAG_DOUBLE_CONST,
+    IMAG_LONG_DOUBLE_CONST,
+    IMAG_INTEGER_CONST,
+    IMAG_UNSIGNED_INTEGER_CONST,
+    IMAG_LONG_CONST,
+    IMAG_UNSIGNED_LONG_CONST,
+    IMAG_LONG_LONG_CONST,
+    IMAG_UNSIGNED_LONG_LONG_CONST,
+    NULLABILITY_QUALIFIER,
     SIZEOF,
-    // Comparision
-    LESS_THAN, // <
-    LESS_EQUAL_THAN, // <=
-    THREE_WAY_COMPARE, // <=>
-    GREATER_THAN, // >
-    GREATER_EQUAL_THAN, // >=
-    EQUAL_TO, // ==
-    NOT_EQUAL, // !=
-    // Assignment
-    ASSIGN, // =
-    ASSIGN_MUL, // *=
-    ASSIGN_DIV, // /=
-    ASSIGN_MOD, // %=
-    ASSIGN_ADD, // +=
-    ASSIGN_SUB, // -=
-    ASSIGN_LSHIFT, // <<=
-    ASSIGN_RSHIFT, // >>=
-    ASSIGN_AND, // &=
-    ASSIGN_XOR, // ^=
-    ASSIGN_OR, // |=
-    // Attributes
-    ATTRIBUTE_KW, // __attribute__
-    // Inline assembly
-    ASM_KW, // asm, __asm__, __asm
-    // Special
-    PP_NUMBER, // preprocessing number (e.g. 2A0) - valid only during preprocessing
-    Newline, // to be used later
-    Whitespace, // " ", "\t", ...
-    Eof, // End of file
+    LESS_THAN,
+    LESS_EQUAL_THAN,
+    THREE_WAY_COMPARE,
+    GREATER_THAN,
+    GREATER_EQUAL_THAN,
+    EQUAL_TO,
+    NOT_EQUAL,
+    ASSIGN,
+    ASSIGN_MUL,
+    ASSIGN_DIV,
+    ASSIGN_MOD,
+    ASSIGN_ADD,
+    ASSIGN_SUB,
+    ASSIGN_LSHIFT,
+    ASSIGN_RSHIFT,
+    ASSIGN_AND,
+    ASSIGN_XOR,
+    ASSIGN_OR,
+    ATTRIBUTE_KW,
+    ASM_KW,
+    MODULE_KEYWORD,
+    IMPORT_KEYWORD,
+    EXPORT_KEYWORD,
+    PP_NUMBER,
+    Newline,
+    Whitespace,
+    Eof,
+    LITERAL_SUFFIX,
 
 };
 std::string token_type_to_string(TokenType type);
+struct LangOptions;
+
+TokenType aburi_lookup_keyword(std::string_view ident, const LangOptions& lang_opts);
 
 enum class LiteralPrefix {
     None,
@@ -206,37 +209,70 @@ enum class LiteralPrefix {
     U,
     u
 };
-using HideSetType = std::shared_ptr<std::unordered_set<std::string>>;
+
+using HideSetId = uint32_t;
+
+class IdentTable {
+public:
+    struct Info {
+        std::string_view spelling;
+        TokenType keyword;
+        bool maybe_macro = false;
+    };
+
+    uint32_t lookup(std::string_view name) const {
+        auto it = map_.find(name);
+        return it == map_.end() ? 0 : it->second;
+    }
+    template <typename KeywordFn>
+    uint32_t intern(std::string_view stable_name, KeywordFn&& classify) {
+        auto [it, inserted] =
+            map_.emplace(stable_name, static_cast<uint32_t>(infos_.size() + 1));
+        if (inserted) {
+            infos_.push_back(Info{stable_name, classify(stable_name), false});
+        }
+        return it->second;
+    }
+    Info& info(uint32_t id) { return infos_[id - 1]; }
+    const Info& info(uint32_t id) const { return infos_[id - 1]; }
+
+private:
+    std::unordered_map<std::string_view, uint32_t> map_;
+    std::vector<Info> infos_;
+};
+
 struct Token {
     TokenType type;
-    std::string value;
+    HideSetId hide_set = 0;
+    std::string_view value;
     SrcLoc loc;
     LiteralPrefix literal_prefix;
     struct {
         uint32_t has_leading_space: 1;
         uint32_t start_of_line: 1;
-        uint32_t part_of_macro_define: 1; // we can't call preproc direcrives from tokens derived from base
+        uint32_t part_of_macro_define: 1;
         uint32_t padding: 29;
     } flags;
-    HideSetType hide_set; // nullptr = empty hideset. We should never have an initalized set that is empty
-    Token(): type(TokenType::UNKNOWN), value(""), loc(0), literal_prefix(LiteralPrefix::None), hide_set(nullptr) {};
-    Token(TokenType t, const std::string& v, uint32_t global_offset)
-        : type(t), value(v), loc(global_offset), literal_prefix(LiteralPrefix::None),
-        flags({0, 0, 0}), hide_set(nullptr) {}
-    Token(TokenType t, const std::string& v, SrcLoc srcloc)
-    : type(t), value(v), loc(srcloc), literal_prefix(LiteralPrefix::None),
-    flags({0, 0, 0}), hide_set(nullptr) {}
+    uint32_t ident = 0;
+    Token(): type(TokenType::UNKNOWN), hide_set(0), value(), loc(0), literal_prefix(LiteralPrefix::None), flags({0, 0, 0}), ident(0) {};
+    Token(TokenType t, std::string_view v, uint32_t global_offset)
+        : type(t), hide_set(0), value(v), loc(global_offset), literal_prefix(LiteralPrefix::None),
+        flags({0, 0, 0}), ident(0) {}
+    Token(TokenType t, std::string_view v, SrcLoc srcloc)
+    : type(t), hide_set(0), value(v), loc(srcloc), literal_prefix(LiteralPrefix::None),
+    flags({0, 0, 0}), ident(0) {}
 
     bool isIdentifierLike() const {
         switch (type) {
             case TokenType::IDENTIFIER:
-            // Type specifiers
+
             case TokenType::INT:
             case TokenType::LONG:
             case TokenType::SIGNED:
             case TokenType::UNSIGNED:
             case TokenType::BOOL:
             case TokenType::WCHAR_T:
+            case TokenType::CHAR8_T:
             case TokenType::CHAR16_T:
             case TokenType::CHAR32_T:
             case TokenType::FLOAT:
@@ -247,18 +283,18 @@ struct Token {
             case TokenType::STRUCT:
             case TokenType::UNION:
             case TokenType::ENUM:
-            // Type qualifiers
+
             case TokenType::CONST:
             case TokenType::VOLATILE:
             case TokenType::RESTRICT:
             case TokenType::ATOMIC:
-            // Storage class specifiers
+
             case TokenType::STATIC:
             case TokenType::EXTERN:
             case TokenType::AUTO:
             case TokenType::REGISTER:
             case TokenType::TYPEDEF:
-            // Control flow keywords
+
             case TokenType::RETURN:
             case TokenType::IF:
             case TokenType::ELSE:
@@ -266,21 +302,21 @@ struct Token {
             case TokenType::CASE:
             case TokenType::DEFAULT:
             case TokenType::GOTO:
-            // Loops
+
             case TokenType::DO:
             case TokenType::WHILE:
             case TokenType::CONTINUE:
             case TokenType::BREAK:
             case TokenType::FOR:
             case TokenType::INLINE:
-            // C11 keywords
+
             case TokenType::NORETURN_KW:
             case TokenType::STATIC_ASSERT:
             case TokenType::ALIGNOF:
             case TokenType::ALIGNAS:
             case TokenType::THREAD_LOCAL:
             case TokenType::GENERIC:
-            // C++ keywords
+
             case TokenType::CLASS:
             case TokenType::USING:
             case TokenType::NAMESPACE:
@@ -307,21 +343,26 @@ struct Token {
             case TokenType::MUTABLE_KW:
             case TokenType::CONSTEXPR_KW:
             case TokenType::CONSTEVAL_KW:
+            case TokenType::CONSTINIT_KW:
             case TokenType::CONCEPT_KW:
             case TokenType::REQUIRES_KW:
-            // GCC extensions
+            case TokenType::CO_AWAIT_KW:
+            case TokenType::CO_YIELD_KW:
+            case TokenType::CO_RETURN_KW:
+
             case TokenType::EXTENSION_KW:
             case TokenType::TYPEOF_KW:
+            case TokenType::TYPEOF_UNQUAL_KW:
             case TokenType::INT128:
             case TokenType::UINT128_T:
             case TokenType::AUTO_TYPE:
             case TokenType::FLOAT16:
-            // Operators that are keywords
+
             case TokenType::SIZEOF:
-            // Complex number keywords
+
             case TokenType::REAL_PART:
             case TokenType::IMAG_PART:
-            // Attributes/asm keywords
+
             case TokenType::ATTRIBUTE_KW:
             case TokenType::ASM_KW:
             case TokenType::NULLABILITY_QUALIFIER:
@@ -331,6 +372,9 @@ struct Token {
         }
     }
 };
+
+static_assert(std::is_trivially_copyable_v<Token>);
+static_assert(sizeof(Token) <= 40);
 struct TokenMgnt {
     struct SplitTokenState {
         std::vector<Token> tokens;
@@ -374,22 +418,41 @@ struct TokenMgnt {
 };
 struct Lexer {
     std::string_view source;
+    std::string_view phase2_original_source;
+    const std::vector<MappingStep>* phase2_mapping = nullptr;
     std::optional<char> prev_whitespace;
-    // Pending whitespace emitted from comments that should apply to the next real token.
     std::optional<char> pending_leading_space;
     size_t position;
     bool error_happened;
     bool pending_start_of_line;
     bool enable_new_line_token;
-    // todo: is this whitespace tihng needed?
     bool enable_whitespace_token;
     bool emit_comment_whitespace;
     bool pp_number_mode;
     SrcLoc base_loc;
     SourceManager* diag_sm;
+    SpellingArena* spelling_arena = nullptr;
+    IdentTable* ident_table = nullptr;
+    std::optional<Token> pending_literal_suffix;
+    std::unique_ptr<SpellingArena> owned_arena_;
+    SpellingArena& arena() {
+        if (spelling_arena) {
+            return *spelling_arena;
+        }
+        if (diag_sm) {
+            return diag_sm->spellings;
+        }
+        if (!owned_arena_) {
+            owned_arena_ = std::make_unique<SpellingArena>();
+        }
+        return *owned_arena_;
+    }
     LangOptions lang_opts;
     explicit Lexer(const std::string_view source, SrcLoc baseLoc, SourceManager* diag_sm = nullptr,
         LangOptions options = LangOptions());
+    void reset(std::string_view new_source, SrcLoc new_base);
+    void set_phase2_source(std::string_view original_source,
+                           const std::vector<MappingStep>* mapping);
 
     char current_char() const;
     char prev_char() const;
@@ -431,8 +494,10 @@ struct Lexer {
     std::optional<Token> read_number();
     std::optional<Token> read_pp_number();
     std::optional<Token> read_identifier();
+    void attach_user_defined_literal_suffix(Token& token);
     std::optional<Token> read_char_literal(SrcLoc start_loc, LiteralPrefix prefix);
     std::optional<Token> read_string_literal(SrcLoc start_loc, LiteralPrefix prefix);
+    std::optional<Token> read_raw_string_literal(SrcLoc start_loc, LiteralPrefix prefix);
 
     bool is_exhausted();
 
@@ -449,14 +514,17 @@ struct Lexer {
         size_t position;
         std::optional<char> pending_leading_space;
         bool pending_start_of_line;
+        std::optional<Token> pending_literal_suffix;
     };
     LexerState get_state() const {
-        return {position, pending_leading_space, pending_start_of_line};
+        return {position, pending_leading_space, pending_start_of_line,
+                pending_literal_suffix};
     }
     void set_state(const LexerState& st) {
         position = st.position;
         pending_leading_space = st.pending_leading_space;
         pending_start_of_line = st.pending_start_of_line;
+        pending_literal_suffix = st.pending_literal_suffix;
     }
 };
 

@@ -6,8 +6,12 @@
 #include <string_view>
 #include <vector>
 
-#include "bitfield_layout.h"
 #include "target_info.h"
+
+enum class BitfieldABI {
+    ITANIUM,
+    MSVC,
+};
 
 enum class CxxAbiKind {
     Itanium,
@@ -25,11 +29,6 @@ enum class DataModelKind {
     LLP64,
     ILP32,
     Unknown,
-};
-
-enum class EndiannessKind {
-    Little,
-    Big,
 };
 
 enum class EhRuntimeKind {
@@ -53,34 +52,22 @@ struct EhRuntimeHooks {
 };
 
 struct EhRuntimeLinkProfile {
-    // Candidate C++ linker drivers for this runtime profile, in priority order.
     std::vector<std::string> cxx_linker_candidates;
-    // Extra linker args needed to bias runtime selection for this profile.
     std::vector<std::string> runtime_link_args;
-    // If true, missing candidates is a hard error instead of fallback.
     bool require_runtime_specific_driver = false;
 };
 
 struct AbiPolicy {
-    // C++ object model ABI family used for language-level lowering decisions.
     CxxAbiKind cxx_abi = CxxAbiKind::Itanium;
-    // Compatibility/version selector for ABI-specific behavior changes.
     int cxx_abi_version = 0;
-    // Symbol naming scheme to use during linkage name emission.
     ManglingKind mangling = ManglingKind::C;
-    // Bitfield packing/layout rules for record field placement.
     BitfieldABI bitfield_abi = BitfieldABI::ITANIUM;
-    // Signedness rule for plain 'int' bitfields.
     bool plain_int_bitfield_signed = true;
-    // Target byte order used by ABI-sensitive layout/details.
     EndiannessKind endianness = EndiannessKind::Little;
-    // Integer/pointer size model (LP64/LLP64/ILP32).
     DataModelKind data_model = DataModelKind::Unknown;
-    // Whether MS-style per-record layout overrides are honored.
     bool allow_ms_struct_layout_overrides = true;
-    // Exception runtime profile for ABI/lowering/linker integration.
+    bool can_key_function_be_inline = true;
     EhRuntimeKind eh_runtime = EhRuntimeKind::LLVM;
-    // Runtime hook symbol names used by EH lowering/codegen.
     EhRuntimeHooks eh_runtime_hooks;
 };
 

@@ -1,0 +1,477 @@
+#ifndef ADINKRA_UTILITY
+#define ADINKRA_UTILITY
+
+#include <__adinkra/config>
+#include <__adinkra/tuple_protocol>
+#include <cstddef>
+#include <initializer_list>
+#include <limits>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct monostate {};
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr remove_reference_t<Type>&& move(Type&& value) noexcept {
+    return static_cast<remove_reference_t<Type>&&>(value);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr
+conditional_t<!is_nothrow_move_constructible_v<Type> &&
+                  is_copy_constructible_v<Type>,
+              const Type&, Type&&>
+move_if_noexcept(Type& value) noexcept {
+    return std::move(value);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type&&
+forward(remove_reference_t<Type>& value) noexcept {
+    return static_cast<Type&&>(value);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type&&
+forward(remove_reference_t<Type>&& value) noexcept {
+    static_assert(!is_lvalue_reference_v<Type>);
+    return static_cast<Type&&>(value);
+}
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr Type* addressof(Type& value) noexcept {
+    return __builtin_addressof(value);
+}
+
+template<class Type>
+const Type* addressof(const Type&&) = delete;
+
+template<class Type>
+_ADINKRA_NODISCARD constexpr const Type& as_const(Type& value) noexcept {
+    return value;
+}
+
+template<class Type>
+void as_const(const Type&&) = delete;
+
+template<class Enum>
+    requires is_enum_v<Enum>
+_ADINKRA_NODISCARD constexpr underlying_type_t<Enum>
+to_underlying(Enum value) noexcept {
+    return static_cast<underlying_type_t<Enum>>(value);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool cmp_equal(
+    Left left, Right right) noexcept {
+    static_assert(is_integral_v<Left> && is_integral_v<Right>);
+    if constexpr (is_signed_v<Left> == is_signed_v<Right>) {
+        return left == right;
+    } else if constexpr (is_signed_v<Left>) {
+        return left >= 0 &&
+            static_cast<make_unsigned_t<Left>>(left) == right;
+    } else {
+        return right >= 0 &&
+            left == static_cast<make_unsigned_t<Right>>(right);
+    }
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool cmp_not_equal(
+    Left left, Right right) noexcept {
+    return !std::cmp_equal(left, right);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool cmp_less(
+    Left left, Right right) noexcept {
+    static_assert(is_integral_v<Left> && is_integral_v<Right>);
+    if constexpr (is_signed_v<Left> == is_signed_v<Right>) {
+        return left < right;
+    } else if constexpr (is_signed_v<Left>) {
+        return left < 0 ||
+            static_cast<make_unsigned_t<Left>>(left) < right;
+    } else {
+        return right >= 0 &&
+            left < static_cast<make_unsigned_t<Right>>(right);
+    }
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool cmp_greater(
+    Left left, Right right) noexcept {
+    return std::cmp_less(right, left);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool cmp_less_equal(
+    Left left, Right right) noexcept {
+    return !std::cmp_less(right, left);
+}
+
+template<class Left, class Right>
+_ADINKRA_NODISCARD constexpr bool cmp_greater_equal(
+    Left left, Right right) noexcept {
+    return !std::cmp_less(left, right);
+}
+
+template<class Target, class Source>
+_ADINKRA_NODISCARD constexpr bool in_range(Source value) noexcept {
+    static_assert(is_integral_v<Target> && is_integral_v<Source>);
+    return std::cmp_greater_equal(
+               value, numeric_limits<Target>::min()) &&
+           std::cmp_less_equal(
+               value, numeric_limits<Target>::max());
+}
+
+template<class Type>
+constexpr void swap(Type& left, Type& right)
+    noexcept(is_nothrow_move_constructible_v<Type> &&
+             is_nothrow_move_assignable_v<Type>) {
+    Type temporary = std::move(left);
+    left = std::move(right);
+    right = std::move(temporary);
+}
+
+template<class Type, size_t Size>
+constexpr void swap(Type (&left)[Size], Type (&right)[Size])
+    noexcept(noexcept(swap(left[0], right[0]))) {
+    for (size_t index = 0; index < Size; ++index) {
+        swap(left[index], right[index]);
+    }
+}
+
+template<class Type, class Other = Type>
+constexpr Type exchange(Type& value, Other&& replacement)
+    noexcept(is_nothrow_move_constructible_v<Type> &&
+             is_nothrow_assignable_v<Type&, Other>) {
+    Type previous = std::move(value);
+    value = std::forward<Other>(replacement);
+    return previous;
+}
+
+template<class Integer, Integer... Values>
+struct integer_sequence {
+    using value_type = Integer;
+
+    _ADINKRA_NODISCARD static constexpr size_t size() noexcept {
+        return sizeof...(Values);
+    }
+};
+
+template<size_t... Values>
+using index_sequence = integer_sequence<size_t, Values...>;
+
+template<class Integer, Integer Size>
+using make_integer_sequence = __make_integer_seq<integer_sequence, Integer, Size>;
+
+template<size_t Size>
+using make_index_sequence = make_integer_sequence<size_t, Size>;
+
+template<class... Types>
+using index_sequence_for = make_index_sequence<sizeof...(Types)>;
+
+struct in_place_t {
+    explicit in_place_t() = default;
+};
+
+inline constexpr in_place_t in_place{};
+
+template<class Type>
+struct in_place_type_t {
+    explicit in_place_type_t() = default;
+};
+
+template<class Type>
+inline constexpr in_place_type_t<Type> in_place_type{};
+
+template<size_t Index>
+struct in_place_index_t {
+    explicit in_place_index_t() = default;
+};
+
+template<size_t Index>
+inline constexpr in_place_index_t<Index> in_place_index{};
+
+struct allocator_arg_t {
+    explicit allocator_arg_t() = default;
+};
+
+inline constexpr allocator_arg_t allocator_arg{};
+
+struct piecewise_construct_t {
+    explicit piecewise_construct_t() = default;
+};
+
+inline constexpr piecewise_construct_t piecewise_construct{};
+
+template<class... Types>
+class tuple;
+
+template<class First, class Second>
+struct pair {
+    using first_type = First;
+    using second_type = Second;
+
+    First first;
+    Second second;
+
+    constexpr pair()
+        requires is_default_constructible_v<First> &&
+                 is_default_constructible_v<Second>
+        : first(), second() {}
+
+    constexpr explicit(
+        !is_convertible_v<const First&, First> ||
+        !is_convertible_v<const Second&, Second>)
+    pair(const First& first_value, const Second& second_value)
+        : first(first_value), second(second_value) {}
+
+    template<class OtherFirst, class OtherSecond>
+        requires (
+            is_constructible_v<First, OtherFirst&&> &&
+            is_constructible_v<Second, OtherSecond&&>)
+    constexpr explicit(
+        !is_convertible_v<OtherFirst&&, First> ||
+        !is_convertible_v<OtherSecond&&, Second>)
+    pair(OtherFirst&& first_value, OtherSecond&& second_value)
+        : first(std::forward<OtherFirst>(first_value)),
+          second(std::forward<OtherSecond>(second_value)) {}
+
+    template<class OtherFirst, class OtherSecond>
+        requires (
+            is_constructible_v<First, const OtherFirst&> &&
+            is_constructible_v<Second, const OtherSecond&>)
+    constexpr explicit(
+        !is_convertible_v<const OtherFirst&, First> ||
+        !is_convertible_v<const OtherSecond&, Second>)
+    pair(const pair<OtherFirst, OtherSecond>& other)
+        : first(other.first), second(other.second) {}
+
+    template<class OtherFirst, class OtherSecond>
+        requires (
+            is_constructible_v<First, OtherFirst&&> &&
+            is_constructible_v<Second, OtherSecond&&>)
+    constexpr explicit(
+        !is_convertible_v<OtherFirst&&, First> ||
+        !is_convertible_v<OtherSecond&&, Second>)
+    pair(pair<OtherFirst, OtherSecond>&& other)
+        : first(std::forward<OtherFirst>(other.first)),
+          second(std::forward<OtherSecond>(other.second)) {}
+
+    template<class... FirstArguments, class... SecondArguments>
+    constexpr pair(
+        piecewise_construct_t,
+        tuple<FirstArguments...> first_arguments,
+        tuple<SecondArguments...> second_arguments);
+
+    constexpr pair(const pair&) = default;
+    constexpr pair(pair&&) = default;
+
+    constexpr pair& operator=(const pair& other)
+        requires is_assignable_v<First&, const First&> &&
+                 is_assignable_v<Second&, const Second&> {
+        first = other.first;
+        second = other.second;
+        return *this;
+    }
+
+    constexpr pair& operator=(pair&& other)
+        requires is_assignable_v<First&, First&&> &&
+                 is_assignable_v<Second&, Second&&> {
+        first = std::forward<First>(other.first);
+        second = std::forward<Second>(other.second);
+        return *this;
+    }
+
+    template<class OtherFirst, class OtherSecond>
+    constexpr pair& operator=(
+        const pair<OtherFirst, OtherSecond>& other)
+        requires is_assignable_v<First&, const OtherFirst&> &&
+                 is_assignable_v<Second&, const OtherSecond&> {
+        first = other.first;
+        second = other.second;
+        return *this;
+    }
+
+    template<class OtherFirst, class OtherSecond>
+    constexpr pair& operator=(
+        pair<OtherFirst, OtherSecond>&& other)
+        requires is_assignable_v<First&, OtherFirst&&> &&
+                 is_assignable_v<Second&, OtherSecond&&> {
+        first = std::forward<OtherFirst>(other.first);
+        second = std::forward<OtherSecond>(other.second);
+        return *this;
+    }
+
+    constexpr void swap(pair& other)
+        noexcept(noexcept(std::swap(first, other.first)) &&
+                 noexcept(std::swap(second, other.second))) {
+        std::swap(first, other.first);
+        std::swap(second, other.second);
+    }
+
+private:
+    template<class... FirstArguments, class... SecondArguments,
+             size_t... FirstIndexes, size_t... SecondIndexes>
+    constexpr pair(
+        tuple<FirstArguments...>&& first_arguments,
+        tuple<SecondArguments...>&& second_arguments,
+        index_sequence<FirstIndexes...>,
+        index_sequence<SecondIndexes...>);
+};
+
+template<class First, class Second>
+pair(First, Second) -> pair<First, Second>;
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr pair<decay_t<First>, decay_t<Second>>
+make_pair(First&& first, Second&& second) {
+    return {std::forward<First>(first), std::forward<Second>(second)};
+}
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr bool
+operator==(const pair<First, Second>& left,
+           const pair<First, Second>& right) {
+    return left.first == right.first && left.second == right.second;
+}
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr bool
+operator<(const pair<First, Second>& left,
+          const pair<First, Second>& right) {
+    return left.first < right.first ||
+           (!(right.first < left.first) &&
+            left.second < right.second);
+}
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr bool
+operator>(const pair<First, Second>& left,
+          const pair<First, Second>& right) {
+    return right < left;
+}
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr bool
+operator<=(const pair<First, Second>& left,
+           const pair<First, Second>& right) {
+    return !(right < left);
+}
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr bool
+operator>=(const pair<First, Second>& left,
+           const pair<First, Second>& right) {
+    return !(left < right);
+}
+
+template<class First, class Second>
+_ADINKRA_NODISCARD constexpr auto
+operator<=>(const pair<First, Second>& left,
+            const pair<First, Second>& right)
+    -> conditional_t<
+        is_convertible_v<decltype(left.first <=> right.first),
+                         decltype(left.second <=> right.second)>,
+        decltype(left.second <=> right.second),
+        decltype(left.first <=> right.first)> {
+    using Comparison = conditional_t<
+        is_convertible_v<decltype(left.first <=> right.first),
+                         decltype(left.second <=> right.second)>,
+        decltype(left.second <=> right.second),
+        decltype(left.first <=> right.first)>;
+    Comparison comparison = left.first <=> right.first;
+    if (comparison != 0) {
+        return comparison;
+    }
+    return left.second <=> right.second;
+}
+
+template<class First, class Second>
+constexpr void swap(pair<First, Second>& left, pair<First, Second>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<size_t Index, class First, class Second>
+constexpr conditional_t<Index == 0, First, Second>&
+get(pair<First, Second>& value) noexcept {
+    static_assert(Index < 2);
+    if constexpr (Index == 0) {
+        return value.first;
+    } else {
+        return value.second;
+    }
+}
+
+template<size_t Index, class First, class Second>
+constexpr const conditional_t<Index == 0, First, Second>&
+get(const pair<First, Second>& value) noexcept {
+    static_assert(Index < 2);
+    if constexpr (Index == 0) {
+        return value.first;
+    } else {
+        return value.second;
+    }
+}
+
+template<size_t Index, class First, class Second>
+constexpr conditional_t<Index == 0, First, Second>&&
+get(pair<First, Second>&& value) noexcept {
+    using Result = conditional_t<Index == 0, First, Second>&&;
+    return static_cast<Result>(get<Index>(value));
+}
+
+template<size_t Index, class First, class Second>
+constexpr const conditional_t<Index == 0, First, Second>&&
+get(const pair<First, Second>&& value) noexcept {
+    using Result =
+        const conditional_t<Index == 0, First, Second>&&;
+    return static_cast<Result>(get<Index>(value));
+}
+
+template<class First, class Second>
+constexpr First& get(pair<First, Second>& value) noexcept {
+    return value.first;
+}
+
+template<class First, class Second>
+constexpr const First& get(const pair<First, Second>& value) noexcept {
+    return value.first;
+}
+
+template<class First, class Second>
+constexpr First&& get(pair<First, Second>&& value) noexcept {
+    return static_cast<First&&>(value.first);
+}
+
+template<class First, class Second>
+constexpr const First&& get(const pair<First, Second>&& value) noexcept {
+    return static_cast<const First&&>(value.first);
+}
+
+template<class Second, class First>
+constexpr Second& get(pair<First, Second>& value) noexcept {
+    return value.second;
+}
+
+template<class Second, class First>
+constexpr const Second& get(const pair<First, Second>& value) noexcept {
+    return value.second;
+}
+
+template<class Second, class First>
+constexpr Second&& get(pair<First, Second>&& value) noexcept {
+    return static_cast<Second&&>(value.second);
+}
+
+template<class Second, class First>
+constexpr const Second&& get(const pair<First, Second>&& value) noexcept {
+    return static_cast<const Second&&>(value.second);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

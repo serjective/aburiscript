@@ -10,7 +10,8 @@ enum class ConstEvalModeKind {
     BuiltinQuery,
     CppCoreConstantExpression,
     CppNonTypeTemplateArgument,
-    CppImmediateFunction
+    CppImmediateFunction,
+    CppSpliceOperand
 };
 
 struct ConstEvalMode {
@@ -47,6 +48,10 @@ struct ConstEvalMode {
 
     static ConstEvalMode cpp_immediate_function() {
         return {ConstEvalModeKind::CppImmediateFunction, false};
+    }
+
+    static ConstEvalMode cpp_splice_operand() {
+        return {ConstEvalModeKind::CppSpliceOperand, false};
     }
 };
 

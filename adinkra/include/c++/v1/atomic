@@ -1,0 +1,952 @@
+#ifndef ADINKRA_ATOMIC
+#define ADINKRA_ATOMIC
+
+#include <__adinkra/config>
+#include <__adinkra/memory_order>
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+#ifdef atomic_store
+#undef atomic_store
+#endif
+#ifdef atomic_store_explicit
+#undef atomic_store_explicit
+#endif
+#ifdef atomic_load
+#undef atomic_load
+#endif
+#ifdef atomic_load_explicit
+#undef atomic_load_explicit
+#endif
+#ifdef atomic_exchange
+#undef atomic_exchange
+#endif
+#ifdef atomic_exchange_explicit
+#undef atomic_exchange_explicit
+#endif
+#ifdef atomic_compare_exchange_weak
+#undef atomic_compare_exchange_weak
+#endif
+#ifdef atomic_compare_exchange_weak_explicit
+#undef atomic_compare_exchange_weak_explicit
+#endif
+#ifdef atomic_compare_exchange_strong
+#undef atomic_compare_exchange_strong
+#endif
+#ifdef atomic_compare_exchange_strong_explicit
+#undef atomic_compare_exchange_strong_explicit
+#endif
+#ifdef atomic_fetch_add
+#undef atomic_fetch_add
+#endif
+#ifdef atomic_fetch_add_explicit
+#undef atomic_fetch_add_explicit
+#endif
+#ifdef atomic_fetch_sub
+#undef atomic_fetch_sub
+#endif
+#ifdef atomic_fetch_sub_explicit
+#undef atomic_fetch_sub_explicit
+#endif
+#ifdef atomic_fetch_and
+#undef atomic_fetch_and
+#endif
+#ifdef atomic_fetch_and_explicit
+#undef atomic_fetch_and_explicit
+#endif
+#ifdef atomic_fetch_or
+#undef atomic_fetch_or
+#endif
+#ifdef atomic_fetch_or_explicit
+#undef atomic_fetch_or_explicit
+#endif
+#ifdef atomic_fetch_xor
+#undef atomic_fetch_xor
+#endif
+#ifdef atomic_fetch_xor_explicit
+#undef atomic_fetch_xor_explicit
+#endif
+#ifdef atomic_thread_fence
+#undef atomic_thread_fence
+#endif
+#ifdef atomic_signal_fence
+#undef atomic_signal_fence
+#endif
+
+#ifndef ATOMIC_BOOL_LOCK_FREE
+#define ATOMIC_BOOL_LOCK_FREE __CLANG_ATOMIC_BOOL_LOCK_FREE
+#endif
+#ifndef ATOMIC_CHAR_LOCK_FREE
+#define ATOMIC_CHAR_LOCK_FREE __CLANG_ATOMIC_CHAR_LOCK_FREE
+#endif
+#ifndef ATOMIC_CHAR8_T_LOCK_FREE
+#define ATOMIC_CHAR8_T_LOCK_FREE __CLANG_ATOMIC_CHAR8_T_LOCK_FREE
+#endif
+#ifndef ATOMIC_CHAR16_T_LOCK_FREE
+#define ATOMIC_CHAR16_T_LOCK_FREE __CLANG_ATOMIC_CHAR16_T_LOCK_FREE
+#endif
+#ifndef ATOMIC_CHAR32_T_LOCK_FREE
+#define ATOMIC_CHAR32_T_LOCK_FREE __CLANG_ATOMIC_CHAR32_T_LOCK_FREE
+#endif
+#ifndef ATOMIC_WCHAR_T_LOCK_FREE
+#define ATOMIC_WCHAR_T_LOCK_FREE __CLANG_ATOMIC_WCHAR_T_LOCK_FREE
+#endif
+#ifndef ATOMIC_SHORT_LOCK_FREE
+#define ATOMIC_SHORT_LOCK_FREE __CLANG_ATOMIC_SHORT_LOCK_FREE
+#endif
+#ifndef ATOMIC_INT_LOCK_FREE
+#define ATOMIC_INT_LOCK_FREE __CLANG_ATOMIC_INT_LOCK_FREE
+#endif
+#ifndef ATOMIC_LONG_LOCK_FREE
+#define ATOMIC_LONG_LOCK_FREE __CLANG_ATOMIC_LONG_LOCK_FREE
+#endif
+#ifndef ATOMIC_LLONG_LOCK_FREE
+#define ATOMIC_LLONG_LOCK_FREE __CLANG_ATOMIC_LLONG_LOCK_FREE
+#endif
+#ifndef ATOMIC_POINTER_LOCK_FREE
+#define ATOMIC_POINTER_LOCK_FREE __CLANG_ATOMIC_POINTER_LOCK_FREE
+#endif
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __atomic_detail {
+
+template<class Type, bool = is_enum_v<Type>,
+         bool = is_class_v<Type> || is_union_v<Type>>
+struct storage_type {
+    using type = Type;
+};
+
+template<class Type>
+struct storage_type<Type, true, false> {
+    using type = underlying_type_t<Type>;
+};
+
+template<class Type>
+using storage_type_t = typename storage_type<Type>::type;
+
+} // namespace __atomic_detail
+
+_ADINKRA_EXPORT void __adinkra_atomic_wait(
+    const volatile void* address,
+    const void* expected,
+    size_t size) noexcept;
+_ADINKRA_EXPORT void __adinkra_atomic_notify() noexcept;
+_ADINKRA_EXPORT void __adinkra_atomic_load_bytes(
+    const volatile void* address, void* result, size_t size) noexcept;
+_ADINKRA_EXPORT void __adinkra_atomic_store_bytes(
+    volatile void* address, const void* desired, size_t size) noexcept;
+_ADINKRA_EXPORT void __adinkra_atomic_exchange_bytes(
+    volatile void* address, const void* desired, void* previous,
+    size_t size) noexcept;
+_ADINKRA_EXPORT bool __adinkra_atomic_compare_exchange_bytes(
+    volatile void* address, void* expected, const void* desired,
+    size_t size) noexcept;
+
+inline void atomic_thread_fence(memory_order order) noexcept {
+    __atomic_thread_fence(static_cast<int>(order));
+}
+
+inline void atomic_signal_fence(memory_order order) noexcept {
+    __atomic_signal_fence(static_cast<int>(order));
+}
+
+template<class Type>
+class atomic {
+    static_assert(
+        is_trivially_copyable_v<Type>,
+        "std::atomic requires a trivially copyable type");
+
+    using storage_type =
+        __atomic_detail::storage_type_t<Type>;
+    static constexpr bool use_builtin =
+        sizeof(storage_type) <= sizeof(uint64_t) &&
+        (is_integral_v<storage_type> ||
+         is_pointer_v<storage_type>);
+
+public:
+    using value_type = Type;
+    using difference_type =
+        conditional_t<is_pointer_v<Type>, ptrdiff_t, Type>;
+
+    static constexpr bool is_always_lock_free =
+        use_builtin &&
+        __atomic_always_lock_free(sizeof(storage_type), nullptr);
+
+    constexpr atomic() noexcept : value_() {}
+    constexpr atomic(Type desired) noexcept
+        : value_(encode(desired)) {}
+
+    atomic(const atomic&) = delete;
+    atomic& operator=(const atomic&) = delete;
+
+    Type operator=(Type desired) noexcept {
+        store(desired);
+        return desired;
+    }
+
+    bool is_lock_free() const noexcept {
+        if constexpr (use_builtin) {
+            return __atomic_is_lock_free(
+                sizeof(storage_type), &value_);
+        } else {
+            return false;
+        }
+    }
+
+    bool is_lock_free() const volatile noexcept {
+        if constexpr (use_builtin) {
+            return __atomic_is_lock_free(
+                sizeof(storage_type), &value_);
+        } else {
+            return false;
+        }
+    }
+
+    void store(
+        Type desired,
+        memory_order order = memory_order_seq_cst) noexcept {
+        const storage_type desired_bits = encode(desired);
+        if constexpr (use_builtin) {
+            __atomic_store_n(
+                &value_, desired_bits, to_builtin(order));
+        } else {
+            (void)order;
+            __adinkra_atomic_store_bytes(
+                &value_, &desired_bits, sizeof(storage_type));
+        }
+    }
+
+    void store(
+        Type desired,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        const storage_type desired_bits = encode(desired);
+        if constexpr (use_builtin) {
+            __atomic_store_n(
+                &value_, desired_bits, to_builtin(order));
+        } else {
+            (void)order;
+            __adinkra_atomic_store_bytes(
+                &value_, &desired_bits, sizeof(storage_type));
+        }
+    }
+
+    Type load(
+        memory_order order = memory_order_seq_cst) const noexcept {
+        if constexpr (use_builtin) {
+            return decode(
+                __atomic_load_n(&value_, to_builtin(order)));
+        } else {
+            (void)order;
+            storage_type result;
+            __adinkra_atomic_load_bytes(
+                &value_, &result, sizeof(storage_type));
+            return decode(result);
+        }
+    }
+
+    Type load(
+        memory_order order =
+            memory_order_seq_cst) const volatile noexcept {
+        if constexpr (use_builtin) {
+            return decode(
+                __atomic_load_n(&value_, to_builtin(order)));
+        } else {
+            (void)order;
+            storage_type result;
+            __adinkra_atomic_load_bytes(
+                &value_, &result, sizeof(storage_type));
+            return decode(result);
+        }
+    }
+
+    operator Type() const noexcept {
+        return load();
+    }
+
+    operator Type() const volatile noexcept {
+        return load();
+    }
+
+    void wait(
+        Type old,
+        memory_order order = memory_order_seq_cst) const noexcept {
+        while (load(order) == old) {
+            const storage_type expected = encode(old);
+            __adinkra_atomic_wait(
+                &value_, &expected, sizeof(storage_type));
+        }
+    }
+
+    void notify_one() noexcept {
+        __adinkra_atomic_notify();
+    }
+
+    void notify_all() noexcept {
+        __adinkra_atomic_notify();
+    }
+
+    Type exchange(
+        Type desired,
+        memory_order order = memory_order_seq_cst) noexcept {
+        const storage_type desired_bits = encode(desired);
+        if constexpr (use_builtin) {
+            return decode(__atomic_exchange_n(
+                &value_, desired_bits, to_builtin(order)));
+        } else {
+            (void)order;
+            storage_type previous;
+            __adinkra_atomic_exchange_bytes(
+                &value_, &desired_bits, &previous,
+                sizeof(storage_type));
+            return decode(previous);
+        }
+    }
+
+    Type exchange(
+        Type desired,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        const storage_type desired_bits = encode(desired);
+        if constexpr (use_builtin) {
+            return decode(__atomic_exchange_n(
+                &value_, desired_bits, to_builtin(order)));
+        } else {
+            (void)order;
+            storage_type previous;
+            __adinkra_atomic_exchange_bytes(
+                &value_, &desired_bits, &previous,
+                sizeof(storage_type));
+            return decode(previous);
+        }
+    }
+
+    bool compare_exchange_weak(
+        Type& expected, Type desired,
+        memory_order success,
+        memory_order failure) noexcept {
+        storage_type expected_bits = encode(expected);
+        const storage_type desired_bits = encode(desired);
+        bool exchanged;
+        if constexpr (use_builtin) {
+            exchanged = __atomic_compare_exchange_n(
+                &value_, &expected_bits, desired_bits, true,
+                to_builtin(success), to_builtin(failure));
+        } else {
+            (void)success;
+            (void)failure;
+            exchanged =
+                __adinkra_atomic_compare_exchange_bytes(
+                    &value_, &expected_bits, &desired_bits,
+                    sizeof(storage_type));
+        }
+        if (!exchanged) {
+            expected = decode(expected_bits);
+        }
+        return exchanged;
+    }
+
+    bool compare_exchange_weak(
+        Type& expected, Type desired,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return compare_exchange_weak(
+            expected, desired, order, failure_order(order));
+    }
+
+    bool compare_exchange_strong(
+        Type& expected, Type desired,
+        memory_order success,
+        memory_order failure) noexcept {
+        storage_type expected_bits = encode(expected);
+        const storage_type desired_bits = encode(desired);
+        bool exchanged;
+        if constexpr (use_builtin) {
+            exchanged = __atomic_compare_exchange_n(
+                &value_, &expected_bits, desired_bits, false,
+                to_builtin(success), to_builtin(failure));
+        } else {
+            (void)success;
+            (void)failure;
+            exchanged =
+                __adinkra_atomic_compare_exchange_bytes(
+                    &value_, &expected_bits, &desired_bits,
+                    sizeof(storage_type));
+        }
+        if (!exchanged) {
+            expected = decode(expected_bits);
+        }
+        return exchanged;
+    }
+
+    bool compare_exchange_strong(
+        Type& expected, Type desired,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return compare_exchange_strong(
+            expected, desired, order, failure_order(order));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_add(
+        Type argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return decode(__atomic_fetch_add(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_add(
+        Type argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        return decode(__atomic_fetch_add(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_sub(
+        Type argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return decode(__atomic_fetch_sub(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_sub(
+        Type argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        return decode(__atomic_fetch_sub(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires is_pointer_v<Value>
+    Type fetch_add(
+        ptrdiff_t argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        const ptrdiff_t bytes =
+            argument * static_cast<ptrdiff_t>(
+                           sizeof(remove_pointer_t<Value>));
+        return __atomic_fetch_add(
+            &value_, bytes, to_builtin(order));
+    }
+
+    template<class Value = Type>
+        requires is_pointer_v<Value>
+    Type fetch_add(
+        ptrdiff_t argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        const ptrdiff_t bytes =
+            argument * static_cast<ptrdiff_t>(
+                           sizeof(remove_pointer_t<Value>));
+        return __atomic_fetch_add(
+            &value_, bytes, to_builtin(order));
+    }
+
+    template<class Value = Type>
+        requires is_pointer_v<Value>
+    Type fetch_sub(
+        ptrdiff_t argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        const ptrdiff_t bytes =
+            argument * static_cast<ptrdiff_t>(
+                           sizeof(remove_pointer_t<Value>));
+        return __atomic_fetch_sub(
+            &value_, bytes, to_builtin(order));
+    }
+
+    template<class Value = Type>
+        requires is_pointer_v<Value>
+    Type fetch_sub(
+        ptrdiff_t argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        const ptrdiff_t bytes =
+            argument * static_cast<ptrdiff_t>(
+                           sizeof(remove_pointer_t<Value>));
+        return __atomic_fetch_sub(
+            &value_, bytes, to_builtin(order));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_and(
+        Type argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return decode(__atomic_fetch_and(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_and(
+        Type argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        return decode(__atomic_fetch_and(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_or(
+        Type argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return decode(__atomic_fetch_or(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_or(
+        Type argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        return decode(__atomic_fetch_or(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_xor(
+        Type argument,
+        memory_order order = memory_order_seq_cst) noexcept {
+        return decode(__atomic_fetch_xor(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type fetch_xor(
+        Type argument,
+        memory_order order = memory_order_seq_cst) volatile noexcept {
+        return decode(__atomic_fetch_xor(
+            &value_, encode(argument), to_builtin(order)));
+    }
+
+    Type operator++() noexcept {
+        return fetch_add(1) + 1;
+    }
+
+    Type operator++(int) noexcept {
+        return fetch_add(1);
+    }
+
+    Type operator--() noexcept {
+        return fetch_sub(1) - 1;
+    }
+
+    Type operator--(int) noexcept {
+        return fetch_sub(1);
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type operator+=(Type argument) noexcept {
+        return fetch_add(argument) + argument;
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type operator-=(Type argument) noexcept {
+        return fetch_sub(argument) - argument;
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type operator&=(Type argument) noexcept {
+        return fetch_and(argument) & argument;
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type operator|=(Type argument) noexcept {
+        return fetch_or(argument) | argument;
+    }
+
+    template<class Value = Type>
+        requires (is_integral_v<Value> || is_enum_v<Value>)
+    Type operator^=(Type argument) noexcept {
+        return fetch_xor(argument) ^ argument;
+    }
+
+    template<class Value = Type>
+        requires is_pointer_v<Value>
+    Type operator+=(ptrdiff_t argument) noexcept {
+        return fetch_add(argument) + argument;
+    }
+
+    template<class Value = Type>
+        requires is_pointer_v<Value>
+    Type operator-=(ptrdiff_t argument) noexcept {
+        return fetch_sub(argument) - argument;
+    }
+
+private:
+    alignas(Type) mutable storage_type value_;
+
+    static constexpr storage_type encode(Type value) noexcept {
+        if constexpr (is_enum_v<Type>) {
+            return static_cast<storage_type>(value);
+        } else if constexpr (is_same_v<Type, storage_type>) {
+            return value;
+        } else {
+            return __builtin_bit_cast(storage_type, value);
+        }
+    }
+
+    static constexpr Type decode(storage_type value) noexcept {
+        if constexpr (is_enum_v<Type>) {
+            return static_cast<Type>(value);
+        } else if constexpr (is_same_v<Type, storage_type>) {
+            return value;
+        } else {
+            return __builtin_bit_cast(Type, value);
+        }
+    }
+
+    static constexpr int to_builtin(memory_order order) noexcept {
+        return static_cast<int>(order);
+    }
+
+    static constexpr memory_order
+    failure_order(memory_order order) noexcept {
+        return order == memory_order_release
+                   ? memory_order_relaxed
+             : order == memory_order_acq_rel
+                   ? memory_order_acquire
+                   : order;
+    }
+};
+
+template<class Type>
+bool atomic_is_lock_free(const atomic<Type>* object) noexcept {
+    return object->is_lock_free();
+}
+
+template<class Type>
+void atomic_init(atomic<Type>* object, Type desired) noexcept {
+    object->store(desired, memory_order_relaxed);
+}
+
+template<class Type>
+void atomic_store_explicit(
+    atomic<Type>* object, Type desired,
+    memory_order order) noexcept {
+    object->store(desired, order);
+}
+
+template<class Type>
+void atomic_store(
+    atomic<Type>* object, Type desired) noexcept {
+    std::atomic_store_explicit(
+        object, desired, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_load_explicit(
+    const atomic<Type>* object,
+    memory_order order) noexcept {
+    return object->load(order);
+}
+
+template<class Type>
+Type atomic_load(const atomic<Type>* object) noexcept {
+    return std::atomic_load_explicit(
+        object, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_exchange_explicit(
+    atomic<Type>* object, Type desired,
+    memory_order order) noexcept {
+    return object->exchange(desired, order);
+}
+
+template<class Type>
+Type atomic_exchange(
+    atomic<Type>* object, Type desired) noexcept {
+    return std::atomic_exchange_explicit(
+        object, desired, memory_order_seq_cst);
+}
+
+template<class Type>
+bool atomic_compare_exchange_weak_explicit(
+    atomic<Type>* object, Type* expected, Type desired,
+    memory_order success, memory_order failure) noexcept {
+    return object->compare_exchange_weak(
+        *expected, desired, success, failure);
+}
+
+template<class Type>
+bool atomic_compare_exchange_weak(
+    atomic<Type>* object, Type* expected,
+    Type desired) noexcept {
+    return std::atomic_compare_exchange_weak_explicit(
+        object, expected, desired,
+        memory_order_seq_cst, memory_order_seq_cst);
+}
+
+template<class Type>
+bool atomic_compare_exchange_strong_explicit(
+    atomic<Type>* object, Type* expected, Type desired,
+    memory_order success, memory_order failure) noexcept {
+    return object->compare_exchange_strong(
+        *expected, desired, success, failure);
+}
+
+template<class Type>
+bool atomic_compare_exchange_strong(
+    atomic<Type>* object, Type* expected,
+    Type desired) noexcept {
+    return std::atomic_compare_exchange_strong_explicit(
+        object, expected, desired,
+        memory_order_seq_cst, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_fetch_add_explicit(
+    atomic<Type>* object,
+    typename atomic<Type>::difference_type argument,
+    memory_order order) noexcept {
+    return object->fetch_add(argument, order);
+}
+
+template<class Type>
+Type atomic_fetch_add(
+    atomic<Type>* object,
+    typename atomic<Type>::difference_type argument) noexcept {
+    return std::atomic_fetch_add_explicit(
+        object, argument, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_fetch_sub_explicit(
+    atomic<Type>* object,
+    typename atomic<Type>::difference_type argument,
+    memory_order order) noexcept {
+    return object->fetch_sub(argument, order);
+}
+
+template<class Type>
+Type atomic_fetch_sub(
+    atomic<Type>* object,
+    typename atomic<Type>::difference_type argument) noexcept {
+    return std::atomic_fetch_sub_explicit(
+        object, argument, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_fetch_and_explicit(
+    atomic<Type>* object, Type argument,
+    memory_order order) noexcept {
+    return object->fetch_and(argument, order);
+}
+
+template<class Type>
+Type atomic_fetch_and(
+    atomic<Type>* object, Type argument) noexcept {
+    return std::atomic_fetch_and_explicit(
+        object, argument, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_fetch_or_explicit(
+    atomic<Type>* object, Type argument,
+    memory_order order) noexcept {
+    return object->fetch_or(argument, order);
+}
+
+template<class Type>
+Type atomic_fetch_or(
+    atomic<Type>* object, Type argument) noexcept {
+    return std::atomic_fetch_or_explicit(
+        object, argument, memory_order_seq_cst);
+}
+
+template<class Type>
+Type atomic_fetch_xor_explicit(
+    atomic<Type>* object, Type argument,
+    memory_order order) noexcept {
+    return object->fetch_xor(argument, order);
+}
+
+template<class Type>
+Type atomic_fetch_xor(
+    atomic<Type>* object, Type argument) noexcept {
+    return std::atomic_fetch_xor_explicit(
+        object, argument, memory_order_seq_cst);
+}
+
+template<class Type>
+void atomic_wait_explicit(
+    const atomic<Type>* object, Type old,
+    memory_order order) noexcept {
+    object->wait(old, order);
+}
+
+template<class Type>
+void atomic_wait(
+    const atomic<Type>* object, Type old) noexcept {
+    std::atomic_wait_explicit(
+        object, old, memory_order_seq_cst);
+}
+
+template<class Type>
+void atomic_notify_one(atomic<Type>* object) noexcept {
+    object->notify_one();
+}
+
+template<class Type>
+void atomic_notify_all(atomic<Type>* object) noexcept {
+    object->notify_all();
+}
+
+class atomic_flag {
+public:
+    constexpr atomic_flag() noexcept = default;
+
+    atomic_flag(const atomic_flag&) = delete;
+    atomic_flag& operator=(const atomic_flag&) = delete;
+
+    bool test_and_set(
+        memory_order order = memory_order_seq_cst) noexcept {
+        return __atomic_test_and_set(
+            &value_, static_cast<int>(order));
+    }
+
+    void clear(
+        memory_order order = memory_order_seq_cst) noexcept {
+        __atomic_clear(&value_, static_cast<int>(order));
+    }
+
+    bool test(
+        memory_order order = memory_order_seq_cst) const noexcept {
+        return __atomic_load_n(
+            &value_, static_cast<int>(order));
+    }
+
+    void wait(
+        bool old,
+        memory_order order = memory_order_seq_cst) const noexcept {
+        while (test(order) == old) {
+            __adinkra_atomic_wait(
+                &value_, &old, sizeof(value_));
+        }
+    }
+
+    void notify_one() noexcept {
+        __adinkra_atomic_notify();
+    }
+
+    void notify_all() noexcept {
+        __adinkra_atomic_notify();
+    }
+
+private:
+    mutable bool value_ = false;
+};
+
+inline bool atomic_flag_test_and_set(
+    volatile atomic_flag* object) noexcept {
+    return const_cast<atomic_flag*>(object)->test_and_set();
+}
+
+inline bool atomic_flag_test_and_set(
+    atomic_flag* object) noexcept {
+    return object->test_and_set();
+}
+
+inline bool atomic_flag_test_and_set_explicit(
+    volatile atomic_flag* object,
+    memory_order order) noexcept {
+    return const_cast<atomic_flag*>(object)->test_and_set(order);
+}
+
+inline bool atomic_flag_test_and_set_explicit(
+    atomic_flag* object,
+    memory_order order) noexcept {
+    return object->test_and_set(order);
+}
+
+inline void atomic_flag_clear(
+    volatile atomic_flag* object) noexcept {
+    const_cast<atomic_flag*>(object)->clear();
+}
+
+inline void atomic_flag_clear(
+    atomic_flag* object) noexcept {
+    object->clear();
+}
+
+inline void atomic_flag_clear_explicit(
+    volatile atomic_flag* object,
+    memory_order order) noexcept {
+    const_cast<atomic_flag*>(object)->clear(order);
+}
+
+inline void atomic_flag_clear_explicit(
+    atomic_flag* object,
+    memory_order order) noexcept {
+    object->clear(order);
+}
+
+using atomic_bool = atomic<bool>;
+using atomic_char = atomic<char>;
+using atomic_schar = atomic<signed char>;
+using atomic_uchar = atomic<unsigned char>;
+using atomic_char8_t = atomic<char8_t>;
+using atomic_char16_t = atomic<char16_t>;
+using atomic_char32_t = atomic<char32_t>;
+using atomic_wchar_t = atomic<wchar_t>;
+using atomic_short = atomic<short>;
+using atomic_ushort = atomic<unsigned short>;
+using atomic_int = atomic<int>;
+using atomic_uint = atomic<unsigned int>;
+using atomic_long = atomic<long>;
+using atomic_ulong = atomic<unsigned long>;
+using atomic_llong = atomic<long long>;
+using atomic_ullong = atomic<unsigned long long>;
+using atomic_int8_t = atomic<int8_t>;
+using atomic_uint8_t = atomic<uint8_t>;
+using atomic_int16_t = atomic<int16_t>;
+using atomic_uint16_t = atomic<uint16_t>;
+using atomic_int32_t = atomic<int32_t>;
+using atomic_uint32_t = atomic<uint32_t>;
+using atomic_int64_t = atomic<int64_t>;
+using atomic_uint64_t = atomic<uint64_t>;
+using atomic_int_least8_t = atomic<int_least8_t>;
+using atomic_uint_least8_t = atomic<uint_least8_t>;
+using atomic_int_least16_t = atomic<int_least16_t>;
+using atomic_uint_least16_t = atomic<uint_least16_t>;
+using atomic_int_least32_t = atomic<int_least32_t>;
+using atomic_uint_least32_t = atomic<uint_least32_t>;
+using atomic_int_least64_t = atomic<int_least64_t>;
+using atomic_uint_least64_t = atomic<uint_least64_t>;
+using atomic_int_fast8_t = atomic<int_fast8_t>;
+using atomic_uint_fast8_t = atomic<uint_fast8_t>;
+using atomic_int_fast16_t = atomic<int_fast16_t>;
+using atomic_uint_fast16_t = atomic<uint_fast16_t>;
+using atomic_int_fast32_t = atomic<int_fast32_t>;
+using atomic_uint_fast32_t = atomic<uint_fast32_t>;
+using atomic_int_fast64_t = atomic<int_fast64_t>;
+using atomic_uint_fast64_t = atomic<uint_fast64_t>;
+using atomic_intptr_t = atomic<intptr_t>;
+using atomic_uintptr_t = atomic<uintptr_t>;
+using atomic_intmax_t = atomic<intmax_t>;
+using atomic_uintmax_t = atomic<uintmax_t>;
+using atomic_size_t = atomic<size_t>;
+using atomic_ptrdiff_t = atomic<ptrdiff_t>;
+using atomic_signed_lock_free = atomic<ptrdiff_t>;
+using atomic_unsigned_lock_free = atomic<size_t>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#ifndef ATOMIC_FLAG_INIT
+#define ATOMIC_FLAG_INIT {}
+#endif
+
+#ifndef ATOMIC_VAR_INIT
+#define ATOMIC_VAR_INIT(value) (value)
+#endif
+
+#endif

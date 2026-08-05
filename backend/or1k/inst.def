@@ -1,0 +1,74 @@
+
+
+#ifndef ABURI_OR1K_INST
+#error "define ABURI_OR1K_INST before including inst.def"
+#endif
+
+ABURI_OR1K_INST(Mov,   "l.or",   RR,  "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Movhi, "l.movhi", RImm, "r", OR1K_DEF0, none)
+ABURI_OR1K_INST(MovhiHi, "l.movhi", RSymHi, "r", OR1K_DEF0, none)
+ABURI_OR1K_INST(OriLo, "l.ori",  RRSymLo, "rr", OR1K_DEF0, none)
+
+ABURI_OR1K_INST(Add,  "l.add",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Addc, "l.addc", RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Sub,  "l.sub",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(And,  "l.and",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Or,   "l.or",   RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Xor,  "l.xor",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Sll,  "l.sll",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Srl,  "l.srl",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Sra,  "l.sra",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Mul,  "l.mul",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Mulu, "l.mulu", RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Div,  "l.div",  RRR, "rrr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Divu, "l.divu", RRR, "rrr", OR1K_DEF0, none)
+
+ABURI_OR1K_INST(Addi, "l.addi", RRI, "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Andi, "l.andi", RRI, "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Ori,  "l.ori",  RRI, "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Xori, "l.xori", RRI, "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Slli, "l.slli", RRI, "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Srli, "l.srli", RRI, "rr", OR1K_DEF0, none)
+ABURI_OR1K_INST(Srai, "l.srai", RRI, "rr", OR1K_DEF0, none)
+
+ABURI_OR1K_INST(Lwz, "l.lwz", Mem,      "r", OR1K_DEF0 | OR1K_LOAD, none)
+ABURI_OR1K_INST(Lbz, "l.lbz", Mem,      "r", OR1K_DEF0 | OR1K_LOAD, none)
+ABURI_OR1K_INST(Lbs, "l.lbs", Mem,      "r", OR1K_DEF0 | OR1K_LOAD, none)
+ABURI_OR1K_INST(Lhz, "l.lhz", Mem,      "r", OR1K_DEF0 | OR1K_LOAD, none)
+ABURI_OR1K_INST(Lhs, "l.lhs", Mem,      "r", OR1K_DEF0 | OR1K_LOAD, none)
+ABURI_OR1K_INST(Sw,  "l.sw",  MemStore, "r", OR1K_STORE, none)
+ABURI_OR1K_INST(Sb,  "l.sb",  MemStore, "r", OR1K_STORE, none)
+ABURI_OR1K_INST(Sh,  "l.sh",  MemStore, "r", OR1K_STORE, none)
+
+ABURI_OR1K_INST(Sfeq,  "l.sfeq",  Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfne,  "l.sfne",  Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sflts, "l.sflts", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfles, "l.sfles", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfgts, "l.sfgts", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfges, "l.sfges", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfltu, "l.sfltu", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfleu, "l.sfleu", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfgtu, "l.sfgtu", Sf, "rr", 0, none)
+ABURI_OR1K_INST(Sfgeu, "l.sfgeu", Sf, "rr", 0, none)
+
+ABURI_OR1K_INST(Sfeqi,  "l.sfeqi",  SfI, "r", 0, none)
+ABURI_OR1K_INST(Sfnei,  "l.sfnei",  SfI, "r", 0, none)
+ABURI_OR1K_INST(Sfltsi, "l.sfltsi", SfI, "r", 0, none)
+ABURI_OR1K_INST(Sflesi, "l.sflesi", SfI, "r", 0, none)
+ABURI_OR1K_INST(Sfgtsi, "l.sfgtsi", SfI, "r", 0, none)
+ABURI_OR1K_INST(Sfgesi, "l.sfgesi", SfI, "r", 0, none)
+
+ABURI_OR1K_INST(Bf,   "l.bf",   Branch,  "", OR1K_TERM | OR1K_DELAY, none)
+ABURI_OR1K_INST(Bnf,  "l.bnf",  Branch,  "", OR1K_TERM | OR1K_DELAY, none)
+ABURI_OR1K_INST(J,    "l.j",    Branch,  "", OR1K_TERM | OR1K_DELAY, none)
+ABURI_OR1K_INST(Jal,  "l.jal",  CallSym, "", OR1K_CALL | OR1K_DELAY, none)
+ABURI_OR1K_INST(Jalr, "l.jalr", CallReg, "r", OR1K_CALL | OR1K_DELAY, none)
+ABURI_OR1K_INST(Jr,   "l.jr",   JmpReg,  "r", OR1K_TERM | OR1K_DELAY, none)
+ABURI_OR1K_INST(Nop,  "l.nop",  Nop,     "", 0, none)
+
+ABURI_OR1K_INST(AsmBlock, "<asm>", AsmText, "", OR1K_CALL, none)
+
+ABURI_OR1K_INST(SetBool,     "<set_bool>",     SetBool, "r", OR1K_DEF0 | OR1K_PSEUDO, none)
+ABURI_OR1K_INST(FrameAddr,   "<frame_addr>",   RR,      "r", OR1K_DEF0 | OR1K_PSEUDO, none)
+ABURI_OR1K_INST(EpilogueRet, "<epilogue_ret>", JmpReg,  "",  OR1K_TERM | OR1K_PSEUDO, none)
+ABURI_OR1K_INST(EhLabel,     "<eh_label>",     Nop,     "",  OR1K_PSEUDO, none)

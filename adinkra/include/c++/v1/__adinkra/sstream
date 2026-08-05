@@ -1,0 +1,44 @@
+#ifndef ADINKRA___ADINKRA_SSTREAM
+#define ADINKRA___ADINKRA_SSTREAM
+
+#include <__adinkra/config>
+#include <cstddef>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __sstream {
+
+_ADINKRA_EXPORT size_t format_signed(
+    char* destination, size_t capacity, long long value,
+    int base, bool uppercase, bool show_base,
+    bool show_positive) noexcept;
+_ADINKRA_EXPORT size_t format_unsigned(
+    char* destination, size_t capacity, unsigned long long value,
+    int base, bool uppercase, bool show_base,
+    bool show_positive) noexcept;
+_ADINKRA_EXPORT size_t format_floating(
+    char* destination, size_t capacity, long double value,
+    int precision, bool uppercase, bool scientific,
+    bool fixed, bool show_point, bool show_positive) noexcept;
+_ADINKRA_EXPORT size_t format_pointer(
+    char* destination, size_t capacity,
+    const void* value, bool uppercase) noexcept;
+
+_ADINKRA_EXPORT bool read_signed(
+    const char* data, size_t size, size_t& position,
+    int base, long long& value) noexcept;
+_ADINKRA_EXPORT bool read_unsigned(
+    const char* data, size_t size, size_t& position,
+    int base, unsigned long long& value) noexcept;
+_ADINKRA_EXPORT bool read_floating(
+    const char* data, size_t size, size_t& position,
+    long double& value) noexcept;
+_ADINKRA_EXPORT bool read_token(
+    const char* data, size_t size, size_t& position,
+    size_t& start, size_t& count) noexcept;
+
+} // namespace __sstream
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

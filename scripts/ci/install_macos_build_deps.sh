@@ -17,7 +17,7 @@ packages=(
     glib
     libass
     libplacebo
-    llvm@18
+    llvm
     meson
     ninja
     orc

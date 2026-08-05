@@ -1,0 +1,13 @@
+#ifndef ADINKRA_CSIGNAL
+#define ADINKRA_CSIGNAL
+
+#include <__adinkra/config>
+#include <signal.h>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+using ::sig_atomic_t;
+using ::raise;
+using ::signal;
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

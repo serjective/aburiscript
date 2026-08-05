@@ -1,0 +1,737 @@
+#ifndef ADINKRA_LIST
+#define ADINKRA_LIST
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Type, class Allocator = allocator<Type>>
+class list {
+    struct node_base {
+        node_base* previous;
+        node_base* next;
+
+        node_base() noexcept : previous(this), next(this) {}
+    };
+
+    struct node : node_base {
+        template<class... Arguments>
+        explicit node(Arguments&&... arguments)
+            : node_base(),
+              value(std::forward<Arguments>(arguments)...) {}
+
+        Type value;
+    };
+
+    using node_allocator =
+        typename allocator_traits<Allocator>::
+            template rebind_alloc<node>;
+    using node_traits = allocator_traits<node_allocator>;
+
+    template<bool Constant>
+    class basic_iterator {
+        friend class list;
+        template<bool>
+        friend class basic_iterator;
+
+        using base_pointer = conditional_t<
+            Constant, const node_base*, node_base*>;
+
+        explicit basic_iterator(base_pointer value) noexcept
+            : value_(value) {}
+
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = Type;
+        using difference_type = ptrdiff_t;
+        using pointer =
+            conditional_t<Constant, const Type*, Type*>;
+        using reference =
+            conditional_t<Constant, const Type&, Type&>;
+
+        basic_iterator() noexcept : value_(nullptr) {}
+
+        template<bool Other = Constant>
+            requires Other
+        basic_iterator(const basic_iterator<false>& other) noexcept
+            : value_(other.value_) {}
+
+        reference operator*() const noexcept {
+            using selected_node =
+                conditional_t<Constant, const node, node>;
+            return static_cast<selected_node*>(value_)->value;
+        }
+
+        pointer operator->() const noexcept {
+            return addressof(operator*());
+        }
+
+        basic_iterator& operator++() noexcept {
+            value_ = value_->next;
+            return *this;
+        }
+
+        basic_iterator operator++(int) noexcept {
+            basic_iterator previous(*this);
+            ++*this;
+            return previous;
+        }
+
+        basic_iterator& operator--() noexcept {
+            value_ = value_->previous;
+            return *this;
+        }
+
+        basic_iterator operator--(int) noexcept {
+            basic_iterator previous(*this);
+            --*this;
+            return previous;
+        }
+
+        template<bool Other>
+        friend bool operator==(
+            const basic_iterator& left,
+            const basic_iterator<Other>& right) noexcept {
+            return left.value_ == right.value_;
+        }
+
+    private:
+        base_pointer value_;
+    };
+
+public:
+    using value_type = Type;
+    using allocator_type = Allocator;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+    using iterator = basic_iterator<false>;
+    using const_iterator = basic_iterator<true>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator =
+        std::reverse_iterator<const_iterator>;
+
+    list() noexcept(noexcept(node_allocator()))
+        : sentinel_(), size_(0), allocator_() {}
+
+    explicit list(const Allocator& allocator) noexcept
+        : sentinel_(), size_(0), allocator_(allocator) {}
+
+    explicit list(
+        size_type count,
+        const Allocator& allocator = Allocator())
+        : list(allocator) {
+        while (count-- != 0) {
+            emplace_back();
+        }
+    }
+
+    list(
+        size_type count, const Type& value,
+        const Allocator& allocator = Allocator())
+        : list(allocator) {
+        while (count-- != 0) {
+            push_back(value);
+        }
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    list(
+        InputIterator first, InputIterator last,
+        const Allocator& allocator = Allocator())
+        : list(allocator) {
+        insert(end(), first, last);
+    }
+
+    list(
+        initializer_list<Type> values,
+        const Allocator& allocator = Allocator())
+        : list(values.begin(), values.end(), allocator) {}
+
+    list(const list& other)
+        : list(
+              allocator_traits<Allocator>::
+                  select_on_container_copy_construction(
+                      other.get_allocator())) {
+        insert(end(), other.begin(), other.end());
+    }
+
+    list(list&& other) noexcept
+        : sentinel_(), size_(0),
+          allocator_(std::move(other.allocator_)) {
+        take_nodes(other);
+    }
+
+    ~list() {
+        clear();
+    }
+
+    list& operator=(const list& other) {
+        if (this != &other) {
+            clear();
+            insert(end(), other.begin(), other.end());
+        }
+        return *this;
+    }
+
+    list& operator=(list&& other) noexcept {
+        if (this != &other) {
+            clear();
+            allocator_ = std::move(other.allocator_);
+            take_nodes(other);
+        }
+        return *this;
+    }
+
+    list& operator=(initializer_list<Type> values) {
+        clear();
+        insert(end(), values.begin(), values.end());
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept {
+        return allocator_type(allocator_);
+    }
+
+    iterator begin() noexcept {
+        return iterator(sentinel_.next);
+    }
+
+    const_iterator begin() const noexcept {
+        return const_iterator(sentinel_.next);
+    }
+
+    const_iterator cbegin() const noexcept {
+        return begin();
+    }
+
+    iterator end() noexcept {
+        return iterator(&sentinel_);
+    }
+
+    const_iterator end() const noexcept {
+        return const_iterator(&sentinel_);
+    }
+
+    const_iterator cend() const noexcept {
+        return end();
+    }
+
+    reverse_iterator rbegin() noexcept {
+        return reverse_iterator(end());
+    }
+
+    const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+
+    reverse_iterator rend() noexcept {
+        return reverse_iterator(begin());
+    }
+
+    const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    bool empty() const noexcept {
+        return size_ == 0;
+    }
+
+    size_type size() const noexcept {
+        return size_;
+    }
+
+    size_type max_size() const noexcept {
+        return node_traits::max_size(allocator_);
+    }
+
+    reference front() {
+        return *begin();
+    }
+
+    const_reference front() const {
+        return *begin();
+    }
+
+    reference back() {
+        iterator value = end();
+        return *--value;
+    }
+
+    const_reference back() const {
+        const_iterator value = end();
+        return *--value;
+    }
+
+    template<class... Arguments>
+    iterator emplace(
+        const_iterator position, Arguments&&... arguments) {
+        node* value =
+            create_node(std::forward<Arguments>(arguments)...);
+        node_base* next =
+            const_cast<node_base*>(position.value_);
+        link_before(next, value);
+        ++size_;
+        return iterator(value);
+    }
+
+    iterator insert(const_iterator position, const Type& value) {
+        return emplace(position, value);
+    }
+
+    iterator insert(const_iterator position, Type&& value) {
+        return emplace(position, std::move(value));
+    }
+
+    iterator insert(
+        const_iterator position, size_type count,
+        const Type& value) {
+        iterator first =
+            iterator(const_cast<node_base*>(position.value_));
+        bool inserted = false;
+        while (count-- != 0) {
+            iterator current = insert(position, value);
+            if (!inserted) {
+                first = current;
+                inserted = true;
+            }
+        }
+        return first;
+    }
+
+    template<class InputIterator>
+        requires (!is_integral_v<InputIterator>)
+    iterator insert(
+        const_iterator position,
+        InputIterator first, InputIterator last) {
+        iterator result =
+            iterator(const_cast<node_base*>(position.value_));
+        bool inserted = false;
+        for (; first != last; ++first) {
+            iterator current = insert(position, *first);
+            if (!inserted) {
+                result = current;
+                inserted = true;
+            }
+        }
+        return result;
+    }
+
+    iterator insert(
+        const_iterator position,
+        initializer_list<Type> values) {
+        return insert(
+            position, values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    reference emplace_back(Arguments&&... arguments) {
+        return *emplace(
+            end(), std::forward<Arguments>(arguments)...);
+    }
+
+    template<class... Arguments>
+    reference emplace_front(Arguments&&... arguments) {
+        return *emplace(
+            begin(), std::forward<Arguments>(arguments)...);
+    }
+
+    void push_back(const Type& value) {
+        (void)emplace(end(), value);
+    }
+
+    void push_back(Type&& value) {
+        (void)emplace(end(), std::move(value));
+    }
+
+    void push_front(const Type& value) {
+        (void)emplace(begin(), value);
+    }
+
+    void push_front(Type&& value) {
+        (void)emplace(begin(), std::move(value));
+    }
+
+    void pop_back() {
+        iterator value = end();
+        erase(--value);
+    }
+
+    void pop_front() {
+        erase(begin());
+    }
+
+    iterator erase(const_iterator position) {
+        node_base* value =
+            const_cast<node_base*>(position.value_);
+        node_base* next = value->next;
+        unlink(value);
+        destroy_node(static_cast<node*>(value));
+        --size_;
+        return iterator(next);
+    }
+
+    iterator erase(
+        const_iterator first, const_iterator last) {
+        iterator current(
+            const_cast<node_base*>(first.value_));
+        const node_base* finish = last.value_;
+        while (current.value_ != finish) {
+            current = erase(current);
+        }
+        return current;
+    }
+
+    void clear() noexcept {
+        node_base* current = sentinel_.next;
+        while (current != &sentinel_) {
+            node_base* next = current->next;
+            destroy_node(static_cast<node*>(current));
+            current = next;
+        }
+        reset_empty();
+    }
+
+    void resize(size_type count) {
+        while (size_ > count) {
+            pop_back();
+        }
+        while (size_ < count) {
+            emplace_back();
+        }
+    }
+
+    void resize(size_type count, const value_type& value) {
+        while (size_ > count) {
+            pop_back();
+        }
+        while (size_ < count) {
+            push_back(value);
+        }
+    }
+
+    void splice(const_iterator position, list& other) noexcept {
+        if (other.empty() || this == &other) {
+            return;
+        }
+
+        node_base* next =
+            const_cast<node_base*>(position.value_);
+        node_base* previous = next->previous;
+        node_base* first = other.sentinel_.next;
+        node_base* last = other.sentinel_.previous;
+
+        previous->next = first;
+        first->previous = previous;
+        last->next = next;
+        next->previous = last;
+        size_ += other.size_;
+        other.reset_empty();
+    }
+
+    void splice(const_iterator position, list&& other) noexcept {
+        splice(position, other);
+    }
+
+    void splice(
+        const_iterator position, list& other,
+        const_iterator element) noexcept {
+        if (element == other.end()) {
+            return;
+        }
+
+        const_iterator next = element;
+        ++next;
+        if (position == element || position == next) {
+            return;
+        }
+
+        node_base* value =
+            const_cast<node_base*>(element.value_);
+        unlink(value);
+        link_before(
+            const_cast<node_base*>(position.value_), value);
+        if (this != &other) {
+            ++size_;
+            --other.size_;
+        }
+    }
+
+    void splice(
+        const_iterator position, list&& other,
+        const_iterator element) noexcept {
+        splice(position, other, element);
+    }
+
+    void splice(
+        const_iterator position, list& other,
+        const_iterator first, const_iterator last) noexcept {
+        if (first == last || position == first ||
+            position == last) {
+            return;
+        }
+
+        size_type moved = 0;
+        if (this != &other) {
+            for (const_iterator current = first;
+                 current != last; ++current) {
+                ++moved;
+            }
+        }
+
+        node_base* first_node =
+            const_cast<node_base*>(first.value_);
+        node_base* after_last =
+            const_cast<node_base*>(last.value_);
+        node_base* last_node = after_last->previous;
+
+        first_node->previous->next = after_last;
+        after_last->previous = first_node->previous;
+
+        node_base* next =
+            const_cast<node_base*>(position.value_);
+        node_base* previous = next->previous;
+        previous->next = first_node;
+        first_node->previous = previous;
+        last_node->next = next;
+        next->previous = last_node;
+
+        if (this != &other) {
+            size_ += moved;
+            other.size_ -= moved;
+        }
+    }
+
+    void splice(
+        const_iterator position, list&& other,
+        const_iterator first, const_iterator last) noexcept {
+        splice(position, other, first, last);
+    }
+
+    template<class Predicate>
+    size_type remove_if(Predicate predicate) {
+        size_type removed = 0;
+        iterator current = begin();
+        while (current != end()) {
+            if (predicate(*current)) {
+                current = erase(current);
+                ++removed;
+            } else {
+                ++current;
+            }
+        }
+        return removed;
+    }
+
+    size_type remove(const Type& value) {
+        return remove_if([&value](const Type& candidate) {
+            return candidate == value;
+        });
+    }
+
+    template<class Compare>
+    void sort(Compare compare) {
+        if (size_ < 2) {
+            return;
+        }
+
+        node_base* current = sentinel_.next->next;
+        while (current != &sentinel_) {
+            node_base* next = current->next;
+            node_base* position = sentinel_.next;
+            while (position != current &&
+                   !compare(
+                       static_cast<node*>(current)->value,
+                       static_cast<node*>(position)->value)) {
+                position = position->next;
+            }
+            if (position != current) {
+                unlink(current);
+                link_before(position, current);
+            }
+            current = next;
+        }
+    }
+
+    void sort() {
+        sort(less<Type>());
+    }
+
+    void swap(list& other) noexcept {
+        if (this == &other) {
+            return;
+        }
+        list temporary(std::move(*this));
+        *this = std::move(other);
+        other = std::move(temporary);
+    }
+
+private:
+    node_base sentinel_;
+    size_type size_;
+    node_allocator allocator_;
+
+    template<class... Arguments>
+    node* create_node(Arguments&&... arguments) {
+        node* value = node_traits::allocate(allocator_, 1);
+        try {
+            node_traits::construct(
+                allocator_, value,
+                std::forward<Arguments>(arguments)...);
+        } catch (...) {
+            node_traits::deallocate(allocator_, value, 1);
+            throw;
+        }
+        return value;
+    }
+
+    void destroy_node(node* value) noexcept {
+        node_traits::destroy(allocator_, value);
+        node_traits::deallocate(allocator_, value, 1);
+    }
+
+    static void link_before(
+        node_base* position, node_base* value) noexcept {
+        value->previous = position->previous;
+        value->next = position;
+        position->previous->next = value;
+        position->previous = value;
+    }
+
+    static void unlink(node_base* value) noexcept {
+        value->previous->next = value->next;
+        value->next->previous = value->previous;
+    }
+
+    void reset_empty() noexcept {
+        sentinel_.next = &sentinel_;
+        sentinel_.previous = &sentinel_;
+        size_ = 0;
+    }
+
+    void take_nodes(list& other) noexcept {
+        if (other.empty()) {
+            reset_empty();
+            return;
+        }
+
+        sentinel_.next = other.sentinel_.next;
+        sentinel_.previous = other.sentinel_.previous;
+        sentinel_.next->previous = &sentinel_;
+        sentinel_.previous->next = &sentinel_;
+        size_ = other.size_;
+        other.reset_empty();
+    }
+};
+
+template<class Type, class Allocator>
+bool operator==(
+    const list<Type, Allocator>& left,
+    const list<Type, Allocator>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    auto left_iterator = left.begin();
+    auto right_iterator = right.begin();
+    while (left_iterator != left.end()) {
+        if (!(*left_iterator == *right_iterator)) {
+            return false;
+        }
+        ++left_iterator;
+        ++right_iterator;
+    }
+    return true;
+}
+
+template<class Type, class Allocator>
+bool operator<(
+    const list<Type, Allocator>& left,
+    const list<Type, Allocator>& right) {
+    auto left_iterator = left.begin();
+    auto right_iterator = right.begin();
+    while (left_iterator != left.end() &&
+           right_iterator != right.end()) {
+        if (*left_iterator < *right_iterator) {
+            return true;
+        }
+        if (*right_iterator < *left_iterator) {
+            return false;
+        }
+        ++left_iterator;
+        ++right_iterator;
+    }
+    return left.size() < right.size();
+}
+
+template<class Type, class Allocator>
+bool operator>(
+    const list<Type, Allocator>& left,
+    const list<Type, Allocator>& right) {
+    return right < left;
+}
+
+template<class Type, class Allocator>
+bool operator<=(
+    const list<Type, Allocator>& left,
+    const list<Type, Allocator>& right) {
+    return !(right < left);
+}
+
+template<class Type, class Allocator>
+bool operator>=(
+    const list<Type, Allocator>& left,
+    const list<Type, Allocator>& right) {
+    return !(left < right);
+}
+
+template<class Type, class Allocator>
+void swap(
+    list<Type, Allocator>& left,
+    list<Type, Allocator>& right) noexcept {
+    left.swap(right);
+}
+
+template<class Type, class Allocator, class Value>
+typename list<Type, Allocator>::size_type erase(
+    list<Type, Allocator>& container, const Value& value) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (*current == value) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Type, class Allocator, class Predicate>
+typename list<Type, Allocator>::size_type erase_if(
+    list<Type, Allocator>& container, Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

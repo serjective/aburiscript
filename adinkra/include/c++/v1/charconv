@@ -1,0 +1,173 @@
+#ifndef ADINKRA_CHARCONV
+#define ADINKRA_CHARCONV
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <limits>
+#include <system_error>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct from_chars_result {
+    const char* ptr;
+    errc ec;
+
+    friend constexpr bool operator==(
+        const from_chars_result&,
+        const from_chars_result&) = default;
+};
+
+struct to_chars_result {
+    char* ptr;
+    errc ec;
+
+    friend constexpr bool operator==(
+        const to_chars_result&,
+        const to_chars_result&) = default;
+};
+
+namespace __charconv_detail {
+
+constexpr unsigned digit_value(char character) noexcept {
+    if (character >= '0' && character <= '9') {
+        return static_cast<unsigned>(character - '0');
+    }
+    if (character >= 'a' && character <= 'z') {
+        return static_cast<unsigned>(character - 'a') + 10U;
+    }
+    if (character >= 'A' && character <= 'Z') {
+        return static_cast<unsigned>(character - 'A') + 10U;
+    }
+    return 36U;
+}
+
+constexpr char digit_character(unsigned value) noexcept {
+    return value < 10U
+        ? static_cast<char>('0' + value)
+        : static_cast<char>('a' + (value - 10U));
+}
+
+} // namespace __charconv_detail
+
+template<class Type>
+    requires (
+        is_integral_v<Type> &&
+        !is_same_v<remove_cv_t<Type>, bool>)
+constexpr from_chars_result from_chars(
+    const char* first, const char* last, Type& value,
+    int base = 10) noexcept {
+    using Unsigned = make_unsigned_t<Type>;
+
+    const char* current = first;
+    bool negative = false;
+    if constexpr (is_signed_v<Type>) {
+        if (current != last && *current == '-') {
+            negative = true;
+            ++current;
+        }
+    }
+
+    const char* digits_begin = current;
+    const Unsigned positive_limit =
+        static_cast<Unsigned>(numeric_limits<Type>::max());
+    const Unsigned limit = negative
+        ? static_cast<Unsigned>(positive_limit + Unsigned{1})
+        : positive_limit;
+    Unsigned result = 0;
+    bool overflow = false;
+
+    while (current != last) {
+        const unsigned digit =
+            __charconv_detail::digit_value(*current);
+        if (digit >= static_cast<unsigned>(base)) {
+            break;
+        }
+
+        const Unsigned converted = static_cast<Unsigned>(digit);
+        if (result > static_cast<Unsigned>(
+                         (limit - converted) /
+                         static_cast<Unsigned>(base))) {
+            overflow = true;
+        } else if (!overflow) {
+            result = static_cast<Unsigned>(
+                result * static_cast<Unsigned>(base) + converted);
+        }
+        ++current;
+    }
+
+    if (current == digits_begin) {
+        return {first, errc::invalid_argument};
+    }
+    if (overflow) {
+        return {current, errc::result_out_of_range};
+    }
+
+    if constexpr (is_signed_v<Type>) {
+        if (negative) {
+            if (result == static_cast<Unsigned>(
+                              positive_limit + Unsigned{1})) {
+                value = numeric_limits<Type>::min();
+            } else {
+                value = static_cast<Type>(
+                    -static_cast<Type>(result));
+            }
+        } else {
+            value = static_cast<Type>(result);
+        }
+    } else {
+        value = static_cast<Type>(result);
+    }
+    return {current, errc{}};
+}
+
+template<class Type>
+    requires (
+        is_integral_v<Type> &&
+        !is_same_v<remove_cv_t<Type>, bool>)
+constexpr to_chars_result to_chars(
+    char* first, char* last, Type value,
+    int base = 10) noexcept {
+    using Unsigned = make_unsigned_t<Type>;
+
+    bool negative = false;
+    Unsigned remaining;
+    if constexpr (is_signed_v<Type>) {
+        negative = value < 0;
+        const Unsigned converted = static_cast<Unsigned>(value);
+        remaining = negative
+            ? static_cast<Unsigned>(Unsigned{0} - converted)
+            : converted;
+    } else {
+        remaining = value;
+    }
+
+    char reversed[numeric_limits<Unsigned>::digits + 1];
+    size_t length = 0;
+    do {
+        const unsigned digit = static_cast<unsigned>(
+            remaining % static_cast<Unsigned>(base));
+        reversed[length++] =
+            __charconv_detail::digit_character(digit);
+        remaining = static_cast<Unsigned>(
+            remaining / static_cast<Unsigned>(base));
+    } while (remaining != 0);
+
+    const size_t required = length + (negative ? 1U : 0U);
+    if (static_cast<size_t>(last - first) < required) {
+        return {last, errc::value_too_large};
+    }
+
+    char* output = first;
+    if (negative) {
+        *output++ = '-';
+    }
+    while (length != 0) {
+        *output++ = reversed[--length];
+    }
+    return {output, errc{}};
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,18 @@
+#ifndef ADINKRA___ADINKRA_FSTREAM
+#define ADINKRA___ADINKRA_FSTREAM
+
+#include <__adinkra/config>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __fstream {
+
+_ADINKRA_EXPORT void* open(
+    const char* filename, unsigned int mode) noexcept;
+_ADINKRA_EXPORT bool close(void* stream) noexcept;
+
+} // namespace __fstream
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

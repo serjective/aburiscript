@@ -1,0 +1,118 @@
+#ifndef ADINKRA_EXPECTED
+#define ADINKRA_EXPECTED
+
+#include <__adinkra/config>
+#include <initializer_list>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+struct unexpect_t {
+    explicit constexpr unexpect_t() = default;
+};
+
+inline constexpr unexpect_t unexpect{};
+
+template<class Error>
+class unexpected;
+
+namespace __expected_detail {
+
+template<class Type>
+struct is_unexpected : false_type {};
+
+template<class Error>
+struct is_unexpected<unexpected<Error>> : true_type {};
+
+} // namespace __expected_detail
+
+template<class Error>
+class unexpected {
+    static_assert(is_object_v<Error>);
+    static_assert(!is_array_v<Error>);
+    static_assert(!is_const_v<Error>);
+    static_assert(!is_volatile_v<Error>);
+    static_assert(!__expected_detail::is_unexpected<Error>::value);
+
+public:
+    using error_type = Error;
+
+    constexpr unexpected(const unexpected&) = default;
+    constexpr unexpected(unexpected&&) = default;
+
+    template<class Value = Error>
+        requires
+            (!is_same_v<remove_cvref_t<Value>, unexpected>) &&
+            (!is_same_v<remove_cvref_t<Value>, in_place_t>) &&
+            is_constructible_v<Error, Value>
+    constexpr explicit unexpected(Value&& value)
+        noexcept(is_nothrow_constructible_v<Error, Value>)
+        : error_(std::forward<Value>(value)) {}
+
+    template<class... Arguments>
+        requires is_constructible_v<Error, Arguments...>
+    constexpr explicit unexpected(
+        in_place_t, Arguments&&... arguments)
+        noexcept(is_nothrow_constructible_v<Error, Arguments...>)
+        : error_(std::forward<Arguments>(arguments)...) {}
+
+    template<class Element, class... Arguments>
+        requires is_constructible_v<
+            Error, initializer_list<Element>&, Arguments...>
+    constexpr explicit unexpected(
+        in_place_t, initializer_list<Element> values,
+        Arguments&&... arguments)
+        noexcept(is_nothrow_constructible_v<
+            Error, initializer_list<Element>&, Arguments...>)
+        : error_(values, std::forward<Arguments>(arguments)...) {}
+
+    constexpr unexpected& operator=(const unexpected&) = default;
+    constexpr unexpected& operator=(unexpected&&) = default;
+
+    _ADINKRA_NODISCARD constexpr const Error&
+    error() const& noexcept {
+        return error_;
+    }
+
+    _ADINKRA_NODISCARD constexpr Error& error() & noexcept {
+        return error_;
+    }
+
+    _ADINKRA_NODISCARD constexpr const Error&&
+    error() const&& noexcept {
+        return std::move(error_);
+    }
+
+    _ADINKRA_NODISCARD constexpr Error&& error() && noexcept {
+        return std::move(error_);
+    }
+
+    constexpr void swap(unexpected& other)
+        noexcept(noexcept(std::swap(error_, other.error_))) {
+        std::swap(error_, other.error_);
+    }
+
+    template<class OtherError>
+    friend constexpr bool operator==(
+        const unexpected& left,
+        const unexpected<OtherError>& right) {
+        return left.error_ == right.error();
+    }
+
+private:
+    Error error_;
+};
+
+template<class Error>
+unexpected(Error) -> unexpected<Error>;
+
+template<class Error>
+constexpr void swap(unexpected<Error>& left, unexpected<Error>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,1309 @@
+#ifndef ADINKRA_SSTREAM
+#define ADINKRA_SSTREAM
+
+#include <__adinkra/sstream>
+#include <ios>
+#include <iostream>
+#include <limits>
+#include <streambuf>
+#include <string>
+#include <string_view>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __sstream_detail {
+
+template<class Stream>
+int number_base(const Stream& stream) noexcept {
+    const auto flags = stream.flags();
+    return (flags & ios_base::hex) != 0 ? 16
+         : (flags & ios_base::oct) != 0 ? 8
+         : (flags & ios_base::dec) != 0 ? 10
+                                        : 0;
+}
+
+template<class Stream, class Integer>
+Stream& read_signed(Stream& stream, Integer& value) {
+    long long parsed = 0;
+    if (!__sstream::read_signed(
+            stream.__data(), stream.__size(),
+            stream.__position(), number_base(stream), parsed) ||
+        parsed < static_cast<long long>(
+                     (numeric_limits<Integer>::min)()) ||
+        parsed > static_cast<long long>(
+                     (numeric_limits<Integer>::max)())) {
+        stream.setstate(ios_base::failbit);
+    } else {
+        value = static_cast<Integer>(parsed);
+    }
+    return stream;
+}
+
+template<class Stream, class Integer>
+Stream& read_unsigned(Stream& stream, Integer& value) {
+    unsigned long long parsed = 0;
+    if (!__sstream::read_unsigned(
+            stream.__data(), stream.__size(),
+            stream.__position(), number_base(stream), parsed) ||
+        parsed > static_cast<unsigned long long>(
+                     (numeric_limits<Integer>::max)())) {
+        stream.setstate(ios_base::failbit);
+    } else {
+        value = static_cast<Integer>(parsed);
+    }
+    return stream;
+}
+
+template<class Stream, class Floating>
+Stream& read_floating(Stream& stream, Floating& value) {
+    long double parsed = 0;
+    if (!__sstream::read_floating(
+            stream.__data(), stream.__size(),
+            stream.__position(), parsed)) {
+        stream.setstate(ios_base::failbit);
+    } else {
+        value = static_cast<Floating>(parsed);
+    }
+    return stream;
+}
+
+template<class Stream>
+Stream& read_bool(Stream& stream, bool& value) {
+    if ((stream.flags() & ios_base::boolalpha) != 0) {
+        size_t start = 0;
+        size_t count = 0;
+        if (!__sstream::read_token(
+                stream.__data(), stream.__size(),
+                stream.__position(), start, count)) {
+            stream.setstate(ios_base::eofbit | ios_base::failbit);
+        } else {
+            const string_view token(stream.__data() + start, count);
+            if (token == string_view("true")) {
+                value = true;
+            } else if (token == string_view("false")) {
+                value = false;
+            } else {
+                stream.setstate(ios_base::failbit);
+            }
+        }
+    } else {
+        unsigned parsed = 0;
+        read_unsigned(stream, parsed);
+        if (!stream.fail() && parsed <= 1) {
+            value = parsed != 0;
+        } else {
+            stream.setstate(ios_base::failbit);
+        }
+    }
+    return stream;
+}
+
+template<class Stream, class Character, class Traits, class Allocator>
+Stream& read_string(
+    Stream& stream,
+    basic_string<Character, Traits, Allocator>& value) {
+    size_t start = 0;
+    size_t count = 0;
+    if (!__sstream::read_token(
+            stream.__data(), stream.__size(),
+            stream.__position(), start, count)) {
+        stream.setstate(ios_base::eofbit | ios_base::failbit);
+    } else {
+        value.assign(stream.__data() + start, count);
+    }
+    return stream;
+}
+
+template<class Stream, class Character>
+Stream& read_character(Stream& stream, Character& value) {
+    if ((stream.flags() & ios_base::skipws) == 0) {
+        if (stream.__position() >= stream.__size()) {
+            stream.setstate(ios_base::eofbit | ios_base::failbit);
+        } else {
+            value = static_cast<Character>(
+                stream.__data()[stream.__position()++]);
+        }
+        return stream;
+    }
+
+    size_t start = 0;
+    size_t count = 0;
+    if (!__sstream::read_token(
+            stream.__data(), stream.__size(),
+            stream.__position(), start, count)) {
+        stream.setstate(ios_base::eofbit | ios_base::failbit);
+    } else {
+        value = static_cast<Character>(stream.__data()[start]);
+        stream.__position() = start + 1;
+    }
+    return stream;
+}
+
+inline size_t localize_floating(
+    char* value, size_t count, size_t capacity,
+    const locale& location) {
+    const auto& punctuation = use_facet<numpunct<char>>(location);
+    const string grouping = punctuation.grouping();
+    const char decimal_point = punctuation.decimal_point();
+    const char thousands_separator = punctuation.thousands_sep();
+
+    size_t decimal_position = count;
+    size_t exponent_position = count;
+    for (size_t index = 0; index < count; ++index) {
+        if (value[index] == '.' && decimal_position == count) {
+            decimal_position = index;
+        } else if (value[index] == 'e' || value[index] == 'E') {
+            exponent_position = index;
+            break;
+        }
+    }
+    const size_t integer_end =
+        decimal_position < exponent_position
+            ? decimal_position
+            : exponent_position;
+    size_t integer_begin = 0;
+    if (integer_begin < integer_end &&
+        (value[integer_begin] == '+' ||
+         value[integer_begin] == '-')) {
+        ++integer_begin;
+    }
+
+    size_t separators[192];
+    size_t separator_count = 0;
+    if (!grouping.empty()) {
+        size_t group_index = 0;
+        unsigned group_size =
+            static_cast<unsigned char>(grouping[0]);
+        size_t position = integer_end;
+        while (group_size != 0 && group_size != 255 &&
+               position > integer_begin + group_size &&
+               separator_count < 192) {
+            position -= group_size;
+            separators[separator_count++] = position;
+            if (group_index + 1 < grouping.size()) {
+                ++group_index;
+                group_size =
+                    static_cast<unsigned char>(grouping[group_index]);
+            }
+        }
+    }
+
+    if (count + separator_count >= capacity) {
+        return count;
+    }
+    char localized[512];
+    size_t output = 0;
+    for (size_t index = 0; index < count; ++index) {
+        for (size_t separator = 0;
+             separator < separator_count; ++separator) {
+            if (separators[separator] == index) {
+                localized[output++] = thousands_separator;
+                break;
+            }
+        }
+        localized[output++] =
+            value[index] == '.' ? decimal_point : value[index];
+    }
+    char_traits<char>::copy(value, localized, output);
+    return output;
+}
+
+} // namespace __sstream_detail
+
+template<class Character, class Traits = char_traits<Character>,
+         class Allocator = allocator<Character>>
+class basic_stringbuf : public basic_streambuf<Character, Traits> {
+public:
+    using base_type = basic_streambuf<Character, Traits>;
+    using int_type = typename Traits::int_type;
+    using pos_type = typename Traits::pos_type;
+    using off_type = typename Traits::off_type;
+    using string_type = basic_string<Character, Traits, Allocator>;
+
+    explicit basic_stringbuf(
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : buffer_(), input_position_(0), output_position_(0),
+          mode_(mode) {
+        require_narrow();
+    }
+
+    explicit basic_stringbuf(
+        const string_type& value,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : buffer_(value), input_position_(0),
+          output_position_(
+              (mode & (ios_base::app | ios_base::ate)) != 0
+                  ? value.size()
+                  : 0),
+          mode_(mode) {
+        require_narrow();
+    }
+
+    basic_stringbuf(const basic_stringbuf&) = delete;
+
+    basic_stringbuf(basic_stringbuf&& other)
+        : base_type(), buffer_(std::move(other.buffer_)),
+          input_position_(other.input_position_),
+          output_position_(other.output_position_),
+          mode_(other.mode_) {
+        other.input_position_ = 0;
+        other.output_position_ = 0;
+    }
+
+    basic_stringbuf& operator=(const basic_stringbuf&) = delete;
+
+    basic_stringbuf& operator=(basic_stringbuf&& other) {
+        if (this != std::addressof(other)) {
+            buffer_ = std::move(other.buffer_);
+            input_position_ = other.input_position_;
+            output_position_ = other.output_position_;
+            mode_ = other.mode_;
+            other.input_position_ = 0;
+            other.output_position_ = 0;
+        }
+        return *this;
+    }
+
+    void swap(basic_stringbuf& other) {
+        buffer_.swap(other.buffer_);
+        std::swap(input_position_, other.input_position_);
+        std::swap(output_position_, other.output_position_);
+        std::swap(mode_, other.mode_);
+    }
+
+    string_type str() const {
+        return buffer_;
+    }
+
+    void str(const string_type& value) {
+        buffer_ = value;
+        input_position_ = 0;
+        output_position_ =
+            (mode_ & (ios_base::app | ios_base::ate)) != 0
+                ? buffer_.size()
+                : 0;
+    }
+
+    const Character* data() const noexcept {
+        return buffer_.data();
+    }
+
+    size_t size() const noexcept {
+        return buffer_.size();
+    }
+
+    size_t& input_position() noexcept {
+        return input_position_;
+    }
+
+    int_type sgetc() override {
+        if ((mode_ & ios_base::in) == 0 ||
+            input_position_ >= buffer_.size()) {
+            return Traits::eof();
+        }
+        return Traits::to_int_type(buffer_[input_position_]);
+    }
+
+    int_type sbumpc() override {
+        const int_type value = sgetc();
+        if (!Traits::eq_int_type(value, Traits::eof())) {
+            ++input_position_;
+        }
+        return value;
+    }
+
+    int_type sputbackc(Character value) override {
+        if ((mode_ & ios_base::in) == 0 ||
+            input_position_ == 0 ||
+            !Traits::eq(buffer_[input_position_ - 1], value)) {
+            return Traits::eof();
+        }
+        --input_position_;
+        return Traits::to_int_type(value);
+    }
+
+    streamsize sgetn(
+        Character* destination, streamsize count) override {
+        if (count <= 0 || (mode_ & ios_base::in) == 0) {
+            return 0;
+        }
+        const size_t available =
+            buffer_.size() - input_position_;
+        const size_t requested = static_cast<size_t>(count);
+        const size_t copied = std::min(available, requested);
+        Traits::copy(
+            destination, buffer_.data() + input_position_, copied);
+        input_position_ += copied;
+        return static_cast<streamsize>(copied);
+    }
+
+protected:
+    streamsize showmanyc() override {
+        return (mode_ & ios_base::in) != 0
+                   ? static_cast<streamsize>(
+                         buffer_.size() - input_position_)
+                   : 0;
+    }
+
+public:
+
+    int_type sputc(Character value) override {
+        if ((mode_ & ios_base::out) == 0) {
+            return Traits::eof();
+        }
+        if ((mode_ & ios_base::app) != 0) {
+            output_position_ = buffer_.size();
+        }
+        if (output_position_ < buffer_.size()) {
+            buffer_[output_position_] = value;
+        } else if (output_position_ == buffer_.size()) {
+            buffer_.push_back(value);
+        } else {
+            return Traits::eof();
+        }
+        ++output_position_;
+        return Traits::to_int_type(value);
+    }
+
+    streamsize sputn(
+        const Character* source, streamsize count) override {
+        streamsize written = 0;
+        while (written < count &&
+               !Traits::eq_int_type(
+                   sputc(source[written]), Traits::eof())) {
+            ++written;
+        }
+        return written;
+    }
+
+    void push_back(Character value) {
+        (void)sputc(value);
+    }
+
+    void append(const Character* value) {
+        (void)sputn(
+            value, static_cast<streamsize>(Traits::length(value)));
+    }
+
+    void append(const Character* value, size_t count) {
+        (void)sputn(value, static_cast<streamsize>(count));
+    }
+
+    pos_type pubseekoff(
+        off_type offset, ios_base::seekdir direction,
+        ios_base::openmode which =
+            ios_base::in | ios_base::out) override {
+        const bool seek_input =
+            (which & ios_base::in) != 0 &&
+            (mode_ & ios_base::in) != 0;
+        const bool seek_output =
+            (which & ios_base::out) != 0 &&
+            (mode_ & ios_base::out) != 0;
+        if (!seek_input && !seek_output) {
+            return pos_type(-1);
+        }
+
+        size_t current = 0;
+        if (direction == ios_base::beg) {
+            current = 0;
+        } else if (direction == ios_base::end) {
+            current = buffer_.size();
+        } else if (seek_input && seek_output &&
+                   input_position_ != output_position_) {
+            return pos_type(-1);
+        } else {
+            current =
+                seek_input ? input_position_ : output_position_;
+        }
+
+        const long long target =
+            static_cast<long long>(current) +
+            static_cast<long long>(offset);
+        if (target < 0 ||
+            static_cast<unsigned long long>(target) >
+                static_cast<unsigned long long>(buffer_.size())) {
+            return pos_type(-1);
+        }
+        const size_t position = static_cast<size_t>(target);
+        if (seek_input) {
+            input_position_ = position;
+        }
+        if (seek_output) {
+            output_position_ = position;
+        }
+        return static_cast<pos_type>(position);
+    }
+
+    pos_type pubseekpos(
+        pos_type position,
+        ios_base::openmode which =
+            ios_base::in | ios_base::out) override {
+        return pubseekoff(
+            static_cast<off_type>(position), ios_base::beg, which);
+    }
+
+private:
+    string_type buffer_;
+    size_t input_position_;
+    size_t output_position_;
+    ios_base::openmode mode_;
+
+    static constexpr void require_narrow() {
+
+    }
+};
+
+template<class Character, class Traits = char_traits<Character>,
+         class Allocator = allocator<Character>>
+class basic_ostringstream : public basic_ostream<Character, Traits> {
+public:
+    using output_type = basic_ostream<Character, Traits>;
+    using char_type = Character;
+    using traits_type = Traits;
+    using pos_type = typename traits_type::pos_type;
+    using allocator_type = Allocator;
+    using string_type = basic_string<Character, Traits, Allocator>;
+    using buffer_type =
+        basic_stringbuf<Character, Traits, Allocator>;
+
+    explicit basic_ostringstream(
+        ios_base::openmode mode = ios_base::out)
+        : output_type(&buffer_), buffer_(mode | ios_base::out) {
+        require_narrow();
+    }
+
+    explicit basic_ostringstream(
+        const string_type& value,
+        ios_base::openmode mode = ios_base::out)
+        : output_type(&buffer_),
+          buffer_(value, mode | ios_base::out) {
+        require_narrow();
+    }
+
+    basic_ostringstream(const basic_ostringstream&) = delete;
+
+    basic_ostringstream(basic_ostringstream&& other)
+        : output_type(static_cast<void*>(nullptr)),
+          buffer_(std::move(other.buffer_)) {
+        this->move(other);
+        this->set_streambuf(&buffer_);
+    }
+
+    basic_ostringstream&
+    operator=(const basic_ostringstream&) = delete;
+
+    basic_ostringstream& operator=(basic_ostringstream&& other) {
+        if (this != std::addressof(other)) {
+            buffer_ = std::move(other.buffer_);
+            this->move(other);
+            this->set_streambuf(&buffer_);
+        }
+        return *this;
+    }
+
+    void swap(basic_ostringstream& other) {
+        if (this == std::addressof(other)) {
+            return;
+        }
+        basic_ostringstream temporary(std::move(*this));
+        *this = std::move(other);
+        other = std::move(temporary);
+    }
+
+    using output_type::operator<<;
+
+    basic_ostringstream& operator<<(
+        ios_base& (*function)(ios_base&)) {
+        function(*this);
+        return *this;
+    }
+
+    basic_ostringstream& operator<<(bool value) {
+        if ((this->flags() & ios_base::boolalpha) != 0) {
+            append(value ? "true" : "false");
+        } else {
+            append_unsigned(value ? 1 : 0);
+        }
+        return *this;
+    }
+
+    basic_ostringstream& operator<<(short value) {
+        return append_signed(value);
+    }
+    basic_ostringstream& operator<<(unsigned short value) {
+        return append_unsigned(value);
+    }
+    basic_ostringstream& operator<<(int value) {
+        return append_signed(value);
+    }
+    basic_ostringstream& operator<<(unsigned int value) {
+        return append_unsigned(value);
+    }
+    basic_ostringstream& operator<<(long value) {
+        return append_signed(value);
+    }
+    basic_ostringstream& operator<<(unsigned long value) {
+        return append_unsigned(value);
+    }
+    basic_ostringstream& operator<<(long long value) {
+        return append_signed(value);
+    }
+    basic_ostringstream& operator<<(unsigned long long value) {
+        return append_unsigned(value);
+    }
+    basic_ostringstream& operator<<(float value) {
+        return append_floating(value);
+    }
+    basic_ostringstream& operator<<(double value) {
+        return append_floating(value);
+    }
+    basic_ostringstream& operator<<(long double value) {
+        return append_floating(value);
+    }
+    basic_ostringstream& operator<<(const void* value) {
+        char formatted[96];
+        const size_t count = __sstream::format_pointer(
+            formatted, sizeof(formatted), value,
+            (this->flags() & ios_base::uppercase) != 0);
+        append_formatted(formatted, count);
+        return *this;
+    }
+    basic_ostringstream& operator<<(Character value) {
+        append_with_width(&value, 1, false);
+        return *this;
+    }
+    basic_ostringstream& operator<<(signed char value) {
+        return *this << static_cast<Character>(value);
+    }
+    basic_ostringstream& operator<<(unsigned char value) {
+        return *this << static_cast<Character>(value);
+    }
+    basic_ostringstream& operator<<(const Character* value) {
+        append_with_width(value, Traits::length(value), false);
+        return *this;
+    }
+    basic_ostringstream& operator<<(const signed char* value)
+        requires is_same_v<Character, char> {
+        const char* characters =
+            reinterpret_cast<const char*>(value);
+        append_with_width(
+            characters, Traits::length(characters), false);
+        return *this;
+    }
+    basic_ostringstream& operator<<(const unsigned char* value)
+        requires is_same_v<Character, char> {
+        const char* characters =
+            reinterpret_cast<const char*>(value);
+        append_with_width(
+            characters, Traits::length(characters), false);
+        return *this;
+    }
+    basic_ostringstream& operator<<(
+        basic_string_view<Character, Traits> value) {
+        append_with_width(
+            value.data(), value.size(), false);
+        return *this;
+    }
+
+    template<class OtherAllocator>
+    basic_ostringstream& operator<<(
+        const basic_string<Character, Traits, OtherAllocator>& value) {
+        append_with_width(
+            value.data(), value.size(), false);
+        return *this;
+    }
+
+    string_type str() const {
+        return buffer_.str();
+    }
+
+    void str(const string_type& value) {
+        buffer_.str(value);
+        this->clear();
+    }
+
+    pos_type tellp() {
+        return buffer_.pubseekoff(
+            0, ios_base::cur, ios_base::out);
+    }
+
+protected:
+    buffer_type buffer_;
+
+private:
+    static constexpr void require_narrow() {
+
+    }
+
+    int number_base() const noexcept {
+        const auto flags = this->flags();
+        return (flags & ios_base::hex) != 0 ? 16
+             : (flags & ios_base::oct) != 0 ? 8
+                                            : 10;
+    }
+
+    void finish_unit() {
+        this->width(0);
+    }
+
+    void append(const Character* value) {
+        append_with_width(
+            value, Traits::length(value), false);
+    }
+
+    void append_formatted(const char* value, size_t count) {
+        if (count == 0) {
+            this->setstate(ios_base::badbit);
+            finish_unit();
+        } else {
+            append_with_width(value, count, true);
+        }
+    }
+
+    void append_with_width(
+        const Character* value, size_t count, bool numeric) {
+        const streamsize requested = this->width();
+        const size_t width =
+            requested > 0 ? static_cast<size_t>(requested) : 0;
+        const size_t padding = width > count ? width - count : 0;
+        const auto flags = this->flags();
+
+        size_t prefix = 0;
+        if (numeric && padding != 0 &&
+            (flags & ios_base::internal) != 0) {
+            if (count != 0 &&
+                (value[0] == Character('+') ||
+                 value[0] == Character('-'))) {
+                prefix = 1;
+            } else if (
+                count >= 2 && value[0] == Character('0') &&
+                (value[1] == Character('x') ||
+                 value[1] == Character('X'))) {
+                prefix = 2;
+            }
+        }
+
+        if ((flags & ios_base::left) != 0) {
+            buffer_.append(value, count);
+            append_fill(padding);
+        } else if (prefix != 0) {
+            buffer_.append(value, prefix);
+            append_fill(padding);
+            buffer_.append(value + prefix, count - prefix);
+        } else {
+            append_fill(padding);
+            buffer_.append(value, count);
+        }
+        finish_unit();
+    }
+
+    void append_fill(size_t count) {
+        for (size_t index = 0; index < count; ++index) {
+            buffer_.push_back(this->fill());
+        }
+    }
+
+    basic_ostringstream& append_signed(long long value) {
+        char formatted[128];
+        const auto flags = this->flags();
+        const int base = number_base();
+        const size_t count =
+            base == 10
+                ? __sstream::format_signed(
+                      formatted, sizeof(formatted), value, base,
+                      (flags & ios_base::uppercase) != 0,
+                      (flags & ios_base::showbase) != 0,
+                      (flags & ios_base::showpos) != 0)
+                : __sstream::format_unsigned(
+                      formatted, sizeof(formatted),
+                      static_cast<unsigned long long>(value), base,
+                      (flags & ios_base::uppercase) != 0,
+                      (flags & ios_base::showbase) != 0, false);
+        append_formatted(formatted, count);
+        return *this;
+    }
+
+    basic_ostringstream& append_unsigned(
+        unsigned long long value) {
+        char formatted[128];
+        const auto flags = this->flags();
+        const size_t count = __sstream::format_unsigned(
+            formatted, sizeof(formatted), value, number_base(),
+            (flags & ios_base::uppercase) != 0,
+            (flags & ios_base::showbase) != 0,
+            (flags & ios_base::showpos) != 0);
+        append_formatted(formatted, count);
+        return *this;
+    }
+
+    basic_ostringstream& append_floating(long double value) {
+        char formatted[512];
+        const auto flags = this->flags();
+        size_t count = __sstream::format_floating(
+            formatted, sizeof(formatted), value,
+            static_cast<int>(this->precision()),
+            (flags & ios_base::uppercase) != 0,
+            (flags & ios_base::scientific) != 0,
+            (flags & ios_base::fixed) != 0,
+            (flags & ios_base::showpoint) != 0,
+            (flags & ios_base::showpos) != 0);
+        count = __sstream_detail::localize_floating(
+            formatted, count, sizeof(formatted), this->getloc());
+        append_formatted(formatted, count);
+        return *this;
+    }
+};
+
+template<class Character, class Traits = char_traits<Character>,
+         class Allocator = allocator<Character>>
+class basic_istringstream : public basic_istream<Character, Traits> {
+public:
+    using input_type = basic_istream<Character, Traits>;
+    using char_type = Character;
+    using traits_type = Traits;
+    using allocator_type = Allocator;
+    using string_type = basic_string<Character, Traits, Allocator>;
+    using buffer_type =
+        basic_stringbuf<Character, Traits, Allocator>;
+
+    basic_istringstream()
+        : input_type(static_cast<void*>(nullptr)),
+          buffer_(ios_base::in) {
+        this->set_streambuf(&buffer_);
+    }
+
+    explicit basic_istringstream(
+        const string_type& value,
+        ios_base::openmode mode = ios_base::in)
+        : input_type(static_cast<void*>(nullptr)),
+          buffer_(value, mode | ios_base::in) {
+        this->set_streambuf(&buffer_);
+    }
+
+    basic_istringstream(const basic_istringstream&) = delete;
+
+    basic_istringstream(basic_istringstream&& other)
+        : input_type(static_cast<void*>(nullptr)),
+          buffer_(std::move(other.buffer_)) {
+        this->move(other);
+        this->move_count_from(other);
+        this->set_streambuf(&buffer_);
+    }
+
+    basic_istringstream& operator=(const basic_istringstream&) = delete;
+
+    basic_istringstream& operator=(basic_istringstream&& other) {
+        if (this != std::addressof(other)) {
+            buffer_ = std::move(other.buffer_);
+            this->move(other);
+            this->move_count_from(other);
+            this->set_streambuf(&buffer_);
+        }
+        return *this;
+    }
+
+    void swap(basic_istringstream& other) {
+        if (this == std::addressof(other)) {
+            return;
+        }
+        basic_istringstream temporary(std::move(*this));
+        *this = std::move(other);
+        other = std::move(temporary);
+    }
+
+    using input_type::operator>>;
+
+    basic_istringstream& operator>>(
+        ios_base& (*function)(ios_base&)) {
+        function(*this);
+        return *this;
+    }
+    basic_istringstream& operator>>(bool& value) {
+        return __sstream_detail::read_bool(*this, value);
+    }
+    basic_istringstream& operator>>(short& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_istringstream& operator>>(unsigned short& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_istringstream& operator>>(int& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_istringstream& operator>>(unsigned int& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_istringstream& operator>>(long& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_istringstream& operator>>(unsigned long& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_istringstream& operator>>(long long& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_istringstream& operator>>(unsigned long long& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_istringstream& operator>>(float& value) {
+        return __sstream_detail::read_floating(*this, value);
+    }
+    basic_istringstream& operator>>(double& value) {
+        return __sstream_detail::read_floating(*this, value);
+    }
+    basic_istringstream& operator>>(long double& value) {
+        return __sstream_detail::read_floating(*this, value);
+    }
+    basic_istringstream& operator>>(Character& value) {
+        return __sstream_detail::read_character(*this, value);
+    }
+
+    template<class OtherAllocator>
+    basic_istringstream& operator>>(
+        basic_string<Character, Traits, OtherAllocator>& value) {
+        return __sstream_detail::read_string(*this, value);
+    }
+
+    string_type str() const {
+        return buffer_.str();
+    }
+
+    void str(const string_type& value) {
+        buffer_.str(value);
+        this->clear();
+    }
+
+    const char* __data() const noexcept {
+        return buffer_.data();
+    }
+    size_t __size() const noexcept {
+        return buffer_.size();
+    }
+    size_t& __position() noexcept {
+        return buffer_.input_position();
+    }
+
+protected:
+    buffer_type& __buffer() noexcept {
+        return buffer_;
+    }
+
+    const buffer_type& __buffer() const noexcept {
+        return buffer_;
+    }
+
+private:
+    buffer_type buffer_;
+};
+
+template<class Character, class Traits = char_traits<Character>,
+         class Allocator = allocator<Character>>
+class basic_stringstream
+    : public basic_iostream<Character, Traits> {
+public:
+    using stream_type = basic_iostream<Character, Traits>;
+    using input_type = basic_istream<Character, Traits>;
+    using output_type = basic_ostream<Character, Traits>;
+    using pos_type = typename Traits::pos_type;
+    using string_type =
+        basic_string<Character, Traits, Allocator>;
+    using buffer_type =
+        basic_stringbuf<Character, Traits, Allocator>;
+
+    explicit basic_stringstream(
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : stream_type(&buffer_),
+          buffer_(mode | ios_base::in | ios_base::out) {}
+
+    explicit basic_stringstream(
+        const string_type& value,
+        ios_base::openmode mode =
+            ios_base::in | ios_base::out)
+        : stream_type(&buffer_),
+          buffer_(
+              value, mode | ios_base::in | ios_base::out) {}
+
+    basic_stringstream(const basic_stringstream&) = delete;
+
+    basic_stringstream(basic_stringstream&& other)
+        : stream_type(static_cast<void*>(nullptr)),
+          buffer_(std::move(other.buffer_)) {
+        this->basic_ios<Character, Traits>::move(other);
+        this->input_type::move_count_from(other);
+        this->input_type::set_streambuf(&buffer_);
+        this->output_type::set_streambuf(&buffer_);
+    }
+
+    basic_stringstream& operator=(const basic_stringstream&) = delete;
+
+    basic_stringstream& operator=(basic_stringstream&& other) {
+        if (this != std::addressof(other)) {
+            buffer_ = std::move(other.buffer_);
+            this->basic_ios<Character, Traits>::move(other);
+            this->input_type::move_count_from(other);
+            this->input_type::set_streambuf(&buffer_);
+            this->output_type::set_streambuf(&buffer_);
+        }
+        return *this;
+    }
+
+    void swap(basic_stringstream& other) {
+        if (this == std::addressof(other)) {
+            return;
+        }
+        basic_stringstream temporary(std::move(*this));
+        *this = std::move(other);
+        other = std::move(temporary);
+    }
+
+    using input_type::operator>>;
+    using output_type::operator<<;
+
+    basic_stringstream& operator>>(
+        ios_base& (*function)(ios_base&)) {
+        function(*this);
+        return *this;
+    }
+    basic_stringstream& operator>>(bool& value) {
+        return __sstream_detail::read_bool(*this, value);
+    }
+    basic_stringstream& operator>>(short& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_stringstream& operator>>(unsigned short& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_stringstream& operator>>(int& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_stringstream& operator>>(unsigned int& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_stringstream& operator>>(long& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_stringstream& operator>>(unsigned long& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_stringstream& operator>>(long long& value) {
+        return __sstream_detail::read_signed(*this, value);
+    }
+    basic_stringstream& operator>>(unsigned long long& value) {
+        return __sstream_detail::read_unsigned(*this, value);
+    }
+    basic_stringstream& operator>>(float& value) {
+        return __sstream_detail::read_floating(*this, value);
+    }
+    basic_stringstream& operator>>(double& value) {
+        return __sstream_detail::read_floating(*this, value);
+    }
+    basic_stringstream& operator>>(long double& value) {
+        return __sstream_detail::read_floating(*this, value);
+    }
+    basic_stringstream& operator>>(Character& value) {
+        return __sstream_detail::read_character(*this, value);
+    }
+
+    template<class OtherAllocator>
+    basic_stringstream& operator>>(
+        basic_string<Character, Traits, OtherAllocator>& value) {
+        return __sstream_detail::read_string(*this, value);
+    }
+
+    template<class Value>
+        requires requires(input_type& input, Value& value) {
+            input >> value;
+        }
+    basic_stringstream& operator>>(Value& value) {
+        static_cast<input_type&>(*this) >> value;
+        return *this;
+    }
+
+    string_type str() const {
+        return buffer_.str();
+    }
+
+    void str(const string_type& value) {
+        buffer_.str(value);
+        this->clear();
+    }
+
+    pos_type tellp() {
+        return buffer_.pubseekoff(
+            0, ios_base::cur, ios_base::out);
+    }
+
+    buffer_type* rdbuf() const noexcept {
+        return const_cast<buffer_type*>(&buffer_);
+    }
+
+    const Character* __data() const noexcept {
+        return buffer_.data();
+    }
+
+    size_t __size() const noexcept {
+        return buffer_.size();
+    }
+
+    size_t& __position() noexcept {
+        return buffer_.input_position();
+    }
+
+    basic_stringstream& operator<<(
+        ios_base& (*function)(ios_base&)) {
+        function(*this);
+        return *this;
+    }
+
+    basic_stringstream& operator<<(bool value) {
+        if ((this->flags() & ios_base::boolalpha) != 0) {
+            append(value ? "true" : "false");
+        } else {
+            append_unsigned(value ? 1 : 0);
+        }
+        return *this;
+    }
+    basic_stringstream& operator<<(short value) {
+        return append_signed(value);
+    }
+    basic_stringstream& operator<<(unsigned short value) {
+        return append_unsigned(value);
+    }
+    basic_stringstream& operator<<(int value) {
+        return append_signed(value);
+    }
+    basic_stringstream& operator<<(unsigned int value) {
+        return append_unsigned(value);
+    }
+    basic_stringstream& operator<<(long value) {
+        return append_signed(value);
+    }
+    basic_stringstream& operator<<(unsigned long value) {
+        return append_unsigned(value);
+    }
+    basic_stringstream& operator<<(long long value) {
+        return append_signed(value);
+    }
+    basic_stringstream& operator<<(unsigned long long value) {
+        return append_unsigned(value);
+    }
+    basic_stringstream& operator<<(float value) {
+        return append_floating(value);
+    }
+    basic_stringstream& operator<<(double value) {
+        return append_floating(value);
+    }
+    basic_stringstream& operator<<(long double value) {
+        return append_floating(value);
+    }
+    basic_stringstream& operator<<(const void* value) {
+        char formatted[96];
+        const size_t count = __sstream::format_pointer(
+            formatted, sizeof(formatted), value,
+            (this->flags() & ios_base::uppercase) != 0);
+        append_formatted(formatted, count);
+        return *this;
+    }
+    basic_stringstream& operator<<(Character value) {
+        append_character(value);
+        return *this;
+    }
+    basic_stringstream& operator<<(signed char value) {
+        append_character(static_cast<Character>(value));
+        return *this;
+    }
+    basic_stringstream& operator<<(unsigned char value) {
+        append_character(static_cast<Character>(value));
+        return *this;
+    }
+    basic_stringstream& operator<<(const Character* value) {
+        append(value);
+        return *this;
+    }
+    basic_stringstream& operator<<(const signed char* value)
+        requires is_same_v<Character, char> {
+        append(reinterpret_cast<const char*>(value));
+        return *this;
+    }
+    basic_stringstream& operator<<(const unsigned char* value)
+        requires is_same_v<Character, char> {
+        append(reinterpret_cast<const char*>(value));
+        return *this;
+    }
+    basic_stringstream& operator<<(
+        basic_string_view<Character, Traits> value) {
+        append(value.data(), value.size());
+        return *this;
+    }
+
+    template<class OtherAllocator>
+    basic_stringstream& operator<<(
+        const basic_string<Character, Traits, OtherAllocator>& value) {
+        append(value.data(), value.size());
+        return *this;
+    }
+
+    template<class Value>
+        requires requires(output_type& output, const Value& value) {
+            output << value;
+        }
+    basic_stringstream& operator<<(const Value& value) {
+        static_cast<output_type&>(*this) << value;
+        return *this;
+    }
+
+private:
+    buffer_type buffer_;
+
+    buffer_type& __buffer() noexcept {
+        return buffer_;
+    }
+
+    int number_base() const noexcept {
+        const auto flags = this->flags();
+        return (flags & ios_base::hex) != 0 ? 16
+             : (flags & ios_base::oct) != 0 ? 8
+                                            : 10;
+    }
+
+    void finish_unit() {
+        this->width(0);
+    }
+
+    void append_character(Character value) {
+        append_with_width(&value, 1, false);
+    }
+
+    void append(const Character* value) {
+        append(value, Traits::length(value));
+    }
+
+    void append(const Character* value, size_t count) {
+        append_with_width(value, count, false);
+    }
+
+    void append_formatted(const char* value, size_t count) {
+        if (count == 0) {
+            this->setstate(ios_base::badbit);
+            finish_unit();
+        } else {
+            append_with_width(value, count, true);
+        }
+    }
+
+    void append_with_width(
+        const Character* value, size_t count, bool numeric) {
+        const streamsize requested = this->width();
+        const size_t width =
+            requested > 0 ? static_cast<size_t>(requested) : 0;
+        const size_t padding = width > count ? width - count : 0;
+        const auto flags = this->flags();
+
+        size_t prefix = 0;
+        if (numeric && padding != 0 &&
+            (flags & ios_base::internal) != 0) {
+            if (count != 0 &&
+                (value[0] == Character('+') ||
+                 value[0] == Character('-'))) {
+                prefix = 1;
+            } else if (
+                count >= 2 && value[0] == Character('0') &&
+                (value[1] == Character('x') ||
+                 value[1] == Character('X'))) {
+                prefix = 2;
+            }
+        }
+
+        if ((flags & ios_base::left) != 0) {
+            append_raw(value, count);
+            append_fill(padding);
+        } else if (prefix != 0) {
+            append_raw(value, prefix);
+            append_fill(padding);
+            append_raw(value + prefix, count - prefix);
+        } else {
+            append_fill(padding);
+            append_raw(value, count);
+        }
+        finish_unit();
+    }
+
+    void append_raw(const Character* value, size_t count) {
+        if (__buffer().sputn(
+                value, static_cast<streamsize>(count)) !=
+            static_cast<streamsize>(count)) {
+            this->setstate(ios_base::badbit);
+        }
+    }
+
+    void append_fill(size_t count) {
+        Character buffer[64];
+        for (Character& character : buffer) {
+            character = this->fill();
+        }
+        while (count != 0) {
+            const size_t current =
+                count < 64 ? count : 64;
+            append_raw(buffer, current);
+            count -= current;
+        }
+    }
+
+    basic_stringstream& append_signed(long long value) {
+        char formatted[128];
+        const auto flags = this->flags();
+        const int base = number_base();
+        const size_t count =
+            base == 10
+                ? __sstream::format_signed(
+                      formatted, sizeof(formatted), value, base,
+                      (flags & ios_base::uppercase) != 0,
+                      (flags & ios_base::showbase) != 0,
+                      (flags & ios_base::showpos) != 0)
+                : __sstream::format_unsigned(
+                      formatted, sizeof(formatted),
+                      static_cast<unsigned long long>(value), base,
+                      (flags & ios_base::uppercase) != 0,
+                      (flags & ios_base::showbase) != 0, false);
+        append_formatted(formatted, count);
+        return *this;
+    }
+
+    basic_stringstream& append_unsigned(
+        unsigned long long value) {
+        char formatted[128];
+        const auto flags = this->flags();
+        const size_t count = __sstream::format_unsigned(
+            formatted, sizeof(formatted), value, number_base(),
+            (flags & ios_base::uppercase) != 0,
+            (flags & ios_base::showbase) != 0,
+            (flags & ios_base::showpos) != 0);
+        append_formatted(formatted, count);
+        return *this;
+    }
+
+    basic_stringstream& append_floating(long double value) {
+        char formatted[512];
+        const auto flags = this->flags();
+        size_t count = __sstream::format_floating(
+            formatted, sizeof(formatted), value,
+            static_cast<int>(this->precision()),
+            (flags & ios_base::uppercase) != 0,
+            (flags & ios_base::scientific) != 0,
+            (flags & ios_base::fixed) != 0,
+            (flags & ios_base::showpoint) != 0,
+            (flags & ios_base::showpos) != 0);
+        count = __sstream_detail::localize_floating(
+            formatted, count, sizeof(formatted), this->getloc());
+        append_formatted(formatted, count);
+        return *this;
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,25 @@
+#ifndef ADINKRA_META
+#define ADINKRA_META
+
+#include <__adinkra/config>
+
+#ifndef __cpp_impl_reflection
+#error "<meta> requires reflection (-std=c++26 or -freflection)"
+#endif
+
+#include <string_view>
+#include <vector>
+
+_ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED
+namespace meta {
+
+using info = decltype(^^::);
+
+} // namespace meta
+_ADINKRA_END_NAMESPACE_STD_UNVERSIONED
+
+#define _ABURI_META_STRING_VIEW_TYPE ::std::string_view
+#define _ABURI_META_VECTOR_TYPE ::std::vector<::std::meta::info>
+#include <__aburi/meta_core>
+
+#endif // ADINKRA_META

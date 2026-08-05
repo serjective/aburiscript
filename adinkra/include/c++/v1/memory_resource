@@ -1,0 +1,243 @@
+#ifndef ADINKRA_MEMORY_RESOURCE
+#define ADINKRA_MEMORY_RESOURCE
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <mutex>
+#include <new>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace pmr {
+
+struct pool_options {
+    size_t max_blocks_per_chunk = 0;
+    size_t largest_required_pool_block = 0;
+};
+
+class memory_resource {
+public:
+    virtual ~memory_resource() = default;
+
+    [[nodiscard]] void* allocate(
+        size_t bytes,
+        size_t alignment = __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        return do_allocate(bytes, alignment);
+    }
+
+    void deallocate(
+        void* pointer, size_t bytes,
+        size_t alignment = __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        do_deallocate(pointer, bytes, alignment);
+    }
+
+    bool is_equal(const memory_resource& other) const noexcept {
+        return do_is_equal(other);
+    }
+
+protected:
+    virtual void* do_allocate(size_t bytes, size_t alignment) = 0;
+    virtual void do_deallocate(
+        void* pointer, size_t bytes, size_t alignment) = 0;
+    virtual bool do_is_equal(
+        const memory_resource& other) const noexcept = 0;
+};
+
+inline bool operator==(
+    const memory_resource& left,
+    const memory_resource& right) noexcept {
+    return &left == &right || left.is_equal(right);
+}
+
+class __new_delete_resource final : public memory_resource {
+private:
+    void* do_allocate(size_t bytes, size_t alignment) override {
+        if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+            return ::operator new(bytes, align_val_t{alignment});
+        }
+        return ::operator new(bytes);
+    }
+
+    void do_deallocate(
+        void* pointer, size_t, size_t alignment) override {
+        if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+            ::operator delete(pointer, align_val_t{alignment});
+        } else {
+            ::operator delete(pointer);
+        }
+    }
+
+    bool do_is_equal(
+        const memory_resource& other) const noexcept override {
+        return this == &other;
+    }
+};
+
+class __null_memory_resource final : public memory_resource {
+private:
+    void* do_allocate(size_t, size_t) override {
+        throw bad_alloc();
+    }
+
+    void do_deallocate(void*, size_t, size_t) override {}
+
+    bool do_is_equal(
+        const memory_resource& other) const noexcept override {
+        return this == &other;
+    }
+};
+
+inline memory_resource* new_delete_resource() noexcept {
+    static __new_delete_resource resource;
+    return &resource;
+}
+
+inline memory_resource* null_memory_resource() noexcept {
+    static __null_memory_resource resource;
+    return &resource;
+}
+
+inline memory_resource*& __default_resource_slot() noexcept {
+    static memory_resource* resource = new_delete_resource();
+    return resource;
+}
+
+inline memory_resource* get_default_resource() noexcept {
+    return __default_resource_slot();
+}
+
+inline memory_resource* set_default_resource(
+    memory_resource* resource) noexcept {
+    if (resource == nullptr) {
+        resource = new_delete_resource();
+    }
+    memory_resource*& slot = __default_resource_slot();
+    memory_resource* previous = slot;
+    slot = resource;
+    return previous;
+}
+
+class synchronized_pool_resource {
+    struct allocation {
+        allocation* next;
+        void* pointer;
+        size_t bytes;
+        size_t alignment;
+    };
+
+public:
+    synchronized_pool_resource()
+        : synchronized_pool_resource(
+              pool_options{}, get_default_resource()) {}
+
+    explicit synchronized_pool_resource(memory_resource* upstream)
+        : synchronized_pool_resource(pool_options{}, upstream) {}
+
+    explicit synchronized_pool_resource(
+        const pool_options& options)
+        : synchronized_pool_resource(
+              options, get_default_resource()) {}
+
+    synchronized_pool_resource(
+        const pool_options& options, memory_resource* upstream)
+        : options_(options),
+          upstream_(upstream == nullptr
+                        ? get_default_resource()
+                        : upstream) {}
+
+    ~synchronized_pool_resource() {
+        release();
+    }
+
+    synchronized_pool_resource(
+        const synchronized_pool_resource&) = delete;
+    synchronized_pool_resource& operator=(
+        const synchronized_pool_resource&) = delete;
+
+    [[nodiscard]] void* allocate(
+        size_t bytes,
+        size_t alignment = __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        void* pointer = upstream_->allocate(bytes, alignment);
+        allocation* record = nullptr;
+        try {
+            record = static_cast<allocation*>(
+                ::operator new(sizeof(allocation)));
+        } catch (...) {
+            upstream_->deallocate(pointer, bytes, alignment);
+            throw;
+        }
+        record->pointer = pointer;
+        record->bytes = bytes;
+        record->alignment = alignment;
+
+        lock_guard<mutex> lock(mutex_);
+        record->next = allocations_;
+        allocations_ = record;
+        return pointer;
+    }
+
+    void deallocate(
+        void* pointer, size_t,
+        size_t = __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        if (pointer == nullptr) {
+            return;
+        }
+
+        allocation* found = nullptr;
+        {
+            lock_guard<mutex> lock(mutex_);
+            allocation** current = &allocations_;
+            while (*current != nullptr) {
+                if ((*current)->pointer == pointer) {
+                    found = *current;
+                    *current = found->next;
+                    break;
+                }
+                current = &(*current)->next;
+            }
+        }
+        if (found != nullptr) {
+            upstream_->deallocate(
+                found->pointer, found->bytes, found->alignment);
+            ::operator delete(found);
+        }
+    }
+
+    void release() {
+        allocation* allocations;
+        {
+            lock_guard<mutex> lock(mutex_);
+            allocations = allocations_;
+            allocations_ = nullptr;
+        }
+        while (allocations != nullptr) {
+            allocation* next = allocations->next;
+            upstream_->deallocate(
+                allocations->pointer,
+                allocations->bytes,
+                allocations->alignment);
+            ::operator delete(allocations);
+            allocations = next;
+        }
+    }
+
+    memory_resource* upstream_resource() const noexcept {
+        return upstream_;
+    }
+
+    pool_options options() const noexcept {
+        return options_;
+    }
+
+private:
+    pool_options options_;
+    memory_resource* upstream_;
+    allocation* allocations_ = nullptr;
+    mutex mutex_;
+};
+
+} // namespace pmr
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,54 @@
+#ifndef ADINKRA___ADINKRA_CONFIG
+#define ADINKRA___ADINKRA_CONFIG
+
+#if !defined(__cplusplus) || __cplusplus < 202002L
+#error "Adinkra requires C++20 or newer"
+#endif
+
+#define __ADINKRA__ 1
+#define __ADINKRA_ABI_VERSION 1
+
+#if defined(__clang__)
+#if __has_feature(cxx_rtti)
+#define _ADINKRA_HAS_RTTI 1
+#else
+#define _ADINKRA_HAS_RTTI 0
+#endif
+#elif defined(__GXX_RTTI)
+#define _ADINKRA_HAS_RTTI 1
+#else
+#define _ADINKRA_HAS_RTTI 0
+#endif
+
+#define __cpp_lib_nonmember_container_access 201411L
+#define __cpp_lib_erase_if 202002L
+
+namespace std {
+inline namespace __adinkra_v1 {}
+namespace __1 = __adinkra_v1;
+}
+
+#define _ADINKRA_BEGIN_NAMESPACE_STD \
+    namespace std { inline namespace __adinkra_v1 {
+#define _ADINKRA_END_NAMESPACE_STD }}
+
+#define _ADINKRA_BEGIN_NAMESPACE_STD_UNVERSIONED namespace std {
+#define _ADINKRA_END_NAMESPACE_STD_UNVERSIONED }
+
+#if defined(__clang__) || defined(__GNUC__)
+#define _ADINKRA_NORETURN [[noreturn]]
+#define _ADINKRA_NODISCARD [[nodiscard]]
+#define _ADINKRA_NO_UNIQUE_ADDRESS [[no_unique_address]]
+#define _ADINKRA_ALWAYS_INLINE __attribute__((__always_inline__)) inline
+#define _ADINKRA_EXPORT __attribute__((__visibility__("default")))
+#define _ADINKRA_UNREACHABLE() __builtin_unreachable()
+#else
+#define _ADINKRA_NORETURN [[noreturn]]
+#define _ADINKRA_NODISCARD [[nodiscard]]
+#define _ADINKRA_NO_UNIQUE_ADDRESS [[no_unique_address]]
+#define _ADINKRA_ALWAYS_INLINE inline
+#define _ADINKRA_EXPORT
+#define _ADINKRA_UNREACHABLE() ((void)0)
+#endif
+
+#endif

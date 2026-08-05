@@ -1,0 +1,603 @@
+#ifndef ADINKRA_ISTREAM
+#define ADINKRA_ISTREAM
+
+#include <__adinkra/io>
+#include <__adinkra/sstream>
+#include <ios>
+#include <iosfwd>
+#include <limits>
+#include <streambuf>
+#include <string>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Character, class Traits>
+class basic_istream : public virtual basic_ios<Character, Traits> {
+public:
+    using char_type = Character;
+    using traits_type = Traits;
+    using int_type = typename Traits::int_type;
+    using pos_type = typename Traits::pos_type;
+    using off_type = typename Traits::off_type;
+
+    template<class NativeStream>
+        requires (!is_base_of_v<
+            basic_streambuf<Character, Traits>,
+            remove_cv_t<NativeStream>>)
+    explicit basic_istream(NativeStream* stream) noexcept
+        : stream_(static_cast<void*>(stream)),
+          buffer_(nullptr), count_(0) {}
+
+    explicit basic_istream(
+        basic_streambuf<Character, Traits>* buffer) noexcept
+        : stream_(nullptr), buffer_(buffer), count_(0) {}
+
+    virtual ~basic_istream() = default;
+
+    basic_istream& operator>>(basic_istream& (*function)(basic_istream&)) {
+        return function(*this);
+    }
+
+    basic_istream& operator>>(ios_base& (*function)(ios_base&)) {
+        function(*this);
+        return *this;
+    }
+
+    basic_istream& operator>>(bool& value) {
+        if ((this->flags() & ios_base::boolalpha) != 0) {
+            char token[8]{};
+            if (!prepare() ||
+                !__io::read_token(stream_, token, sizeof(token))) {
+                fail_input();
+            } else if (token[0] == 't' && token[1] == 'r' &&
+                       token[2] == 'u' && token[3] == 'e' &&
+                       token[4] == '\0') {
+                value = true;
+            } else if (token[0] == 'f' && token[1] == 'a' &&
+                       token[2] == 'l' && token[3] == 's' &&
+                       token[4] == 'e' && token[5] == '\0') {
+                value = false;
+            } else {
+                this->setstate(ios_base::failbit);
+            }
+        } else {
+            unsigned long long parsed = 0;
+            if (!prepare() ||
+                !__io::read_unsigned(
+                    stream_, parsed, number_base()) ||
+                parsed > 1) {
+                fail_input();
+            } else {
+                value = parsed != 0;
+            }
+        }
+        return *this;
+    }
+
+    basic_istream& operator>>(short& value) {
+        return read_signed(value);
+    }
+    basic_istream& operator>>(unsigned short& value) {
+        return read_unsigned(value);
+    }
+    basic_istream& operator>>(int& value) {
+        return read_signed(value);
+    }
+    basic_istream& operator>>(unsigned int& value) {
+        return read_unsigned(value);
+    }
+    basic_istream& operator>>(long& value) {
+        return read_signed(value);
+    }
+    basic_istream& operator>>(unsigned long& value) {
+        return read_unsigned(value);
+    }
+    basic_istream& operator>>(long long& value) {
+        return read_signed(value);
+    }
+    basic_istream& operator>>(unsigned long long& value) {
+        return read_unsigned(value);
+    }
+    basic_istream& operator>>(float& value) {
+        return read_floating(value);
+    }
+    basic_istream& operator>>(double& value) {
+        return read_floating(value);
+    }
+    basic_istream& operator>>(long double& value) {
+        return read_floating(value);
+    }
+
+    int_type get() {
+        count_ = 0;
+        const int value = __get_character();
+        if (value < 0) {
+            this->setstate(ios_base::eofbit | ios_base::failbit);
+            return Traits::eof();
+        }
+        count_ = 1;
+        return Traits::to_int_type(static_cast<Character>(value));
+    }
+
+    basic_istream& get(Character& value) {
+        const int_type result = get();
+        if (!Traits::eq_int_type(result, Traits::eof())) {
+            value = Traits::to_char_type(result);
+        }
+        return *this;
+    }
+
+    basic_istream& getline(
+        Character* destination, streamsize count,
+        Character delimiter = Character('\n')) {
+        count_ = 0;
+        if (count <= 0) {
+            this->setstate(ios_base::failbit);
+            return *this;
+        }
+        streamsize stored = 0;
+        while (stored + 1 < count) {
+            const int value = __get_character();
+            if (value < 0) {
+                this->setstate(ios_base::eofbit);
+                break;
+            }
+            ++count_;
+            if (Traits::eq(
+                    static_cast<Character>(value), delimiter)) {
+                break;
+            }
+            destination[stored++] =
+                static_cast<Character>(value);
+        }
+        destination[stored] = Character();
+        if (count_ == 0) {
+            this->setstate(ios_base::failbit);
+        }
+        return *this;
+    }
+
+    basic_istream& read(Character* destination, streamsize count) {
+        count_ = 0;
+        if (buffer_ != nullptr) {
+            try {
+                count_ = buffer_->sgetn(destination, count);
+            } catch (...) {
+                this->setstate(ios_base::badbit);
+                return *this;
+            }
+            if (count_ != count) {
+                this->setstate(
+                    ios_base::eofbit | ios_base::failbit);
+            }
+            return *this;
+        }
+        while (count_ < count) {
+            const int value = __get_character();
+            if (value < 0) {
+                this->setstate(ios_base::eofbit | ios_base::failbit);
+                break;
+            }
+            destination[count_++] = static_cast<Character>(value);
+        }
+        return *this;
+    }
+
+    streamsize gcount() const noexcept { return count_; }
+
+    pos_type tellg() {
+        const long long position =
+            buffer_ != nullptr
+                ? static_cast<long long>(buffer_->pubseekoff(
+                      0, ios_base::cur, ios_base::in))
+                : __io::tell(stream_);
+        if (position < 0) {
+            this->setstate(ios_base::failbit);
+            return pos_type(-1);
+        }
+        return static_cast<pos_type>(position);
+    }
+
+    basic_istream& seekg(pos_type position) {
+        return seekg(static_cast<off_type>(position), ios_base::beg);
+    }
+
+    basic_istream& seekg(off_type offset, ios_base::seekdir direction) {
+        if (!this->fail()) {
+            this->clear(this->rdstate() & ~ios_base::eofbit);
+            const bool sought =
+                buffer_ != nullptr
+                    ? buffer_->pubseekoff(
+                          offset, direction, ios_base::in) != pos_type(-1)
+                    : __io::seek(
+                          stream_, static_cast<long long>(offset), direction);
+            if (!sought) {
+                this->setstate(ios_base::failbit);
+            }
+        }
+        return *this;
+    }
+
+    int_type peek() {
+        const int value = __get_character();
+        if (value < 0) {
+            this->setstate(ios_base::eofbit);
+            return Traits::eof();
+        }
+        __putback_character(static_cast<Character>(value));
+        return Traits::to_int_type(static_cast<Character>(value));
+    }
+
+    basic_istream& putback(Character value) {
+        count_ = 0;
+        this->clear(this->rdstate() & ~ios_base::eofbit);
+        if (this->fail() || !__putback_character(value)) {
+            this->setstate(ios_base::badbit);
+        }
+        return *this;
+    }
+
+    basic_istream& ignore(
+        streamsize count = 1,
+        int_type delimiter = Traits::eof()) {
+        count_ = 0;
+        while (count_ < count) {
+            const int value = __get_character();
+            if (value < 0) {
+                this->setstate(ios_base::eofbit);
+                break;
+            }
+            ++count_;
+            if (!Traits::eq_int_type(delimiter, Traits::eof()) &&
+                Traits::eq_int_type(
+                    Traits::to_int_type(
+                        static_cast<Character>(value)),
+                    delimiter)) {
+                break;
+            }
+        }
+        return *this;
+    }
+
+    bool prepare() {
+        if (this->tie() != nullptr) {
+            this->tie()->flush();
+        }
+        if ((this->flags() & ios_base::skipws) != 0 &&
+            !__skip_whitespace()) {
+            this->setstate(ios_base::eofbit | ios_base::failbit);
+            return false;
+        }
+        return !this->fail();
+    }
+
+    void* native_stream() const noexcept { return stream_; }
+    basic_streambuf<Character, Traits>* rdbuf() const noexcept {
+        return buffer_;
+    }
+
+    int __get_character() {
+        if (buffer_ != nullptr) {
+            const int_type value = buffer_->sbumpc();
+            return Traits::eq_int_type(value, Traits::eof())
+                       ? -1
+                       : static_cast<unsigned char>(
+                             Traits::to_char_type(value));
+        }
+        return __io::get(stream_);
+    }
+
+    bool __putback_character(Character value) {
+        if (buffer_ != nullptr) {
+            return !Traits::eq_int_type(
+                buffer_->sputbackc(value), Traits::eof());
+        }
+        return __io::unget(stream_, static_cast<char>(value));
+    }
+
+    bool __skip_whitespace() {
+        if (buffer_ == nullptr) {
+            return __io::skip_whitespace(stream_);
+        }
+        for (;;) {
+            const int value = __get_character();
+            if (value < 0) {
+                return false;
+            }
+            const Character character = static_cast<Character>(value);
+            if (character != Character(' ') &&
+                character != Character('\t') &&
+                character != Character('\n') &&
+                character != Character('\r') &&
+                character != Character('\f') &&
+                character != Character('\v')) {
+                return __putback_character(character);
+            }
+        }
+    }
+
+protected:
+    void move_count_from(basic_istream& other) noexcept {
+        count_ = other.count_;
+        other.count_ = 0;
+    }
+
+    void set_native_stream(void* stream) noexcept {
+        stream_ = stream;
+        buffer_ = nullptr;
+    }
+
+    void set_streambuf(
+        basic_streambuf<Character, Traits>* buffer) noexcept {
+        stream_ = nullptr;
+        buffer_ = buffer;
+    }
+
+private:
+    void* stream_;
+    basic_streambuf<Character, Traits>* buffer_;
+    streamsize count_;
+
+    int number_base() const noexcept {
+        const auto flags = this->flags();
+        return (flags & ios_base::hex) != 0 ? 16
+             : (flags & ios_base::oct) != 0 ? 8
+             : (flags & ios_base::dec) != 0 ? 10
+                                            : 0;
+    }
+
+    void fail_input() {
+        this->setstate(ios_base::failbit);
+    }
+
+    template<class Integer>
+    basic_istream& read_signed(Integer& value) {
+        long long parsed = 0;
+        if (!prepare()) {
+            fail_input();
+            return *this;
+        }
+        bool succeeded = false;
+        if (buffer_ == nullptr) {
+            succeeded =
+                __io::read_signed(stream_, parsed, number_base());
+        } else {
+            char token[512] = {};
+            const size_t count = read_buffer_token(
+                token, sizeof(token));
+            size_t position = 0;
+            succeeded = __sstream::read_signed(
+                token, count, position, number_base(), parsed);
+            restore_buffer_token(token, count, position);
+        }
+        if (!succeeded ||
+            parsed < static_cast<long long>(
+                         (numeric_limits<Integer>::min)()) ||
+            parsed > static_cast<long long>(
+                         (numeric_limits<Integer>::max)())) {
+            fail_input();
+        } else {
+            value = static_cast<Integer>(parsed);
+        }
+        return *this;
+    }
+
+    template<class Integer>
+    basic_istream& read_unsigned(Integer& value) {
+        unsigned long long parsed = 0;
+        if (!prepare()) {
+            fail_input();
+            return *this;
+        }
+        bool succeeded = false;
+        if (buffer_ == nullptr) {
+            succeeded =
+                __io::read_unsigned(stream_, parsed, number_base());
+        } else {
+            char token[512] = {};
+            const size_t count = read_buffer_token(
+                token, sizeof(token));
+            size_t position = 0;
+            succeeded = __sstream::read_unsigned(
+                token, count, position, number_base(), parsed);
+            restore_buffer_token(token, count, position);
+        }
+        if (!succeeded ||
+            parsed > static_cast<unsigned long long>(
+                         (numeric_limits<Integer>::max)())) {
+            fail_input();
+        } else {
+            value = static_cast<Integer>(parsed);
+        }
+        return *this;
+    }
+
+    template<class Floating>
+    basic_istream& read_floating(Floating& value) {
+        long double parsed = 0;
+        if (!prepare()) {
+            fail_input();
+            return *this;
+        }
+        bool succeeded = false;
+        if (buffer_ == nullptr) {
+            succeeded = __io::read_floating(stream_, parsed);
+        } else {
+            char token[512] = {};
+            const size_t count = read_buffer_token(
+                token, sizeof(token));
+            size_t position = 0;
+            succeeded = __sstream::read_floating(
+                token, count, position, parsed);
+            restore_buffer_token(token, count, position);
+        }
+        if (!succeeded) {
+            fail_input();
+        } else {
+            value = static_cast<Floating>(parsed);
+        }
+        return *this;
+    }
+
+    size_t read_buffer_token(char* destination, size_t capacity) {
+        size_t count = 0;
+        while (count + 1 < capacity) {
+            const int next = __get_character();
+            if (next < 0) {
+                this->setstate(ios_base::eofbit);
+                break;
+            }
+            const char character = static_cast<char>(next);
+            if (character == ' ' || character == '\t' ||
+                character == '\n' || character == '\r' ||
+                character == '\f' || character == '\v') {
+                (void)__putback_character(
+                    static_cast<Character>(character));
+                break;
+            }
+            destination[count++] = character;
+        }
+        return count;
+    }
+
+    void restore_buffer_token(
+        const char* token, size_t count, size_t consumed) {
+        while (count > consumed) {
+            --count;
+            if (!__putback_character(
+                    static_cast<Character>(token[count]))) {
+                this->setstate(ios_base::badbit);
+                return;
+            }
+        }
+    }
+};
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream, Character& value) {
+    if (!stream.prepare()) {
+        return stream;
+    }
+    return stream.get(value);
+}
+
+template<class Traits>
+basic_istream<char, Traits>& operator>>(
+    basic_istream<char, Traits>& stream, signed char& value) {
+    char character = '\0';
+    stream >> character;
+    if (stream) {
+        value = static_cast<signed char>(character);
+    }
+    return stream;
+}
+
+template<class Traits>
+basic_istream<char, Traits>& operator>>(
+    basic_istream<char, Traits>& stream, unsigned char& value) {
+    char character = '\0';
+    stream >> character;
+    if (stream) {
+        value = static_cast<unsigned char>(character);
+    }
+    return stream;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& operator>>(
+    basic_istream<Character, Traits>& stream,
+    basic_string<Character, Traits, Allocator>& value) {
+    value.clear();
+    if (!stream.prepare()) {
+        return stream;
+    }
+    for (;;) {
+        const int next = stream.__get_character();
+        if (next < 0) {
+            if (value.empty()) {
+                stream.setstate(
+                    ios_base::eofbit | ios_base::failbit);
+            } else {
+                stream.setstate(ios_base::eofbit);
+            }
+            break;
+        }
+        const Character character =
+            static_cast<Character>(next);
+        if (character == Character(' ') ||
+            character == Character('\t') ||
+            character == Character('\n') ||
+            character == Character('\r') ||
+            character == Character('\f') ||
+            character == Character('\v')) {
+            break;
+        }
+        value.push_back(character);
+    }
+    return stream;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>& stream,
+    basic_string<Character, Traits, Allocator>& value,
+    Character delimiter) {
+    value.clear();
+    bool extracted = false;
+    for (;;) {
+        const int next = stream.__get_character();
+        if (next < 0) {
+            stream.setstate(ios_base::eofbit);
+            if (!extracted) {
+                stream.setstate(ios_base::failbit);
+            }
+            break;
+        }
+        extracted = true;
+        const Character character =
+            static_cast<Character>(next);
+        if (Traits::eq(character, delimiter)) {
+            break;
+        }
+        value.push_back(character);
+    }
+    return stream;
+}
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>&& stream,
+    basic_string<Character, Traits, Allocator>& value,
+    Character delimiter) {
+    return std::getline(stream, value, delimiter);
+}
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>& stream,
+    basic_string<Character, Traits, Allocator>& value) {
+    return std::getline(stream, value, Character('\n'));
+}
+
+template<class Character, class Traits, class Allocator>
+basic_istream<Character, Traits>& getline(
+    basic_istream<Character, Traits>&& stream,
+    basic_string<Character, Traits, Allocator>& value) {
+    return std::getline(stream, value, Character('\n'));
+}
+
+template<class Character, class Traits>
+basic_istream<Character, Traits>& ws(
+    basic_istream<Character, Traits>& stream) {
+    if (!stream.__skip_whitespace()) {
+        stream.setstate(ios_base::eofbit);
+    }
+    return stream;
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#include <iostream>
+
+#endif

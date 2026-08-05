@@ -1,7655 +1,6555 @@
 #include "parser.h"
-#include "cpp_out_of_line_match.h"
 
-#include "../helpers/auto_type_utils.h"
-#include "../ast/ast_clone.h"
-#include "../ast/expr_clone.h"
-#include "../collect/lookup_engine.h"
-#include "../collect/collect_templates_internal.h"
-#include "../helpers/qualified_name_utils.h"
-#include "../ast/special_members.h"
-#include "../perf_stats.h"
-#include <functional>
+#include "../cir/layout.h"
+#include "../numeric_utils.h"
+#include "../token_spelling.h"
+
+#include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <set>
-#include <type_traits>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
-bool is_c23_family_standard(const std::string& std_name);
+namespace aburi::syntax {
 
 namespace {
-void bump_qualified_declarator_fast_reject() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserQualifiedDeclaratorFastRejects);
+
+TextPayload text_payload(std::string_view text) {
+    return TextPayload{std::string(text)};
+}
+
+bool is_cxx_access_specifier(TokenType type) {
+    return type == TokenType::PUBLIC_KW ||
+           type == TokenType::PROTECTED_KW ||
+           type == TokenType::PRIVATE_KW;
+}
+
+cir::RecordMemberAccess access_from_token(TokenType type) {
+    switch (type) {
+        case TokenType::PUBLIC_KW:
+            return cir::RecordMemberAccess::Public;
+        case TokenType::PROTECTED_KW:
+            return cir::RecordMemberAccess::Protected;
+        case TokenType::PRIVATE_KW:
+            return cir::RecordMemberAccess::Private;
+        default:
+            return cir::RecordMemberAccess::Public;
     }
 }
 
-void bump_type_scope_fast_type_accept() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserTypeScopeFastTypeAccepts);
-    }
+cir::RecordMemberAccess default_access_for(cir::RecordKind kind) {
+    return kind == cir::RecordKind::Class
+        ? cir::RecordMemberAccess::Private
+        : cir::RecordMemberAccess::Public;
 }
 
-void bump_type_scope_fast_non_type_reject() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserTypeScopeFastNonTypeRejects);
-    }
-}
-
-void bump_type_scope_scope_only_accept() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(PerfCounter::ParserTypeScopeScopeOnlyAccepts);
-    }
-}
-
-void bump_type_scope_inconclusive_fallback() {
-    if (auto* profiler = active_perf_profiler();
-        profiler && profiler->wants_full()) {
-        profiler->add_counter(
-            PerfCounter::ParserTypeScopeInconclusiveFallbacks);
-    }
-}
-
-std::shared_ptr<BuiltinType> fixed_enum_integer_underlying_type(
-    const std::shared_ptr<CType>& type,
-    const ASTContext* ast_ctx = nullptr) {
-    QualType resolved = desugar_type(QualType(type), ast_ctx);
-    for (int depth = 0; depth < 8 && resolved; ++depth) {
-        auto transform = dyn_cast_shared<BuiltinTypeTransformType>(
-            resolved.get_shared());
-        if (!transform) {
-            break;
-        }
-        resolved = desugar_type(
-            apply_builtin_type_transform(
-                transform->transform_kind,
-                transform->operand_type,
-                ast_ctx),
-            ast_ctx);
-    }
-
-    auto builtin = dyn_cast_shared<BuiltinType>(resolved.get_shared());
-    if (!builtin || !builtin->isInteger()) {
-        return nullptr;
-    }
-    return builtin;
-}
-
-bool is_valid_fixed_enum_underlying_type(
-    const std::shared_ptr<CType>& type,
-    const ASTContext* ast_ctx = nullptr) {
-    return fixed_enum_integer_underlying_type(type, ast_ctx) != nullptr;
-}
-
-bool fixed_enum_value_fits_underlying(
-    int64_t value,
-    const std::shared_ptr<CType>& underlying,
-    const ASTContext* ast_ctx = nullptr) {
-    auto builtin = fixed_enum_integer_underlying_type(underlying, ast_ctx);
-    if (!builtin) {
+bool current_record_is_local(const collect::Session& session) {
+    const cir::File& file = session.file();
+    cir::DeclContextId context = session.current_decl_context();
+    if (!context.valid() || !file.valid(context) ||
+        file.decl_context(context).kind != cir::DeclContextKind::Record) {
         return false;
     }
-    if (builtin->builtin_kind == BuiltinTypes::Bool) {
-        return value == 0 || value == 1;
-    }
-    int64_t bits = builtin->getWidth();
-    if (bits <= 0) {
-        return false;
-    }
-    if (builtin->isUnsigned()) {
-        if (value < 0) {
-            return false;
-        }
-        if (bits >= 64) {
+    for (context = file.decl_context(context).parent;
+         context.valid() && file.valid(context);
+         context = file.decl_context(context).parent) {
+        cir::DeclContextKind kind = file.decl_context(context).kind;
+        if (kind == cir::DeclContextKind::Function ||
+            kind == cir::DeclContextKind::Block) {
             return true;
         }
-        uint64_t maxv = (uint64_t{1} << static_cast<uint64_t>(bits)) - 1;
-        return static_cast<uint64_t>(value) <= maxv;
-    }
-    if (bits >= 64) {
-        return true;
-    }
-    int64_t minv = -(int64_t{1} << (bits - 1));
-    int64_t maxv = (int64_t{1} << (bits - 1)) - 1;
-    return value >= minv && value <= maxv;
-}
-
-bool can_parse_cxx_object_initializer_syntax(QualType declared_type) {
-    if (!declared_type) {
-        return false;
-    }
-    auto placeholder_specialization =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_typedefs(declared_type).get_shared());
-    if (placeholder_specialization &&
-        placeholder_specialization->is_class_template_placeholder) {
-        return true;
-    }
-    if (type_depends_on_template_parameters(declared_type)) {
-        return true;
-    }
-    return canonical_type_kind(declared_type) == TypeKind::Object;
-}
-
-bool cpp_in_class_definition_is_inline(bool explicitly_inline, bool is_definition) {
-    return explicitly_inline || is_definition;
-}
-
-const ClassTemplateDecl* class_template_from_specialization_type(
-    QualType type,
-    const ASTContext* ast_ctx) {
-    auto specialization =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_type(type, ast_ctx).get_shared());
-    if (!specialization || !specialization->primary_template) {
-        return nullptr;
-    }
-    auto* class_template =
-        dyn_cast<ClassTemplateDecl>(
-            const_cast<Decl*>(specialization->primary_template));
-    if (!class_template) {
-        return nullptr;
-    }
-    return class_template;
-}
-
-bool object_type_is_primary_template_pattern_decl(
-    const TagDecl* tag_decl,
-    const ClassTemplateDecl* primary_template) {
-    return tag_decl &&
-           primary_template &&
-           primary_template->pattern_semantic_decl() &&
-           tag_decl == primary_template->pattern_semantic_decl();
-}
-
-bool object_type_is_primary_template_pattern(
-    QualType type,
-    const ClassTemplateDecl* primary_template,
-    const ASTContext* ast_ctx) {
-    if (!primary_template) {
-        return false;
-    }
-    auto object_type =
-        dyn_cast_shared<ObjectType>(
-            desugar_type(type, ast_ctx).get_shared());
-    if (!object_type) {
-        return false;
-    }
-    const TagDecl* tag_decl = object_type->get_decl();
-    if (!tag_decl) {
-        return false;
-    }
-    if (object_type_is_primary_template_pattern_decl(
-            tag_decl,
-            primary_template)) {
-        return true;
-    }
-
-    if (const auto* canonical =
-            get_template_decl_canonical_decl(primary_template)) {
-        if (auto* canonical_class_template =
-                dyn_cast<ClassTemplateDecl>(
-                    const_cast<TemplateDecl*>(canonical))) {
-            if (object_type_is_primary_template_pattern_decl(
-                    tag_decl,
-                    canonical_class_template)) {
-                return true;
-            }
-        }
-    }
-    if (const auto* definition =
-            get_template_decl_definition_decl(primary_template)) {
-        if (auto* definition_class_template =
-                dyn_cast<ClassTemplateDecl>(
-                    const_cast<TemplateDecl*>(definition))) {
-            if (object_type_is_primary_template_pattern_decl(
-                    tag_decl,
-                    definition_class_template)) {
-                return true;
-            }
+        if (kind == cir::DeclContextKind::Namespace ||
+            kind == cir::DeclContextKind::TranslationUnit) {
+            return false;
         }
     }
     return false;
 }
 
-bool template_specialization_names_current_class_owner(
-    QualType candidate_type,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    auto candidate =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_type(candidate_type, ast_ctx).get_shared());
-    auto owner =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_type(owner_type, ast_ctx).get_shared());
-    if (!candidate || !owner ||
-        !candidate->primary_template ||
-        !owner->primary_template ||
-        candidate->template_name != owner->template_name ||
-        !template_decls_share_lookup_identity(
-            candidate->primary_template,
-            owner->primary_template)) {
-        return false;
-    }
-    return candidate->arguments.empty() || owner->arguments.empty();
-}
-
-bool type_matches_current_class_owner(
-    QualType candidate_type,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    if (!candidate_type || !owner_type || !ast_ctx) {
-        return false;
-    }
-    if (candidate_type.equals_unqualified(owner_type)) {
-        return true;
-    }
-    if (template_specialization_names_current_class_owner(
-            candidate_type,
-            owner_type,
-            ast_ctx)) {
-        return true;
-    }
-
-    if (auto* owner_template =
-            class_template_from_specialization_type(owner_type, ast_ctx)) {
-        if (object_type_is_primary_template_pattern(
-                candidate_type,
-                owner_template,
-                ast_ctx)) {
-            return true;
-        }
-    }
-    if (auto* candidate_template =
-            class_template_from_specialization_type(candidate_type, ast_ctx)) {
-        if (object_type_is_primary_template_pattern(
-                owner_type,
-                candidate_template,
-                ast_ctx)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool is_defaultable_special_member_method(
-    const CppMethodDecl* method_decl,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    if (!method_decl || !owner_type || !ast_ctx) {
-        return false;
-    }
-    if (method_decl->storage_class == StorageClass::STATIC ||
-        method_decl->name != "operator=") {
-        return false;
-    }
-    size_t user_param_start = 0;
-    if (!method_decl->parameters.empty()) {
-        auto* first_param =
-            dyn_cast<ParamDecl>(method_decl->parameters.front().get());
-        if (first_param && first_param->get_name() == "this") {
-            user_param_start = 1;
-        }
-    }
-    if (method_decl->parameters.size() != user_param_start + 1) {
-        return false;
-    }
-    QualType canonical_owner =
-        remove_reference(owner_type, ast_ctx).without_qualifiers();
-    auto* parameter_decl =
-        dyn_cast<ParamDecl>(method_decl->parameters[user_param_start].get());
-    QualType parameter_type =
-        parameter_decl ? parameter_decl->type : QualType();
-    if (!parameter_type) {
-        return false;
-    }
-    QualType canonical_parameter =
-        remove_reference(parameter_type, ast_ctx).without_qualifiers();
-    return type_matches_current_class_owner(
-        canonical_parameter,
-        canonical_owner,
-        ast_ctx);
-}
-
-bool is_defaulted_comparison_operator_name(const std::string& name) {
-    return name == "operator==" ||
-           name == "operator!=" ||
-           name == "operator<" ||
-           name == "operator<=" ||
-           name == "operator>" ||
-           name == "operator>=" ||
-           name == "operator<=>";
-}
-
-bool is_defaulted_secondary_comparison_operator_name(const std::string& name) {
-    return name == "operator!=" ||
-           name == "operator<" ||
-           name == "operator<=" ||
-           name == "operator>" ||
-           name == "operator>=";
-}
-
-bool defaulted_comparison_parameter_matches_owner(
-    QualType parameter_type,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    if (!parameter_type || !owner_type || !ast_ctx) {
-        return false;
-    }
-    QualType canonical_parameter =
-        remove_reference(parameter_type, ast_ctx).without_qualifiers();
-    QualType canonical_owner =
-        remove_reference(owner_type, ast_ctx).without_qualifiers();
-    return type_matches_current_class_owner(
-        canonical_parameter,
-        canonical_owner,
-        ast_ctx);
-}
-
-bool defaulted_comparison_return_type_is_valid(
-    const std::string& name,
-    QualType return_type,
-    const ASTContext* ast_ctx) {
-    if (!return_type || !ast_ctx) {
-        return false;
-    }
-    QualType canonical_return = desugar_type(return_type, ast_ctx);
-    auto auto_return = canonical_return.as_shared<AutoType>();
-    if (name == "operator<=>") {
-        return auto_return || !return_type->isVoid();
-    }
-    if (auto_return) {
-        return false;
-    }
-    if (is_defaulted_secondary_comparison_operator_name(name) ||
-        name == "operator==") {
-        auto builtin = canonical_return.as_shared<BuiltinType>();
-        return builtin && builtin->builtin_kind == BuiltinTypes::Bool;
-    }
-    return false;
-}
-
-bool is_defaultable_comparison_method(
-    const CppMethodDecl* method_decl,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    if (!method_decl || !owner_type || !ast_ctx ||
-        !is_defaulted_comparison_operator_name(method_decl->name) ||
-        method_decl->storage_class == StorageClass::STATIC) {
-        return false;
-    }
-    auto function_type = QualType(method_decl->type).as_shared<FunctionType>();
-    if (!function_type ||
-        !defaulted_comparison_return_type_is_valid(
-            method_decl->name,
-            function_type->ret_type,
-            ast_ctx)) {
-        return false;
-    }
-    size_t user_param_start = 0;
-    if (!method_decl->parameters.empty()) {
-        auto* first_param =
-            dyn_cast<ParamDecl>(method_decl->parameters.front().get());
-        if (first_param && first_param->get_name() == "this") {
-            user_param_start = 1;
-        }
-    }
-    if (method_decl->parameters.size() != user_param_start + 1 ||
-        function_type->parameters.size() != method_decl->parameters.size()) {
-        return false;
-    }
-    if (user_param_start != 0) {
-        auto this_param =
-            function_type->parameters.front().as_shared<PointerType>();
-        if (!this_param ||
-            !defaulted_comparison_parameter_matches_owner(
-                this_param->pointed_type,
-                owner_type,
-                ast_ctx)) {
-            return false;
-        }
-    }
-    auto* parameter_decl =
-        dyn_cast<ParamDecl>(method_decl->parameters[user_param_start].get());
-    return parameter_decl &&
-           defaulted_comparison_parameter_matches_owner(
-               parameter_decl->type,
-               owner_type,
-               ast_ctx);
-}
-
-bool is_defaultable_comparison_function(
-    const FuncDecl* function_decl,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    if (!function_decl || !owner_type || !ast_ctx ||
-        !is_defaulted_comparison_operator_name(function_decl->name)) {
-        return false;
-    }
-    auto function_type = QualType(function_decl->type).as_shared<FunctionType>();
-    if (!function_type ||
-        function_type->parameters.size() != 2 ||
-        function_decl->parameters.size() != 2 ||
-        !defaulted_comparison_return_type_is_valid(
-            function_decl->name,
-            function_type->ret_type,
-            ast_ctx)) {
-        return false;
-    }
-    for (const auto& parameter : function_decl->parameters) {
-        auto* parameter_decl = dyn_cast<ParamDecl>(parameter.get());
-        if (!parameter_decl ||
-            !defaulted_comparison_parameter_matches_owner(
-                parameter_decl->type,
-                owner_type,
-                ast_ctx)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool is_defaultable_method(
-    const CppMethodDecl* method_decl,
-    QualType owner_type,
-    const ASTContext* ast_ctx) {
-    return is_defaultable_special_member_method(method_decl, owner_type, ast_ctx) ||
-           is_defaultable_comparison_method(method_decl, owner_type, ast_ctx);
-}
-
-std::shared_ptr<CType> choose_default_enum_underlying(
-    TypeContext* type_ctx, int64_t min_value, int64_t max_value, bool prefer_smallest_width = false) {
-    if (!type_ctx) {
-        return nullptr;
-    }
-
-    auto fits_signed = [&](BuiltinTypes kind) -> bool {
-        auto t = type_ctx->get_builtin(kind);
-        if (!t) {
-            return false;
-        }
-        int64_t bits = t->getWidth();
-        if (bits <= 0) {
-            return false;
-        }
-        if (bits >= 64) {
-            return true;
-        }
-        int64_t minv = -(int64_t{1} << (bits - 1));
-        int64_t maxv = (int64_t{1} << (bits - 1)) - 1;
-        return min_value >= minv && max_value <= maxv;
-    };
-
-    auto fits_unsigned = [&](BuiltinTypes kind) -> bool {
-        if (min_value < 0) {
-            return false;
-        }
-        auto t = type_ctx->get_builtin(kind);
-        if (!t) {
-            return false;
-        }
-        int64_t bits = t->getWidth();
-        if (bits <= 0) {
-            return false;
-        }
-        if (bits >= 64) {
-            return true;
-        }
-        uint64_t maxv = (uint64_t{1} << static_cast<uint64_t>(bits)) - 1;
-        return static_cast<uint64_t>(max_value) <= maxv;
-    };
-
-    if (prefer_smallest_width) {
-        if (min_value < 0) {
-            if (fits_signed(BuiltinTypes::SChar)) return type_ctx->get_builtin(BuiltinTypes::SChar);
-            if (fits_signed(BuiltinTypes::Short)) return type_ctx->get_builtin(BuiltinTypes::Short);
-            if (fits_signed(BuiltinTypes::Int)) return type_ctx->get_builtin(BuiltinTypes::Int);
-            if (fits_signed(BuiltinTypes::Long)) return type_ctx->get_builtin(BuiltinTypes::Long);
-            return type_ctx->get_builtin(BuiltinTypes::LongLong);
-        }
-
-        if (fits_unsigned(BuiltinTypes::UChar)) return type_ctx->get_builtin(BuiltinTypes::UChar);
-        if (fits_unsigned(BuiltinTypes::UShort)) return type_ctx->get_builtin(BuiltinTypes::UShort);
-        if (fits_unsigned(BuiltinTypes::UInt)) return type_ctx->get_builtin(BuiltinTypes::UInt);
-        if (fits_unsigned(BuiltinTypes::ULong)) return type_ctx->get_builtin(BuiltinTypes::ULong);
-        return type_ctx->get_builtin(BuiltinTypes::ULongLong);
-    }
-
-    if (min_value < 0) {
-        if (fits_signed(BuiltinTypes::Int)) return type_ctx->get_builtin(BuiltinTypes::Int);
-        if (fits_signed(BuiltinTypes::Long)) return type_ctx->get_builtin(BuiltinTypes::Long);
-        return type_ctx->get_builtin(BuiltinTypes::LongLong);
-    }
-
-    // Match Clang/GCC C enum compatibility on this target: non-negative enums
-    // use an unsigned compatible integer type at the natural rank.
-    if (fits_unsigned(BuiltinTypes::UInt)) return type_ctx->get_builtin(BuiltinTypes::UInt);
-    if (fits_unsigned(BuiltinTypes::ULong)) return type_ctx->get_builtin(BuiltinTypes::ULong);
-    return type_ctx->get_builtin(BuiltinTypes::ULongLong);
-}
-
-bool enum_constant_fits_int(TypeContext* type_ctx, int64_t value) {
-    if (!type_ctx) {
-        return false;
-    }
-    auto int_type = type_ctx->get_builtin(BuiltinTypes::Int);
-    return fixed_enum_value_fits_underlying(value, int_type);
-}
-
-bool has_packed_attr(const std::vector<ParsedAttribute>& attrs) {
-    for (const auto& attr : attrs) {
-        if (attr.canonical_name() == "packed") {
-            return true;
-        }
-    }
-    return false;
-}
-static const char* cpp_record_kind_spelling(CppRecordKind kind) {
-    switch (kind) {
-        case CppRecordKind::Class: return "class";
-        case CppRecordKind::Struct: return "struct";
-        case CppRecordKind::Union: return "union";
-    }
-    return "record";
-}
-
-static RecordMemberAccess encode_cpp_access(CppAccessSpecifier access) {
-    switch (access) {
-        case CppAccessSpecifier::Public: return RecordMemberAccess::Public;
-        case CppAccessSpecifier::Protected: return RecordMemberAccess::Protected;
-        case CppAccessSpecifier::Private: return RecordMemberAccess::Private;
-        case CppAccessSpecifier::None: break;
-    }
-    return RecordMemberAccess::Public;
-}
-
-static std::string cpp_base_specifier_name(const CppBaseSpecifier& base_spec) {
-    if (!base_spec.type_name.empty()) {
-        return base_spec.type_name;
-    }
-    return base_spec.type ? base_spec.type.to_string() : std::string();
-}
-
-static const ObjectDecl* cpp_base_record_decl_from_type(QualType base_type) {
-    auto base_object = desugar_type(base_type).as_shared<ObjectType>();
-    return base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
-}
-
-static bool cpp_base_type_is_dependent(QualType base_type,
-                                       const ASTContext* ast_ctx) {
-    return type_depends_on_template_parameters(base_type, ast_ctx);
-}
-
-static bool template_argument_names_template_parameter(
-    const TemplateArgument& argument,
-    const TemplateParameterDecl* parameter) {
-    if (!parameter) {
-        return false;
-    }
-
-    if (auto* type_parameter =
-            dyn_cast<TemplateTypeParmDecl>(const_cast<TemplateParameterDecl*>(parameter))) {
-        if (argument.kind != TemplateArgumentKind::Type) {
-            return false;
-        }
-        auto argument_type =
-            desugar_type(argument.type).as_shared<TemplateTypeParmType>();
-        if (!argument_type) {
-            return false;
-        }
-        if (argument_type->parameter_decl) {
-            return argument_type->parameter_decl == type_parameter;
-        }
-        return argument_type->depth == type_parameter->depth &&
-               argument_type->index == type_parameter->index;
-    }
-
-    if (auto* value_parameter =
-            dyn_cast<TemplateNonTypeParmDecl>(const_cast<TemplateParameterDecl*>(parameter))) {
-        if (argument.kind != TemplateArgumentKind::Value) {
-            return false;
-        }
-        if (argument.referenced_parameter == value_parameter) {
-            return true;
-        }
-        auto* value_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(argument.value_expr.get()));
-        return value_ref &&
-               value_ref->symref &&
-               value_ref->symref->template_parameter_decl == value_parameter;
-    }
-
-    if (auto* template_parameter =
-            dyn_cast<TemplateTemplateParmDecl>(const_cast<TemplateParameterDecl*>(parameter))) {
-        return argument.kind == TemplateArgumentKind::Template &&
-               argument.referenced_parameter == template_parameter;
-    }
-
-    return false;
-}
-
-static bool cpp_base_type_is_current_instantiation(QualType base_type) {
-    auto specialization =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_type(base_type).get_shared());
-    auto* class_template =
-        specialization
-            ? dyn_cast<ClassTemplateDecl>(
-                  const_cast<Decl*>(specialization->primary_template))
-            : nullptr;
-    if (!class_template ||
-        specialization->arguments.size() != class_template->parameters.size()) {
-        return false;
-    }
-    for (size_t idx = 0; idx < specialization->arguments.size(); ++idx) {
-        if (!template_argument_names_template_parameter(
-                specialization->arguments[idx],
-                class_template->parameters[idx].get())) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Virtual slot keying: two methods occupy the same vtable slot iff they have
-// the same name, cv-qualifiers on the implicit this pointer, ref-qualifiers,
-// and user parameter types.  Return type is NOT part of the key because
-// covariant returns are allowed and checked separately.  Variadic status IS
-// part of the key.  Shared canonicalization lives in make_cpp_virtual_slot_key().
-static std::string make_virtual_slot_key(
-    const std::string& method_name, QualType method_type) {
-    return make_cpp_virtual_slot_key(method_name, method_type);
-}
-
-static const ObjectDecl* canonical_cpp_record_decl(const ObjectDecl* decl) {
-    if (!decl) {
-        return nullptr;
-    }
-    if (auto record_type = decl->get_record_type()) {
-        if (auto* canonical_decl =
-                dyn_cast<ObjectDecl>(record_type->get_decl())) {
-            return canonical_decl;
-        }
-    }
-    return decl;
-}
-
-QualType realize_in_progress_record_nested_type(
-    QualType type,
-    const ObjectDecl* current_record_decl,
-    const std::vector<RecordSemanticState::NestedType>& nested_types,
-    const ASTContext* ast_ctx) {
-    std::function<QualType(QualType)> rewrite = [&](QualType current) -> QualType {
-        if (!current) {
-            return current;
-        }
-        auto raw = current.get_shared();
-        if (!raw) {
-            return current;
-        }
-        uint8_t quals = current.get_qualifiers();
-
-        if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
-            if (!dependent_name->requires_template_keyword &&
-                dependent_name->template_arguments.empty() &&
-                current_record_decl) {
-                auto qualifier_type =
-                    desugar_type(dependent_name->qualifier_type, ast_ctx)
-                        .as_shared<ObjectType>();
-                auto* qualifier_decl = qualifier_type
-                    ? dyn_cast<ObjectDecl>(qualifier_type->get_decl())
-                    : nullptr;
-                if (canonical_cpp_record_decl(qualifier_decl) ==
-                    canonical_cpp_record_decl(current_record_decl)) {
-                    for (auto it = nested_types.rbegin();
-                         it != nested_types.rend();
-                         ++it) {
-                        if (it->name == dependent_name->member_name) {
-                            return rewrite(it->type.with_qualifiers(quals));
-                        }
-                    }
+bool constraint_references_parameter_outside_head(
+    const collect::Session::TemplateInfo& info) {
+    auto belongs_to_head = [&](const collect::Session::
+                                   ConstraintParameterReference& reference) {
+        return std::any_of(
+            info.parameters.begin(),
+            info.parameters.end(),
+            [&](const collect::Session::TemplateParameter& parameter) {
+                if (reference.parameter_entity.valid() &&
+                    parameter.entity.valid()) {
+                    return reference.parameter_entity == parameter.entity;
                 }
-            }
-
-            QualType rewritten_qualifier =
-                rewrite(dependent_name->qualifier_type);
-            bool changed =
-                !rewritten_qualifier.equals_qualified(
-                    dependent_name->qualifier_type);
-            std::vector<TemplateArgument> rewritten_arguments;
-            rewritten_arguments.reserve(dependent_name->template_arguments.size());
-            for (const auto& argument : dependent_name->template_arguments) {
-                TemplateArgument rewritten_argument = argument;
-                if (argument.kind == TemplateArgumentKind::Type) {
-                    rewritten_argument.type = rewrite(argument.type);
-                    changed = changed ||
-                        !rewritten_argument.type.equals_qualified(argument.type);
-                } else if (argument.kind == TemplateArgumentKind::Value) {
-                    rewritten_argument.value_type = rewrite(argument.value_type);
-                    changed = changed ||
-                        !rewritten_argument.value_type.equals_qualified(
-                            argument.value_type);
+                if (reference.parameter_type.valid() &&
+                    parameter.type_param_type.valid()) {
+                    return reference.parameter_type ==
+                           parameter.type_param_type;
                 }
-                rewritten_arguments.push_back(std::move(rewritten_argument));
-            }
-            if (!changed) {
-                return current;
-            }
-            return QualType(
-                std::make_shared<DependentNameType>(
-                    rewritten_qualifier,
-                    dependent_name->member_name,
-                    std::move(rewritten_arguments),
-                    dependent_name->is_current_instantiation,
-                    dependent_name->requires_typename_keyword,
-                    dependent_name->requires_template_keyword),
-                quals);
-        }
-
-        if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
-            QualType rewritten_underlying = rewrite(typedef_type->underlying_type);
-            if (rewritten_underlying.get_shared() ==
-                    typedef_type->underlying_type.get_shared() &&
-                rewritten_underlying.get_qualifiers() ==
-                    typedef_type->underlying_type.get_qualifiers()) {
-                return current;
-            }
-            return QualType(
-                std::make_shared<TypedefType>(
-                    typedef_type->name,
-                    rewritten_underlying,
-                    typedef_type->typedef_decl),
-                quals);
-        }
-
-        if (auto specialization =
-                dyn_cast_shared<TemplateSpecializationType>(raw)) {
-            bool changed = false;
-            std::vector<TemplateArgument> rewritten_arguments;
-            rewritten_arguments.reserve(specialization->arguments.size());
-            for (const auto& argument : specialization->arguments) {
-                TemplateArgument rewritten_argument = argument;
-                if (argument.kind == TemplateArgumentKind::Type) {
-                    rewritten_argument.type = rewrite(argument.type);
-                    changed = changed ||
-                        !rewritten_argument.type.equals_qualified(argument.type);
-                } else if (argument.kind == TemplateArgumentKind::Value) {
-                    rewritten_argument.value_type = rewrite(argument.value_type);
-                    changed = changed ||
-                        !rewritten_argument.value_type.equals_qualified(
-                            argument.value_type);
-                }
-                rewritten_arguments.push_back(std::move(rewritten_argument));
-            }
-            if (!changed) {
-                return current;
-            }
-            bool dependent = template_specialization_components_are_dependent(
-                specialization->primary_template,
-                rewritten_arguments,
-                /*explicitly_dependent=*/false,
-                ast_ctx);
-            return QualType(
-                std::make_shared<TemplateSpecializationType>(
-                    specialization->template_name,
-                    specialization->primary_template,
-                    std::move(rewritten_arguments),
-                    dependent,
-                    specialization->is_class_template_placeholder),
-                quals);
-        }
-
-        return current;
+                return !reference.parameter_entity.valid() &&
+                       !reference.parameter_type.valid() &&
+                       !parameter.entity.valid() &&
+                       reference.parameter_kind == parameter.kind &&
+                       reference.parameter_depth == parameter.depth &&
+                       reference.parameter_index == parameter.index;
+            });
     };
-
-    return rewrite(type);
-}
-
-// Diamond inheritance path resolution for covariant return validation.
-// Each path from derived to base is encoded as a sequence of steps
-// (Normal:decl_ptr or Virtual:decl_ptr).  Key insight: when a path
-// reaches a virtual base, we reset the path to just that virtual base —
-// this reflects the C++ rule that all paths to a virtual base lead to
-// the SAME shared subobject.  Non-virtual paths to the same base may
-// lead to different subobjects (different offsets), so they are distinct.
-// If more than one unique path reaches the target, the base is ambiguous.
-using BasePathStep = std::pair<const ObjectDecl*, bool>; // bool = via virtual edge
-
-static std::string encode_base_path_key(
-    const std::vector<BasePathStep>& path) {
-    std::string key;
-    key.reserve(path.size() * 24);
-    for (const auto& step : path) {
-        key += step.second ? "V:" : "N:";
-        key +=
-            std::to_string(reinterpret_cast<uintptr_t>(step.first));
-        key.push_back(';');
-    }
-    return key;
-}
-
-static size_t count_public_base_subobjects(
-    const ObjectDecl* derived_decl,
-    const ObjectDecl* target_base_decl,
-    const std::vector<RecordSemanticState::Base>& current_record_bases,
-    const ObjectDecl* current_record_decl) {
-    derived_decl = canonical_cpp_record_decl(derived_decl);
-    target_base_decl = canonical_cpp_record_decl(target_base_decl);
-    if (!derived_decl || !target_base_decl ||
-        derived_decl == target_base_decl) {
-        return 0;
-    }
-
-    std::unordered_set<std::string> matched_subobjects;
-    std::vector<BasePathStep> path;
-    std::unordered_set<const ObjectDecl*> active_stack;
-    active_stack.insert(derived_decl);
-
-    std::function<void(const ObjectDecl*)> walk =
-        [&](const ObjectDecl* current_decl) {
-        current_decl = canonical_cpp_record_decl(current_decl);
-        if (!current_decl) {
-            return;
-        }
-        if (current_decl == target_base_decl) {
-            if (!path.empty()) {
-                matched_subobjects.insert(
-                    encode_base_path_key(path));
-            }
-            return;
-        }
-        auto walk_base_edge =
-            [&](const RecordSemanticState::Base& base) {
-            const ObjectDecl* base_decl =
-                canonical_cpp_record_decl(base.record_decl);
-            if (!base_decl ||
-                base.declared_access !=
-                    RecordMemberAccess::Public ||
-                active_stack.contains(base_decl)) {
-                return;
-            }
-
-            auto saved_path = path;
-            if (base.is_virtual) {
-                // Shared virtual-base subobject identity.
-                path.clear();
-                path.emplace_back(base_decl, true);
-            } else {
-                path.emplace_back(base_decl, false);
-            }
-
-            active_stack.insert(base_decl);
-            walk(base_decl);
-            active_stack.erase(base_decl);
-            path = std::move(saved_path);
-        };
-
-        if (current_decl == current_record_decl) {
-            for (const auto& base : current_record_bases) {
-                walk_base_edge(base);
-            }
-            return;
-        }
-
-        const RecordSemanticState* state =
-            record_semantics_cache_lookup(current_decl);
-        if (!state) {
-            return;
-        }
-
-        for (const auto& base : state->bases) {
-            walk_base_edge(base);
-        }
-    };
-
-    walk(derived_decl);
-    return matched_subobjects.size();
-}
-
-static bool has_public_unambiguous_base_path(
-    const ObjectDecl* derived_decl,
-    const ObjectDecl* target_base_decl,
-    const std::vector<RecordSemanticState::Base>& current_record_bases,
-    const ObjectDecl* current_record_decl) {
-    size_t count = count_public_base_subobjects(
-        derived_decl, target_base_decl, current_record_bases,
-        current_record_decl);
-    return count == 1;
-}
-
-struct CovariantReturnTarget {
-    enum class Kind : uint8_t {
-        Invalid,
-        Pointer,
-        LValueReference,
-        RValueReference,
-    };
-    Kind kind = Kind::Invalid;
-    QualType object_type;
-    const ObjectDecl* object_decl = nullptr;
-};
-
-static CovariantReturnTarget extract_covariant_return_target(
-    QualType return_type) {
-    CovariantReturnTarget target;
-    if (!return_type) {
-        return target;
-    }
-    auto canonical_return = desugar_type(return_type);
-    if (auto ptr_type = canonical_return.as_shared<PointerType>()) {
-        target.kind = CovariantReturnTarget::Kind::Pointer;
-        target.object_type = ptr_type->pointed_type;
-    } else if (auto ref_type =
-                   canonical_return.as_shared<ReferenceType>()) {
-        target.kind = ref_type->isRValueReference()
-            ? CovariantReturnTarget::Kind::RValueReference
-            : CovariantReturnTarget::Kind::LValueReference;
-        target.object_type = ref_type->referred_type;
-    } else {
-        return target;
-    }
-
-    auto object_type =
-        desugar_type(target.object_type).as_shared<ObjectType>();
-    if (!object_type) {
-        target.kind = CovariantReturnTarget::Kind::Invalid;
-        target.object_type = QualType();
-        return target;
-    }
-    target.object_decl =
-        canonical_cpp_record_decl(dyn_cast<ObjectDecl>(object_type->get_decl()));
-    if (!target.object_decl) {
-        target.kind = CovariantReturnTarget::Kind::Invalid;
-        target.object_type = QualType();
-    }
-    return target;
-}
-
-// Covariant return validation (C++ [class.virtual]/7):
-//   return types must be the same indirection kind (pointer / lvalue-ref / rvalue-ref)
-//   overridden return qualifiers must be a SUPERSET of the overriding qualifiers
-//   if both point to class types, the overriding class must be publicly and
-//   unambiguously derived from the overridden class
-// Covariance enables zero-cost polymorphic factory patterns: the derived
-// implementation returns the more-specific type while callers holding a
-// base pointer still see the expected base return type via a thunk adjustment.
-static bool returns_are_covariant(
-    QualType overriding_return,
-    QualType overridden_return,
-    const std::vector<RecordSemanticState::Base>& current_record_bases,
-    const ObjectDecl* current_record_decl) {
-    if (!overriding_return || !overridden_return) {
-        return false;
-    }
-    if (overriding_return.equals_unqualified(overridden_return)) {
-        return true;
-    }
-
-    CovariantReturnTarget overriding_target =
-        extract_covariant_return_target(overriding_return);
-    CovariantReturnTarget overridden_target =
-        extract_covariant_return_target(overridden_return);
-    if (overriding_target.kind == CovariantReturnTarget::Kind::Invalid ||
-        overridden_target.kind == CovariantReturnTarget::Kind::Invalid ||
-        overriding_target.kind != overridden_target.kind ||
-        !overriding_target.object_type ||
-        !overridden_target.object_type ||
-        !overriding_target.object_decl ||
-        !overridden_target.object_decl) {
-        return false;
-    }
-
-    if (!overridden_target.object_type.has_all_qualifiers_of(
-            overriding_target.object_type)) {
-        return false;
-    }
-    if (overriding_target.object_decl ==
-        overridden_target.object_decl) {
-        return true;
-    }
-    return has_public_unambiguous_base_path(
-        overriding_target.object_decl,
-        overridden_target.object_decl,
-        current_record_bases,
-        current_record_decl);
-}
-
-struct VirtualSlotState {
-    size_t slot_index = 0;
-    bool is_pure = false;
-    bool is_final = false;
-    bool is_destructor = false;
-    std::shared_ptr<Symbol> final_symbol = nullptr;
-    std::string name;
-};
-
-// Convert front-end access specifier to the record-semantic-state encoding.
-RecordMemberAccess encode_member_access(CppAccessSpecifier access) {
-    switch (access) {
-        case CppAccessSpecifier::Public:    return RecordMemberAccess::Public;
-        case CppAccessSpecifier::Protected: return RecordMemberAccess::Protected;
-        case CppAccessSpecifier::Private:   return RecordMemberAccess::Private;
-        case CppAccessSpecifier::None:      break;
-    }
-    return RecordMemberAccess::Public;
-}
-
-// Check whether a namespace-scope binding already contains a function with the
-// same type (for out-of-line redeclaration matching).
-bool namespace_function_prior_match(const DeclBinding* binding,
-                                    QualType declared_type) {
-    auto candidate_matches = [&](const std::shared_ptr<Symbol>& candidate) {
-        if (!candidate || candidate->kind != SymbolKind::FUNCTION) {
-            return false;
-        }
-        if (candidate->type && declared_type) {
-            return candidate->type.equals_unqualified(declared_type);
-        }
-        return candidate->type.get_shared() == declared_type.get_shared();
-    };
-    if (!binding) {
-        return false;
-    }
-    if (binding->has_overload_set()) {
-        for (const auto& candidate : binding->overload_candidates) {
-            if (candidate_matches(candidate)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    return candidate_matches(binding->symbol);
-}
-
-// Check whether a namespace-scope binding is a variable (for redeclaration).
-bool namespace_variable_prior_match(const DeclBinding* binding) {
-    return binding &&
-        binding->symbol &&
-        binding->symbol->kind == SymbolKind::VARIABLE;
-}
-
-// Extract __attribute__((weakref("target"))) alias name from attributes.
-std::optional<std::string> extract_weakref_target(
-    const std::vector<ParsedAttribute>& attrs) {
-    for (const auto& attr : attrs) {
-        if (attr.canonical_name() != "weakref" || attr.args.empty()) {
+    for (const auto& constraint : info.introduced_constraints) {
+        if (!constraint.normal_form.has_value()) {
             continue;
         }
-        const auto& arg0 = attr.args[0];
-        if (arg0.kind == AttributeArg::Kind::STRING ||
-            arg0.kind == AttributeArg::Kind::IDENTIFIER) {
-            if (!arg0.str_value.empty()) {
-                return arg0.str_value;
+        for (const auto& reference :
+             constraint.normal_form->referenced_parameters) {
+            if (!belongs_to_head(reference) &&
+                reference.owning_template_entity.valid()) {
+                return true;
             }
         }
     }
-    return std::nullopt;
+    return false;
 }
 
 } // namespace
-
-std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
-    const CppRecordDecl& record,
-    std::optional<std::string> semantic_tag_name,
-    bool allow_parent_tag_lookup_for_non_definition) {
-    if (is_in_template_pattern_context()) {
-        return nullptr;
-    }
-    if (!collect_ || record.name.empty()) {
-        return nullptr;
-    }
-    Collect::CppRecordDeferredBodyCallback deferred_body_callback =
-        [this](const CppRecordDecl& deferred_record,
-               const std::shared_ptr<ObjectType>& deferred_record_type,
-               const RecordSemanticState& deferred_semantic_state) {
-            CppRecordDeferredParseContext deferred_ctx{
-                deferred_record,
-                deferred_record_type,
-                deferred_semantic_state};
-            build_cpp_record_parse_deferred_bodies(deferred_ctx);
-        };
-    auto semantic_decl = collect_->collect_build_cpp_record_semantic_decl(
-        record,
-        std::move(semantic_tag_name),
-        &cpp_transient_semantic_decls_,
-        std::move(deferred_body_callback),
-        allow_parent_tag_lookup_for_non_definition);
-    if (!semantic_decl || !ast_ctx) {
-        return semantic_decl;
+// todo: obvious size reduction/refactor (albiet most are lambdas)
+NodeId Parser::parse_record_specifier(cir::TypeId* type_out) {
+    size_t begin = current_raw_index();
+    Token keyword = current();
+    cir::RecordKind kind = keyword.type == TokenType::UNION
+        ? cir::RecordKind::Union
+        : (keyword.type == TokenType::CLASS ? cir::RecordKind::Class
+                                            : cir::RecordKind::Struct);
+    if (!match(keyword.type)) {
+        return parse_error_node("expected record specifier", begin, begin + 1);
     }
 
-    const auto& record_attrs = ast_ctx->get_attrs(record.node_id).attrs;
-    if (!record_attrs.empty()) {
-        std::vector<ParsedAttribute> copied_attrs(
-            record_attrs.begin(), record_attrs.end());
-        ast_ctx->append_attrs(semantic_decl->node_id, std::move(copied_attrs));
-    }
-    return semantic_decl;
-}
+    std::string tag;
 
-void Parser::ensure_cpp_record_placeholder_type(const std::string& name,
-                                                bool is_union_record,
-                                                SrcLoc loc) {
-    if (!collect_ || name.empty()) {
-        return;
-    }
-    if (auto* existing_tag_decl = collect_->collect_lookup_tag_decl(name, false)) {
-        auto* existing_object_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
-        if (!existing_object_decl || !existing_object_decl->get_record_type()) {
-            error_custloc("tag '" + name + "' was previously declared with a different kind", loc);
-            return;
-        }
-        if (existing_object_decl->get_record_type()->is_union != is_union_record) {
-            error_custloc("tag '" + name + "' was previously declared as a different kind", loc);
-        }
-        return;
-    }
-
-    auto placeholder_type = std::make_shared<ObjectType>(
-        name,
-        is_union_record,
-        true);
-    auto placeholder_decl = collect_->collect_record_declaration(
-        name,
-        placeholder_type,
-        is_union_record,
-        loc);
-    if (!placeholder_decl) {
-        return;
-    }
-    collect_->query_publish_record_semantics(placeholder_decl.get(),
-                                             RecordSemanticState{});
-    collect_->collect_add_tag_decl(name, placeholder_decl.get());
-    cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
-}
-
-std::unique_ptr<ObjectDecl> Parser::take_cpp_transient_semantic_object_decl(
-    const std::string& tag_name) {
-    if (tag_name.empty()) {
-        return nullptr;
-    }
-
-    for (size_t idx = cpp_transient_semantic_decls_.size(); idx > 0; --idx) {
-        auto it = cpp_transient_semantic_decls_.begin() + (idx - 1);
-        auto* object_decl = dyn_cast<ObjectDecl>(it->get());
-        if (!object_decl || object_decl->tag != tag_name) {
-            continue;
-        }
-
-        std::unique_ptr<Decl> owned_decl = std::move(*it);
-        cpp_transient_semantic_decls_.erase(it);
-        return std::unique_ptr<ObjectDecl>(
-            static_cast<ObjectDecl*>(owned_decl.release()));
-    }
-
-    return nullptr;
-}
-
-std::unique_ptr<ObjectDecl> Parser::take_cpp_transient_semantic_object_decl(
-    const ObjectDecl* target_decl) {
-    if (!target_decl) {
-        return nullptr;
-    }
-
-    for (size_t idx = cpp_transient_semantic_decls_.size(); idx > 0; --idx) {
-        auto it = cpp_transient_semantic_decls_.begin() + (idx - 1);
-        auto* object_decl = dyn_cast<ObjectDecl>(it->get());
-        if (object_decl != target_decl) {
-            continue;
-        }
-
-        std::unique_ptr<Decl> owned_decl = std::move(*it);
-        cpp_transient_semantic_decls_.erase(it);
-        return std::unique_ptr<ObjectDecl>(
-            static_cast<ObjectDecl*>(owned_decl.release()));
-    }
-
-    return nullptr;
-}
-
-const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
-    CppRecordDecl& record) {
-    if (!collect_) {
-        return nullptr;
-    }
-
-    bool is_union_record = record.record_kind == CppRecordKind::Union;
-    auto* semantic_decl =
-        const_cast<ObjectDecl*>(record.provisional_semantic_owner);
-    if (!semantic_decl && !record.name.empty()) {
-        semantic_decl =
-            dyn_cast<ObjectDecl>(collect_->collect_lookup_tag_decl(
-                record.name,
-                false));
-    }
-
-    std::unique_ptr<ObjectDecl> owned_semantic_decl;
-    if (!semantic_decl) {
-        auto record_type = std::make_shared<ObjectType>(
-            record.name,
-            is_union_record,
-            !record.is_definition);
-        owned_semantic_decl = collect_->collect_record_declaration(
-            record.name,
-            record_type,
-            is_union_record,
-            record.location);
-        semantic_decl = owned_semantic_decl.get();
-    }
-    if (!semantic_decl || !semantic_decl->get_record_type()) {
-        return nullptr;
-    }
-    if (semantic_decl->get_record_type()->is_union != is_union_record) {
-        error_custloc(
-            "tag '" + record.name +
-                "' was previously declared as a different kind",
-            record.location);
-    }
-
-    if (const auto* existing_state =
-            collect_->query_lookup_record_semantics(semantic_decl)) {
-        if (record.is_definition && !existing_state->is_incomplete &&
-            !existing_state->is_template_pattern_provisional) {
-            record.provisional_semantic_owner = semantic_decl;
-            return semantic_decl;
-        }
-    }
-
-    auto record_type = semantic_decl->get_record_type();
-    record_type->set_decl(semantic_decl);
-    auto ensure_namespace_qualifier_prefix =
-        [&](std::string& qualifier_prefix) {
-        auto scope = collect_->collect_current_scope();
-        while (scope && scope->cxx_namespace_path.empty()) {
-            scope = scope->parent;
-        }
-        qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
-            scope, qualifier_prefix);
-    };
-    auto append_decl_attrs_to_symbol =
-        [&](const Decl* decl, const std::shared_ptr<Symbol>& sym) {
-        if (!ast_ctx || !decl || !sym) {
-            return;
-        }
-        const auto& attrs = ast_ctx->get_attrs(decl->node_id).attrs;
-        sym->sym_attrs.attrs.insert(
-            sym->sym_attrs.attrs.end(),
-            attrs.begin(),
-            attrs.end());
+    auto declaration_flags_from_parser = [](const DeclarationParser& decl_parser) {
+        collect::DeclFlags flags;
+        flags.is_constexpr = decl_parser.is_constexpr;
+        flags.is_consteval = decl_parser.is_consteval;
+        flags.is_constinit = decl_parser.is_constinit;
+        flags.is_inline = decl_parser.is_inline;
+        flags.is_thread_local = decl_parser.is_thread_local;
+        flags.is_extern = decl_parser.storage_class == StorageClass::Extern;
+        flags.is_static = decl_parser.storage_class == StorageClass::Static;
+        flags.is_auto_storage = decl_parser.storage_class == StorageClass::Auto;
+        flags.is_register = decl_parser.storage_class == StorageClass::Register;
+        flags.is_mutable = decl_parser.is_mutable;
+        flags.is_friend = decl_parser.is_friend;
+        flags.is_block_byref = decl_parser.is_block_byref;
+        return flags;
     };
 
-    RecordSemanticState state;
-    state.is_incomplete = !record.is_definition;
-    state.is_template_pattern_provisional = true;
-    state.alignment = 1;
-    state.non_virtual_alignment = 1;
-    if (const auto* definition_data = record.get_definition_data()) {
-        state.definition_data = *definition_data;
+    struct LayoutAttrs {
+        AttributeList attrs;
+        bool is_packed = false;
+        bool is_transparent_union = false;
+        size_t alignment = 0;
+        std::vector<NodeId> syntax;
+    };
+
+    auto merge_attrs = [](LayoutAttrs& dst, LayoutAttrs src) {
+        dst.attrs.append(std::move(src.attrs));
+        dst.is_packed = dst.is_packed || src.is_packed;
+        dst.is_transparent_union =
+            dst.is_transparent_union || src.is_transparent_union;
+        dst.alignment = std::max(dst.alignment, src.alignment);
+        dst.syntax.insert(dst.syntax.end(), src.syntax.begin(), src.syntax.end());
+    };
+
+    auto parse_layout_attributes = [&]() {
+        LayoutAttrs attrs;
+        ParsedAttributes parsed = try_parse_attributes();
+        attrs.attrs = std::move(parsed.attrs);
+        attrs.syntax = std::move(parsed.syntax);
+        for (const ParsedAttribute& attr : attrs.attrs.attrs) {
+            if (attr.kind == AttributeKind::Packed) {
+                attrs.is_packed = true;
+            } else if (attr.kind == AttributeKind::TransparentUnion) {
+                attrs.is_transparent_union = true;
+            } else if (attr.kind == AttributeKind::Aligned &&
+                       !attr.args.empty() &&
+                       attr.args.front().kind == AttributeArg::Kind::Integer &&
+                       attr.args.front().int_value > 0) {
+                attrs.alignment =
+                    std::max(attrs.alignment,
+                             static_cast<size_t>(attr.args.front().int_value));
+            }
+        }
+        return attrs;
+    };
+
+    auto layout_options_from_attrs = [&](const LayoutAttrs& attrs) {
+        collect::RecordLayoutOptions options;
+        options.attrs = attrs.attrs;
+        options.is_packed = attrs.is_packed;
+        options.is_transparent_union = attrs.is_transparent_union;
+        options.requested_alignment = attrs.alignment;
+        options.pack_alignment = source_manager_
+            ? source_manager_->getPackAlignment(keyword.loc)
+            : 0;
+        return options;
+    };
+
+    std::vector<NodeId> children;
+
+    LayoutAttrs record_attrs = parse_layout_attributes();
+    children.insert(children.end(), record_attrs.syntax.begin(), record_attrs.syntax.end());
+
+    bool parses_explicit_class_specialization =
+        explicit_class_template_specialization_parse_ &&
+        !explicit_class_template_specialization_parse_->consumed;
+    if (parses_explicit_class_specialization) {
+        ParsedNestedName nested = parse_nested_name_specifier();
+        if (nested.consumed_any) {
+            ExplicitClassTemplateSpecializationParse& explicit_specialization =
+                *explicit_class_template_specialization_parse_;
+            explicit_specialization.has_error =
+                explicit_specialization.has_error || nested.has_error;
+            explicit_specialization.qualified_context = nested.scope.context;
+            if (!nested.has_error &&
+                !explicit_specialization.qualified_context.valid()) {
+                diagnose(DiagnosticLevel::Error,
+                         "explicit class template specialization qualifier does not name a namespace",
+                         keyword.loc);
+                explicit_specialization.has_error = true;
+            }
+        }
     }
 
-    RecordMemberAccess current_access =
-        encode_member_access(record.default_access);
-    for (const auto& member : record.members) {
-        if (!member) {
-            continue;
+    struct QualifiedRecordContextExit {
+        collect::Session* session = nullptr;
+        ~QualifiedRecordContextExit() {
+            if (session) {
+                session->leave_scope();
+            }
         }
-        if (const auto* access_spec =
-                dyn_cast<CppAccessSpecDecl>(member.get())) {
-            current_access = encode_member_access(access_spec->access);
-            continue;
-        }
-        if (const auto* field_decl = dyn_cast<FieldDecl>(member.get())) {
-            if (field_decl->is_bitfield()) {
-                state.fields.emplace_back(
-                    field_decl->name,
-                    field_decl->type,
-                    0,
-                    0,
-                    field_decl->bitfield_width,
-                    0,
-                    current_access,
-                    field_decl->is_mutable,
-                    field_decl);
+    } qualified_record_context;
+    bool has_qualified_record_name = false;
+    bool qualified_replay_claims_record = false;
+    if (lang_opts_.is_cxx_mode()) {
+        ParsedNestedName nested = parse_nested_name_specifier();
+        if (nested.consumed_any) {
+            has_qualified_record_name = true;
+            cir::DeclContextId inhabited_context =
+                collect_session_.current_decl_context();
+
+            bool replaying_this_member_class =
+                replaying_deferred_member_class_begin_ == begin;
+            if (!collect_session_.in_template_definition() &&
+                !replaying_this_member_class &&
+                inhabited_context.valid() &&
+                collect_session_.file().decl_context(inhabited_context).kind ==
+                    cir::DeclContextKind::Record) {
+                diagnose(DiagnosticLevel::Error,
+                         "qualified class definition cannot inhabit class scope",
+                         keyword.loc);
+            }
+            if (nested.has_error || !nested.scope.context.valid()) {
+                diagnose(DiagnosticLevel::Error,
+                         "qualified record definition qualifier does not name a class or namespace",
+                         keyword.loc);
             } else {
-                state.fields.emplace_back(
-                    field_decl->name,
-                    field_decl->type,
-                    0,
-                    current_access,
-                    field_decl->is_mutable,
-                    field_decl);
-            }
-            continue;
-        }
-        if (auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
-            const ObjectDecl* nested_decl =
-                ensure_cpp_template_pattern_nested_record_semantics(
-                    *nested_record);
-            if (!nested_decl || !nested_decl->get_record_type()) {
-                continue;
-            }
-            if (nested_record->name.empty()) {
-                state.fields.emplace_back(
-                    "",
-                    QualType(nested_decl->get_record_type()),
-                    0,
-                    current_access,
-                    false,
-                    nullptr);
-            } else {
-                RecordSemanticState::NestedType nested_type;
-                nested_type.name = nested_record->name;
-                nested_type.type = QualType(nested_decl->get_record_type());
-                nested_type.declared_access = current_access;
-                nested_type.decl = nested_decl;
-                set_object_decl_owner_record_type(
-                    nested_decl,
-                    QualType(record_type));
-                state.nested_types.push_back(std::move(nested_type));
-            }
-            continue;
-        }
-        if (const auto* typedef_decl = dyn_cast<TypedefDecl>(member.get())) {
-            RecordSemanticState::NestedType nested_type;
-            nested_type.name = typedef_decl->name;
-            QualType realized_typedef_type = realize_in_progress_record_nested_type(
-                typedef_decl->type,
-                semantic_decl,
-                state.nested_types,
-                ast_ctx.get());
-            if (realized_typedef_type &&
-                (realized_typedef_type.get_shared() !=
-                     typedef_decl->type.get_shared() ||
-                 realized_typedef_type.get_qualifiers() !=
-                     typedef_decl->type.get_qualifiers())) {
-                realized_typedef_type =
-                    collect_->collect_finalize_deferred_semantic_type(
-                        realized_typedef_type,
-                        typedef_decl->location);
-                auto* mutable_typedef_decl =
-                    const_cast<TypedefDecl*>(typedef_decl);
-                mutable_typedef_decl->type = realized_typedef_type;
-                mutable_typedef_decl->underlying =
-                    desugar_type(realized_typedef_type, ast_ctx.get());
-                if (mutable_typedef_decl->sym) {
-                    if (auto typedef_symbol_type =
-                            dyn_cast_shared<TypedefType>(
-                                mutable_typedef_decl->sym->type.get_shared())) {
-                        QualType symbol_underlying = realized_typedef_type;
-                        if (auto realized_typedef =
-                                dyn_cast_shared<TypedefType>(
-                                    symbol_underlying.get_shared())) {
-                            symbol_underlying =
-                                realized_typedef->underlying_type;
-                        }
-                        typedef_symbol_type->underlying_type =
-                            symbol_underlying.without_qualifiers();
+                const cir::File& file = collect_session_.file();
+                cir::DeclContextKind context_kind =
+                    file.decl_context(nested.scope.context).kind;
+                if (context_kind != cir::DeclContextKind::Record &&
+                    context_kind != cir::DeclContextKind::Namespace &&
+                    context_kind != cir::DeclContextKind::TranslationUnit) {
+                    diagnose(DiagnosticLevel::Error,
+                             "qualified record definition qualifier does not name a class or namespace",
+                             keyword.loc);
+                } else {
+                    qualified_replay_claims_record =
+                        is_identifier_token(current().type) &&
+                        collect_session_
+                            .current_instantiation_replay_will_claim_record(
+                                current().value);
+                    if (!qualified_replay_claims_record) {
+                        collect::ScopeFlags flags =
+                            context_kind == cir::DeclContextKind::Record
+                                ? collect::ScopeFlags::RecordScope
+                                : (collect::ScopeFlags::NamespaceScope |
+                                   collect::ScopeFlags::FileScope);
+                        collect_session_.enter_existing_context(
+                            nested.scope.context,
+                            flags);
+                        qualified_record_context.session = &collect_session_;
                     }
                 }
             }
-            nested_type.type = realized_typedef_type;
-            nested_type.declared_access = current_access;
-            nested_type.decl = typedef_decl;
-            nested_type.symbol = typedef_decl->sym;
-            state.nested_types.push_back(std::move(nested_type));
-            continue;
         }
-        if (const auto* enum_decl = dyn_cast<EnumDecl>(member.get())) {
-            if (!enum_decl->tag.empty()) {
-                RecordSemanticState::NestedType nested_type;
-                nested_type.name = enum_decl->tag;
-                nested_type.type = QualType(enum_decl->get_enum_type());
-                nested_type.declared_access = current_access;
-                nested_type.decl = enum_decl;
-                state.nested_types.push_back(std::move(nested_type));
-            }
-            if (!enum_decl->is_scoped()) {
-                for (const auto& constant : enum_decl->constants) {
-                    if (!constant) {
-                        continue;
-                    }
-                    RecordSemanticState::EnumeratorMember enumerator;
-                    enumerator.name = constant->name;
-                    enumerator.declared_access = current_access;
-                    enumerator.enum_decl = enum_decl;
-                    enumerator.decl = constant.get();
-                    enumerator.symbol = constant->sym;
-                    state.enumerator_members.push_back(std::move(enumerator));
+    }
+
+    if (is_identifier_token(current().type)) {
+        tag = current().value;
+        consume();
+    }
+    std::string collect_tag = tag;
+    cir::EntityId explicit_specialization_record_to_complete{};
+
+    if (!collect_session_.in_template_definition() &&
+        has_qualified_record_name && !qualified_replay_claims_record &&
+        !tag.empty() && qualified_record_context.session) {
+        const cir::File& file = collect_session_.file();
+        const cir::Binding* prior = file.lookup_tag_binding(
+            collect_session_.current_decl_context(),
+            tag,
+            /*include_parents=*/false);
+        if (!prior || prior->entities.empty() ||
+            !file.valid(prior->entities.back()) ||
+            file.entity(prior->entities.back()).kind != cir::EntityKind::Record) {
+            diagnose(DiagnosticLevel::Error,
+                     "qualified class definition has no matching prior declaration",
+                     keyword.loc);
+        }
+    }
+
+    if (parses_explicit_class_specialization) {
+        ExplicitClassTemplateSpecializationParse& explicit_specialization =
+            *explicit_class_template_specialization_parse_;
+        explicit_specialization.consumed = true;
+        if (tag.empty()) {
+            diagnose(DiagnosticLevel::Error,
+                     "explicit class template specialization requires a template name",
+                     keyword.loc);
+            explicit_specialization.has_error = true;
+        } else if (!check(TokenType::LESS_THAN)) {
+            diagnose(DiagnosticLevel::Error,
+                     "explicit class template specialization requires a template argument list",
+                     keyword.loc);
+            explicit_specialization.has_error = true;
+        } else {
+            struct AccessExemptionExit {
+                collect::Session& session;
+                ~AccessExemptionExit() {
+                    session.leave_template_argument_access_exemption();
                 }
-            }
-            continue;
-        }
-        if (const auto* alias_template = dyn_cast<AliasTemplateDecl>(member.get())) {
-            if (const auto* alias_decl = alias_template->alias_decl()) {
-                RecordSemanticState::NestedTemplate nested_template;
-                nested_template.name = alias_decl->name;
-                nested_template.declared_access = current_access;
-                nested_template.kind =
-                    RecordSemanticState::NestedTemplateKind::Alias;
-                nested_template.decl = alias_template;
-                set_template_decl_owner_record_type(
-                    alias_template,
-                    QualType(record_type));
-                state.nested_templates.push_back(std::move(nested_template));
-            }
-            continue;
-        }
-        if (const auto* class_template = dyn_cast<ClassTemplateDecl>(member.get())) {
-            if (const auto* nested_record = class_template->record_decl();
-                nested_record && !nested_record->name.empty()) {
-                RecordSemanticState::NestedTemplate nested_template;
-                nested_template.name = nested_record->name;
-                nested_template.declared_access = current_access;
-                nested_template.kind =
-                    RecordSemanticState::NestedTemplateKind::Class;
-                nested_template.decl = class_template;
-                set_template_decl_owner_record_type(
-                    class_template,
-                    QualType(record_type));
-                state.nested_templates.push_back(std::move(nested_template));
-            }
-            continue;
-        }
-        if (const auto* method_template =
-                dyn_cast<FunctionTemplateDecl>(member.get())) {
-            auto* templated_function = method_template->function_decl();
-            auto* templated_method =
-                dyn_cast<CppMethodDecl>(templated_function);
-            auto* templated_ctor =
-                dyn_cast<CppConstructorDecl>(templated_function);
-            if (!templated_method && !templated_ctor) {
-                continue;
-            }
-
-            std::string method_prefix;
-            if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(templated_function)) {
-                method_prefix = *qualifier_prefix;
-            }
-            if (method_prefix.empty()) {
-                method_prefix = record.name;
-            }
-            ensure_namespace_qualifier_prefix(method_prefix);
-            if (!method_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(
-                    templated_function,
-                    method_prefix);
-            }
-            set_func_decl_owner_record_type(
-                templated_function,
-                QualType(record_type));
-
-            RecordSemanticState::MethodTemplate method_template_state;
-            method_template_state.name = templated_function->name;
-            method_template_state.declared_access = current_access;
-            method_template_state.is_static =
-                templated_method &&
-                templated_method->storage_class == StorageClass::STATIC;
-            method_template_state.decl = method_template;
-            state.method_templates.push_back(std::move(method_template_state));
-            if (templated_ctor) {
-                state.definition_data.has_user_declared_constructor = true;
-            }
-            continue;
-        }
-        if (const auto* method_decl = dyn_cast<CppMethodDecl>(member.get())) {
-            std::string method_prefix;
-            if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(method_decl)) {
-                method_prefix = *qualifier_prefix;
-            }
-            if (method_prefix.empty()) {
-                method_prefix = record.name;
-            }
-            ensure_namespace_qualifier_prefix(method_prefix);
-            if (!method_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(method_decl, method_prefix);
-            }
-            set_func_decl_owner_record_type(method_decl, QualType(record_type));
-            auto method_sym = collect_->collect_declare_function_symbol(
-                method_decl->name,
-                method_decl->type,
-                method_decl->storage_class,
-                method_decl->is_constexpr,
-                method_decl->is_consteval,
-                method_decl->is_inline,
-                function_decl_defines_entity(method_decl),
-                method_decl->location,
-                method_decl->get_language_linkage(),
-                true,
-                method_decl->is_deleted,
-                method_decl->is_defaulted,
-                QualType(record_type),
-                method_prefix,
-                method_decl->trailing_requires_clause.get());
-            if (method_sym) {
-                set_symbol_owner_record_type(method_sym.get(), QualType(record_type));
-                if (!method_prefix.empty()) {
-                    set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
-                }
-                if (function_decl_defines_entity(method_decl)) {
-                    method_sym->function_definition =
-                        const_cast<CppMethodDecl*>(method_decl);
-                }
-                method_sym->function_trailing_requires_clause =
-                    method_decl->trailing_requires_clause.get();
-                append_decl_attrs_to_symbol(method_decl, method_sym);
-            }
-
-            RecordSemanticState::Method method;
-            method.name = method_decl->name;
-            method.type = QualType(method_decl->type);
-            method.declared_access = current_access;
-            method.is_static =
-                method_decl->storage_class == StorageClass::STATIC;
-            method.is_deleted = method_decl->is_deleted;
-            method.is_defaulted = method_decl->is_defaulted;
-            method.is_constexpr = method_decl->is_constexpr;
-            method.is_consteval = method_decl->is_consteval;
-            method.is_explicit = method_decl->is_explicit_conversion;
-            method.is_virtual = method_decl->is_virtual;
-            method.is_override = method_decl->is_override;
-            method.is_final = method_decl->is_final;
-            method.is_pure = method_decl->is_pure;
-            method.is_conversion_function = method_decl->is_conversion_function;
-            method.conversion_target_type = method_decl->conversion_target_type;
-            method.decl = method_decl;
-            method.symbol = std::move(method_sym);
-            state.methods.push_back(std::move(method));
-            continue;
-        }
-        if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {
-            if (const auto* function_decl =
-                    friend_decl->function_pattern_decl()) {
-                RecordSemanticState::FriendFunction friend_function;
-                friend_function.name = function_decl->name;
-                friend_function.type = QualType(function_decl->type);
-                friend_function.decl = friend_decl;
-                friend_function.function_decl = function_decl;
-                friend_function.function_template =
-                    friend_decl->function_template_decl();
-                friend_function.symbol = friend_function.function_template
-                    ? nullptr
-                    : friend_decl->function_symbol;
-                state.friend_functions.push_back(std::move(friend_function));
-            } else if (friend_decl->get_friend_kind() == CppFriendKind::Type &&
-                       friend_decl->friend_type) {
-                RecordSemanticState::FriendType friend_type;
-                friend_type.type = friend_decl->friend_type;
-                friend_type.decl = friend_decl;
-                friend_type.class_template =
-                    friend_decl->friend_class_template;
-                state.friend_types.push_back(std::move(friend_type));
-            }
-            continue;
-        }
-    }
-
-    RecordSemanticState deferred_semantic_state = state;
-    collect_->query_publish_record_semantics(semantic_decl, std::move(state));
-    record.provisional_semantic_owner = semantic_decl;
-    if (owned_semantic_decl) {
-        if (!record.name.empty()) {
-            collect_->collect_add_tag_decl(record.name, semantic_decl);
-        }
-    }
-
-    CppRecordDeferredParseContext deferred_ctx{
-        record,
-        record_type,
-        std::move(deferred_semantic_state),
-        semantic_decl};
-    build_cpp_record_parse_deferred_bodies(deferred_ctx);
-
-    if (owned_semantic_decl) {
-        cpp_transient_semantic_decls_.push_back(
-            std::move(owned_semantic_decl));
-    }
-    return semantic_decl;
-}
-
-template <typename TemplateDeclT>
-void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_template) {
-    auto* record = class_template.record_decl();
-    if (!is_in_template_pattern_context() || !collect_ || !record ||
-        !record->is_definition || record->name.empty()) {
-        return;
-    }
-
-    auto* placeholder_decl = class_template.pattern_semantic_decl();
-    if (!placeholder_decl) {
-        std::unique_ptr<ObjectDecl> owned_placeholder;
-        if (record->provisional_semantic_owner) {
-            owned_placeholder = take_cpp_transient_semantic_object_decl(
-                record->provisional_semantic_owner);
-        }
-        if (!owned_placeholder) {
-            owned_placeholder = take_cpp_transient_semantic_object_decl(record->name);
-        }
-        if (!owned_placeholder) {
-            error_custloc(
-                "internal error: missing class template pattern semantic owner",
-                record->location);
-        }
-        class_template.set_pattern_semantic_decl(std::move(owned_placeholder));
-        placeholder_decl = class_template.pattern_semantic_decl();
-    }
-
-    if (!placeholder_decl) {
-        return;
-    }
-    auto record_type = placeholder_decl->get_record_type();
-    if (!record_type) {
-        return;
-    }
-    record_type->set_decl(placeholder_decl);
-    auto ensure_namespace_qualifier_prefix = [&](std::string& qualifier_prefix) {
-        if (!collect_) {
-            return;
-        }
-        auto scope = collect_->collect_current_scope();
-        while (scope && scope->cxx_namespace_path.empty()) {
-            scope = scope->parent;
-        }
-        qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
-            scope, qualifier_prefix);
-    };
-    auto append_decl_attrs_to_symbol =
-        [&](const Decl* decl, const std::shared_ptr<Symbol>& sym) {
-        if (!ast_ctx || !decl || !sym) {
-            return;
-        }
-        const auto& attrs = ast_ctx->get_attrs(decl->node_id).attrs;
-        sym->sym_attrs.attrs.insert(
-            sym->sym_attrs.attrs.end(),
-            attrs.begin(),
-            attrs.end());
-    };
-
-    RecordSemanticState semantic_state;
-    semantic_state.is_incomplete = false;
-    semantic_state.alignment = 1;
-    semantic_state.non_virtual_alignment = 1;
-
-    std::vector<ObjectType::Field> fields;
-    std::vector<RecordSemanticState::Method> methods;
-    std::vector<RecordSemanticState::MethodTemplate> method_templates;
-    std::vector<RecordSemanticState::Constructor> constructors;
-    std::vector<RecordSemanticState::Destructor> destructors;
-    std::vector<RecordSemanticState::StaticDataMember> static_data_members;
-    std::vector<RecordSemanticState::NestedType> nested_types;
-    std::vector<RecordSemanticState::NestedTemplate> nested_templates;
-    std::vector<RecordSemanticState::FriendFunction> friend_functions;
-    std::vector<RecordSemanticState::FriendType> friend_types;
-    std::vector<RecordSemanticState::Base> bases;
-    fields.reserve(record->members.size());
-    methods.reserve(record->members.size());
-    method_templates.reserve(record->members.size());
-    constructors.reserve(record->members.size());
-    destructors.reserve(record->members.size());
-    static_data_members.reserve(record->members.size());
-    nested_types.reserve(record->members.size());
-    nested_templates.reserve(record->members.size());
-    friend_functions.reserve(record->members.size());
-    friend_types.reserve(record->members.size());
-    bases.reserve(record->bases.size());
-
-    auto build_pattern_nested_record =
-        [&](CppRecordDecl& nested_record) -> const ObjectDecl* {
-        return ensure_cpp_template_pattern_nested_record_semantics(
-            nested_record);
-    };
-
-    RecordMemberAccess current_access =
-        encode_member_access(record->default_access);
-    for (const auto& base_spec : record->bases) {
-        RecordSemanticState::Base semantic_base;
-        std::string base_name = cpp_base_specifier_name(base_spec);
-        semantic_base.name = base_name;
-        semantic_base.declared_access = encode_member_access(base_spec.access);
-        semantic_base.is_virtual = base_spec.is_virtual_base;
-        semantic_base.spec = &base_spec;
-
-        if (base_name.empty()) {
-            error_custloc(
-                "expected base class name in base-specifier",
-                base_spec.location);
-        }
-
-        QualType resolved_base_type = base_spec.type;
-        if (resolved_base_type &&
-            !cpp_base_type_is_dependent(resolved_base_type, ast_ctx.get())) {
-            resolved_base_type =
-                collect_->collect_try_realize_deferred_semantic_type(
-                    resolved_base_type);
-        }
-        if (cpp_base_type_is_current_instantiation(resolved_base_type)) {
-            error_custloc(
-                "class '" + record->name + "' cannot derive from itself",
-                base_spec.location);
-        }
-        auto* base_record_decl = cpp_base_record_decl_from_type(resolved_base_type);
-        if (!base_record_decl && !resolved_base_type) {
-            auto* base_tag_decl =
-                collect_->collect_lookup_tag_decl(base_name, true);
-            base_record_decl = dyn_cast<ObjectDecl>(base_tag_decl);
-            if (!base_record_decl) {
-                resolved_base_type =
-                    collect_->collect_lookup_type_name(
-                        base_name,
-                        true,
-                        true);
-                base_record_decl =
-                    cpp_base_record_decl_from_type(resolved_base_type);
-            }
-        }
-        if (!base_record_decl) {
-            if (!resolved_base_type ||
-                !cpp_base_type_is_dependent(resolved_base_type, ast_ctx.get())) {
-                error_custloc(
-                    "base type '" + base_name +
-                        "' does not name a class or struct",
-                    base_spec.location);
-            }
-            semantic_base.type = resolved_base_type;
-            bases.push_back(std::move(semantic_base));
-            continue;
-        }
-
-        const ObjectDecl* canonical_base_decl = base_record_decl;
-        if (base_record_decl->get_record_type()) {
-            if (auto* canonical =
-                    dyn_cast<ObjectDecl>(
-                        base_record_decl->get_record_type()->get_decl())) {
-                canonical_base_decl = canonical;
-            }
-        }
-
-        if (canonical_base_decl == placeholder_decl ||
-            base_name == record->name) {
-            error_custloc(
-                "class '" + record->name + "' cannot derive from itself",
-                base_spec.location);
-        }
-        if (canonical_base_decl->is_union) {
-            error_custloc(
-                "base type '" + base_name +
-                    "' is a union; only class/struct bases are supported",
-                base_spec.location);
-        }
-        const RecordSemanticState* base_state =
-            collect_->query_lookup_record_semantics(canonical_base_decl);
-        if (!base_state || base_state->is_incomplete) {
-            error_custloc(
-                "base class '" + base_name +
-                    "' is incomplete",
-                base_spec.location);
-        }
-
-        semantic_base.record_decl = canonical_base_decl;
-        semantic_base.type = QualType(canonical_base_decl->get_record_type());
-        bases.push_back(std::move(semantic_base));
-    }
-    for (const auto& member : record->members) {
-        if (!member) {
-            continue;
-        }
-        if (const auto* access_spec = dyn_cast<CppAccessSpecDecl>(member.get())) {
-            current_access = encode_member_access(access_spec->access);
-            continue;
-        }
-
-        if (auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
-            const ObjectDecl* nested_decl =
-                build_pattern_nested_record(*nested_record);
-            if (!nested_decl || !nested_decl->get_record_type()) {
-                continue;
-            }
-            if (nested_record->name.empty()) {
-                fields.emplace_back(
-                    "",
-                    QualType(nested_decl->get_record_type()),
-                    0,
-                    current_access,
-                    false,
-                    nullptr);
+            } access_exemption{collect_session_};
+            collect_session_.enter_template_argument_access_exemption();
+            const collect::Session::TemplateInfo* primary =
+                collect_session_.template_info(explicit_specialization
+                                                   .template_entity);
+            if (!primary || !primary->is_class_template ||
+                primary->name != tag) {
+                diagnose(DiagnosticLevel::Error,
+                         "no matching class template for explicit specialization",
+                         keyword.loc);
+                explicit_specialization.has_error = true;
+                (void)parse_dependent_expression_template_argument_list(
+                    keyword.loc);
             } else {
-                RecordSemanticState::NestedType nested_type;
-                nested_type.name = nested_record->name;
-                nested_type.type = QualType(nested_decl->get_record_type());
-                nested_type.declared_access = current_access;
-                nested_type.decl = nested_decl;
-                set_object_decl_owner_record_type(
-                    nested_decl,
-                    QualType(record_type));
-                nested_types.push_back(std::move(nested_type));
-            }
-            continue;
-        }
-
-        if (const auto* field_decl = dyn_cast<FieldDecl>(member.get())) {
-            if (field_decl->is_bitfield()) {
-                fields.emplace_back(field_decl->name,
-                                    field_decl->type,
-                                    0,
-                                    0,
-                                    field_decl->bitfield_width,
-                                    0,
-                                    current_access);
-            } else {
-                fields.emplace_back(field_decl->name, field_decl->type, 0, current_access);
-            }
-            continue;
-        }
-
-        if (const auto* static_member_decl = dyn_cast<VariableDecl>(member.get())) {
-            if (static_member_decl->storage_class != StorageClass::STATIC) {
-                continue;
-            }
-            auto* mutable_static_member_decl =
-                const_cast<VariableDecl*>(static_member_decl);
-            std::string static_member_prefix = record->name;
-            ensure_namespace_qualifier_prefix(static_member_prefix);
-            bool has_in_class_initializer = static_member_decl->init != nullptr;
-
-            std::shared_ptr<Symbol> static_member_sym = static_member_decl->sym;
-            if (!static_member_sym) {
-                static_member_sym = std::make_shared<Symbol>(
-                    static_member_decl->name,
-                    SymbolKind::VARIABLE,
-                    desugar_type(static_member_decl->type),
-                    StorageClass::STATIC,
-                    VariableLinkage::EXTERNAL);
-                static_member_sym->is_constexpr = static_member_decl->is_constexpr;
-                static_member_sym->set_language_linkage(
-                    static_member_decl->get_language_linkage());
-                static_member_sym->is_defined = has_in_class_initializer;
-                collect_->collect_add_global_symbol(static_member_sym);
-                mutable_static_member_decl->sym = static_member_sym;
-            } else {
-                static_member_sym->type = desugar_type(static_member_decl->type);
-                static_member_sym->storage_class = StorageClass::STATIC;
-                static_member_sym->is_constexpr = static_member_decl->is_constexpr;
-                if (has_in_class_initializer) {
-                    static_member_sym->is_defined = true;
-                }
-                if (static_member_sym->get_language_linkage() ==
-                    LanguageLinkage::None) {
-                    static_member_sym->set_language_linkage(
-                        static_member_decl->get_language_linkage());
-                }
-                if (static_member_sym->uid.empty()) {
-                    collect_->collect_add_global_symbol(static_member_sym);
-                }
-            }
-            if (!static_member_prefix.empty()) {
-                set_symbol_cxx_qualifier_prefix(
-                    static_member_sym.get(), static_member_prefix);
-            }
-            set_symbol_owner_record_type(
-                static_member_sym.get(), QualType(record_type));
-            append_decl_attrs_to_symbol(static_member_decl, static_member_sym);
-            RecordSemanticState::StaticDataMember static_member;
-            static_member.name = static_member_decl->name;
-            static_member.type = static_member_decl->type;
-            static_member.declared_access = current_access;
-            static_member.decl = static_member_decl;
-            static_member.symbol = static_member_sym;
-            static_data_members.push_back(std::move(static_member));
-            continue;
-        }
-
-        if (const auto* typedef_decl = dyn_cast<TypedefDecl>(member.get())) {
-            RecordSemanticState::NestedType nested_type;
-            nested_type.name = typedef_decl->name;
-            QualType realized_typedef_type = realize_in_progress_record_nested_type(
-                typedef_decl->type,
-                placeholder_decl,
-                nested_types,
-                ast_ctx.get());
-            if (realized_typedef_type &&
-                (realized_typedef_type.get_shared() !=
-                     typedef_decl->type.get_shared() ||
-                 realized_typedef_type.get_qualifiers() !=
-                     typedef_decl->type.get_qualifiers())) {
-                realized_typedef_type =
-                    collect_->collect_finalize_deferred_semantic_type(
-                        realized_typedef_type,
-                        typedef_decl->location);
-                auto* mutable_typedef_decl =
-                    const_cast<TypedefDecl*>(typedef_decl);
-                mutable_typedef_decl->type = realized_typedef_type;
-                mutable_typedef_decl->underlying =
-                    desugar_type(realized_typedef_type, ast_ctx.get());
-                if (mutable_typedef_decl->sym) {
-                    if (auto typedef_symbol_type =
-                            dyn_cast_shared<TypedefType>(
-                                mutable_typedef_decl->sym->type.get_shared())) {
-                        QualType symbol_underlying = realized_typedef_type;
-                        if (auto realized_typedef =
-                                dyn_cast_shared<TypedefType>(
-                                    symbol_underlying.get_shared())) {
-                            symbol_underlying =
-                                realized_typedef->underlying_type;
-                        }
-                        typedef_symbol_type->underlying_type =
-                            symbol_underlying.without_qualifiers();
+                std::vector<collect::Session::TemplateArgument> arguments;
+                if (!parse_and_canonicalize_template_argument_list(
+                        *primary,
+                        arguments,
+                        keyword.loc)) {
+                    explicit_specialization.has_error = true;
+                } else {
+                    if (!check_non_function_template_associated_constraints(
+                            *primary,
+                            arguments,
+                            keyword.loc,
+                            collect_session_.lookup_generation())) {
+                        explicit_specialization.has_error = true;
                     }
-                }
-            }
-            nested_type.type = realized_typedef_type;
-            nested_type.declared_access = current_access;
-            nested_type.decl = typedef_decl;
-            nested_type.symbol = typedef_decl->sym;
-            nested_types.push_back(std::move(nested_type));
-            continue;
-        }
+                    explicit_specialization.matched = true;
+                    explicit_specialization.source_name = tag;
+                    explicit_specialization.template_entity = primary->entity;
+                    explicit_specialization.arguments = std::move(arguments);
+                    std::string parsed_display_name =
+                        collect_session_.template_display_name(
+                            *primary,
+                            explicit_specialization.arguments);
 
-        if (const auto* alias_template = dyn_cast<AliasTemplateDecl>(member.get())) {
-            if (const auto* alias_decl = alias_template->alias_decl()) {
-                RecordSemanticState::NestedTemplate nested_template;
-                nested_template.name = alias_decl->name;
-                nested_template.declared_access = current_access;
-                nested_template.kind =
-                    RecordSemanticState::NestedTemplateKind::Alias;
-                nested_template.decl = alias_template;
-                set_template_decl_owner_record_type(
-                    alias_template,
-                    QualType(record_type));
-                nested_templates.push_back(std::move(nested_template));
-            }
-            continue;
-        }
-
-        if (const auto* class_template = dyn_cast<ClassTemplateDecl>(member.get())) {
-            if (const auto* nested_record = class_template->record_decl();
-                nested_record && !nested_record->name.empty()) {
-                RecordSemanticState::NestedTemplate nested_template;
-                nested_template.name = nested_record->name;
-                nested_template.declared_access = current_access;
-                nested_template.kind =
-                    RecordSemanticState::NestedTemplateKind::Class;
-                nested_template.decl = class_template;
-                set_template_decl_owner_record_type(
-                    class_template,
-                    QualType(record_type));
-                nested_templates.push_back(std::move(nested_template));
-            }
-            continue;
-        }
-
-        if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {
-            if (const auto* function_decl =
-                    friend_decl->function_pattern_decl()) {
-                RecordSemanticState::FriendFunction friend_function;
-                friend_function.name = function_decl->name;
-                friend_function.type = QualType(function_decl->type);
-                friend_function.decl = friend_decl;
-                friend_function.function_decl = function_decl;
-                friend_function.function_template =
-                    friend_decl->function_template_decl();
-                friend_function.symbol = friend_function.function_template
-                    ? nullptr
-                    : friend_decl->function_symbol;
-                friend_functions.push_back(std::move(friend_function));
-            } else if (friend_decl->get_friend_kind() == CppFriendKind::Type &&
-                       friend_decl->friend_type) {
-                RecordSemanticState::FriendType friend_type;
-                friend_type.type = friend_decl->friend_type;
-                friend_type.decl = friend_decl;
-                friend_type.class_template =
-                    friend_decl->friend_class_template;
-                friend_types.push_back(std::move(friend_type));
-            }
-            continue;
-        }
-
-        if (const auto* ctor_decl = dyn_cast<CppConstructorDecl>(member.get())) {
-            std::string ctor_prefix;
-            if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(ctor_decl)) {
-                ctor_prefix = *qualifier_prefix;
-            }
-            if (ctor_prefix.empty()) {
-                ctor_prefix = record->name;
-            }
-            ensure_namespace_qualifier_prefix(ctor_prefix);
-            if (!ctor_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(ctor_decl, ctor_prefix);
-            }
-            set_func_decl_owner_record_type(ctor_decl, QualType(record_type));
-            auto ctor_sym = collect_->collect_declare_function_symbol(
-                ctor_decl->name,
-                ctor_decl->type,
-                ctor_decl->storage_class,
-                ctor_decl->is_constexpr,
-                ctor_decl->is_consteval,
-                ctor_decl->is_inline,
-                function_decl_defines_entity(ctor_decl),
-                ctor_decl->location,
-                ctor_decl->get_language_linkage(),
-                true,
-                ctor_decl->is_deleted,
-                ctor_decl->is_defaulted,
-                QualType(record_type),
-                ctor_prefix,
-                ctor_decl->trailing_requires_clause.get());
-            if (ctor_sym) {
-                set_symbol_owner_record_type(ctor_sym.get(), QualType(record_type));
-                if (!ctor_prefix.empty()) {
-                    set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
-                }
-                if (function_decl_defines_entity(ctor_decl)) {
-                    ctor_sym->function_definition =
-                        const_cast<CppConstructorDecl*>(ctor_decl);
-                }
-                ctor_sym->function_trailing_requires_clause =
-                    ctor_decl->trailing_requires_clause.get();
-                append_decl_attrs_to_symbol(ctor_decl, ctor_sym);
-            }
-
-            RecordSemanticState::Constructor ctor;
-            ctor.name = ctor_decl->name;
-            ctor.type = ctor_decl->type;
-            ctor.declared_access = current_access;
-            ctor.is_implicit = false;
-            ctor.is_explicit = ctor_decl->is_explicit;
-            ctor.is_deleted = ctor_decl->is_deleted;
-            ctor.is_defaulted = ctor_decl->is_defaulted;
-            ctor.is_constexpr = ctor_decl->is_constexpr;
-            ctor.is_consteval = ctor_decl->is_consteval;
-            ctor.decl = ctor_decl;
-            ctor.symbol = std::move(ctor_sym);
-            constructors.push_back(std::move(ctor));
-            semantic_state.definition_data.has_user_declared_constructor = true;
-            continue;
-        }
-
-        if (const auto* dtor_decl = dyn_cast<CppDestructorDecl>(member.get())) {
-            std::string dtor_prefix;
-            if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(dtor_decl)) {
-                dtor_prefix = *qualifier_prefix;
-            }
-            if (dtor_prefix.empty()) {
-                dtor_prefix = record->name;
-            }
-            ensure_namespace_qualifier_prefix(dtor_prefix);
-            if (!dtor_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(dtor_decl, dtor_prefix);
-            }
-            set_func_decl_owner_record_type(dtor_decl, QualType(record_type));
-            auto dtor_sym = collect_->collect_declare_function_symbol(
-                dtor_decl->name,
-                dtor_decl->type,
-                dtor_decl->storage_class,
-                dtor_decl->is_constexpr,
-                dtor_decl->is_consteval,
-                dtor_decl->is_inline,
-                function_decl_defines_entity(dtor_decl),
-                dtor_decl->location,
-                dtor_decl->get_language_linkage(),
-                true,
-                dtor_decl->is_deleted,
-                dtor_decl->is_defaulted,
-                QualType(record_type),
-                dtor_prefix,
-                dtor_decl->trailing_requires_clause.get());
-            if (dtor_sym) {
-                set_symbol_owner_record_type(dtor_sym.get(), QualType(record_type));
-                if (!dtor_prefix.empty()) {
-                    set_symbol_cxx_qualifier_prefix(dtor_sym.get(), dtor_prefix);
-                }
-                if (function_decl_defines_entity(dtor_decl)) {
-                    dtor_sym->function_definition =
-                        const_cast<CppDestructorDecl*>(dtor_decl);
-                }
-                dtor_sym->function_trailing_requires_clause =
-                    dtor_decl->trailing_requires_clause.get();
-                append_decl_attrs_to_symbol(dtor_decl, dtor_sym);
-            }
-
-            RecordSemanticState::Destructor dtor;
-            dtor.name = dtor_decl->name;
-            dtor.type = dtor_decl->type;
-            dtor.declared_access = current_access;
-            dtor.is_implicit = false;
-            dtor.is_defaulted = dtor_decl->is_defaulted;
-            dtor.is_deleted = dtor_decl->is_deleted;
-            dtor.is_constexpr = dtor_decl->is_constexpr;
-            dtor.is_consteval = dtor_decl->is_consteval;
-            dtor.is_virtual = dtor_decl->is_virtual;
-            dtor.is_override = dtor_decl->is_override;
-            dtor.is_final = dtor_decl->is_final;
-            dtor.is_pure = dtor_decl->is_pure;
-            dtor.decl = dtor_decl;
-            dtor.symbol = std::move(dtor_sym);
-            destructors.push_back(std::move(dtor));
-            semantic_state.definition_data.has_user_declared_destructor = true;
-            if (dtor_decl->is_deleted) {
-                semantic_state.definition_data.has_deleted_destructor = true;
-            }
-            continue;
-        }
-
-        if (const auto* method_template = dyn_cast<FunctionTemplateDecl>(member.get())) {
-            auto* templated_function = method_template->function_decl();
-            auto* templated_method =
-                dyn_cast<CppMethodDecl>(templated_function);
-            auto* templated_ctor =
-                dyn_cast<CppConstructorDecl>(templated_function);
-            if (!templated_method && !templated_ctor) {
-                continue;
-            }
-
-            std::string method_prefix;
-            if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(templated_function)) {
-                method_prefix = *qualifier_prefix;
-            }
-            if (method_prefix.empty()) {
-                method_prefix = record->name;
-            }
-            ensure_namespace_qualifier_prefix(method_prefix);
-            if (!method_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(
-                    templated_function,
-                    method_prefix);
-            }
-            set_func_decl_owner_record_type(
-                templated_function,
-                QualType(record_type));
-
-            RecordSemanticState::MethodTemplate method_template_state;
-            method_template_state.name = templated_function->name;
-            method_template_state.declared_access = current_access;
-            method_template_state.is_static =
-                templated_method &&
-                templated_method->storage_class == StorageClass::STATIC;
-            method_template_state.decl = method_template;
-            method_templates.push_back(std::move(method_template_state));
-            if (templated_ctor) {
-                semantic_state.definition_data.has_user_declared_constructor =
-                    true;
-            }
-            continue;
-        }
-
-        if (const auto* method_decl = dyn_cast<CppMethodDecl>(member.get())) {
-            std::string method_prefix;
-            if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(method_decl)) {
-                method_prefix = *qualifier_prefix;
-            }
-            if (method_prefix.empty()) {
-                method_prefix = record->name;
-            }
-            ensure_namespace_qualifier_prefix(method_prefix);
-            if (!method_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(method_decl, method_prefix);
-            }
-            set_func_decl_owner_record_type(method_decl, QualType(record_type));
-            auto method_sym = collect_->collect_declare_function_symbol(
-                method_decl->name,
-                method_decl->type,
-                method_decl->storage_class,
-                method_decl->is_constexpr,
-                method_decl->is_consteval,
-                method_decl->is_inline,
-                function_decl_defines_entity(method_decl),
-                method_decl->location,
-                method_decl->get_language_linkage(),
-                true,
-                method_decl->is_deleted,
-                method_decl->is_defaulted,
-                QualType(record_type),
-                method_prefix,
-                method_decl->trailing_requires_clause.get());
-            if (method_sym) {
-                set_symbol_owner_record_type(method_sym.get(), QualType(record_type));
-                if (!method_prefix.empty()) {
-                    set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
-                }
-                if (function_decl_defines_entity(method_decl)) {
-                    method_sym->function_definition =
-                        const_cast<CppMethodDecl*>(method_decl);
-                }
-                method_sym->function_trailing_requires_clause =
-                    method_decl->trailing_requires_clause.get();
-                append_decl_attrs_to_symbol(method_decl, method_sym);
-            }
-
-            RecordSemanticState::Method method;
-            method.name = method_decl->name;
-            method.type = method_decl->type;
-            method.declared_access = current_access;
-            method.is_static = method_decl->storage_class == StorageClass::STATIC;
-            method.is_deleted = method_decl->is_deleted;
-            method.is_defaulted = method_decl->is_defaulted;
-            method.is_constexpr = method_decl->is_constexpr;
-            method.is_consteval = method_decl->is_consteval;
-            method.is_explicit = method_decl->is_explicit_conversion;
-            method.is_virtual = method_decl->is_virtual;
-            method.is_override = method_decl->is_override;
-            method.is_final = method_decl->is_final;
-            method.is_pure = method_decl->is_pure;
-            method.is_conversion_function = method_decl->is_conversion_function;
-            method.conversion_target_type = method_decl->conversion_target_type;
-            method.decl = method_decl;
-            method.symbol = std::move(method_sym);
-            methods.push_back(std::move(method));
-            continue;
-        }
-    }
-
-    size_t next_virtual_slot = 0;
-    for (auto& method : methods) {
-        if (!method.is_virtual || method.is_static) {
-            continue;
-        }
-        semantic_state.is_polymorphic = true;
-        method.virtual_slot_index = static_cast<int32_t>(next_virtual_slot++);
-        RecordSemanticState::VirtualSlot slot;
-        slot.key = method.name;
-        slot.name = method.name;
-        slot.is_pure = method.is_pure;
-        slot.is_final = method.is_final;
-        slot.final_symbol = method.symbol;
-        semantic_state.virtual_slots.push_back(std::move(slot));
-    }
-    for (auto& dtor : destructors) {
-        if (!dtor.is_virtual) {
-            continue;
-        }
-        semantic_state.is_polymorphic = true;
-        semantic_state.has_virtual_destructor = true;
-        dtor.virtual_slot_index = static_cast<int32_t>(next_virtual_slot++);
-        RecordSemanticState::VirtualSlot slot;
-        slot.key = "<destructor>";
-        slot.name = dtor.name;
-        slot.is_destructor = true;
-        slot.is_pure = dtor.is_pure;
-        slot.is_final = dtor.is_final;
-        slot.final_symbol = dtor.symbol;
-        semantic_state.virtual_slots.push_back(std::move(slot));
-    }
-    for (const auto& slot : semantic_state.virtual_slots) {
-        if (slot.is_pure) {
-            semantic_state.is_abstract = true;
-            break;
-        }
-    }
-
-    semantic_state.fields = std::move(fields);
-    semantic_state.methods = std::move(methods);
-    semantic_state.method_templates = std::move(method_templates);
-    semantic_state.constructors = std::move(constructors);
-    semantic_state.destructors = std::move(destructors);
-    semantic_state.static_data_members = std::move(static_data_members);
-    semantic_state.nested_types = std::move(nested_types);
-    semantic_state.nested_templates = std::move(nested_templates);
-    semantic_state.friend_functions = std::move(friend_functions);
-    semantic_state.friend_types = std::move(friend_types);
-    semantic_state.bases = std::move(bases);
-    if (auto* definition_data = record->get_definition_data()) {
-        *definition_data = semantic_state.definition_data;
-    }
-    RecordSemanticState deferred_semantic_state = semantic_state;
-    collect_->query_publish_record_semantics(placeholder_decl,
-                                             std::move(semantic_state));
-    const ClassTemplateDecl* current_instantiation_primary = nullptr;
-    QualType current_instantiation_type;
-    if constexpr (std::is_same_v<TemplateDeclT, ClassTemplateDecl>) {
-        current_instantiation_primary = &class_template;
-        current_instantiation_type =
-            build_cpp_primary_current_instantiation_type(
-                current_instantiation_primary,
-                record->name,
-                record->location);
-    } else if constexpr (
-        std::is_same_v<TemplateDeclT,
-                       ClassTemplatePartialSpecializationDecl>) {
-        current_instantiation_primary = class_template.primary_template();
-        current_instantiation_type =
-            build_cpp_current_instantiation_type(
-                current_instantiation_primary,
-                record->name,
-                class_template.specialization_arguments);
-    }
-
-    CppRecordDeferredParseContext deferred_ctx{
-        *record,
-        record_type,
-        std::move(deferred_semantic_state),
-        placeholder_decl,
-        current_instantiation_primary,
-        current_instantiation_type};
-    build_cpp_record_parse_deferred_bodies(deferred_ctx);
-}
-
-void Parser::prepare_cpp_template_pattern_record(ClassTemplateDecl& class_template) {
-    prepare_cpp_template_pattern_record_impl(class_template);
-}
-
-void Parser::prepare_cpp_template_pattern_record(
-    ClassTemplatePartialSpecializationDecl& class_template) {
-    prepare_cpp_template_pattern_record_impl(class_template);
-}
-/*
- * int x, y, z, a(int, int), h[67], *accra(int belgrade, int bucharest); is a valid declstmt
- */
-std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_extern_linkage_declaration() {
-    Token t = current_token();
-    if (t.type != TokenType::EXTERN || peek_token().type != TokenType::STRING_LITERAL) {
-        return std::nullopt;
-    }
-
-    std::vector<std::unique_ptr<Decl>> ret_vec;
-    advance(); // consume extern
-    Token linkage_tok = current_token();
-    LanguageLinkage linkage_kind = LanguageLinkage::None;
-    if (linkage_tok.literal_prefix != LiteralPrefix::None) {
-        error_custloc(
-            "invalid language linkage specification; expected \"C\" or \"C++\"",
-            linkage_tok.loc);
-    }
-    if (linkage_tok.value == "C") {
-        linkage_kind = LanguageLinkage::C;
-    } else if (linkage_tok.value == "C++") {
-        linkage_kind = LanguageLinkage::CXX;
-    } else {
-        error_custloc(
-            "invalid language linkage specification \"" + linkage_tok.value +
-                "\"; expected \"C\" or \"C++\"",
-            linkage_tok.loc);
-    }
-    advance(); // consume string literal
-
-    LanguageLinkage saved_linkage = current_language_linkage_;
-    current_language_linkage_ = linkage_kind;
-    try {
-        if (gentle_check_and_consume(TokenType::LEFT_BRACE)) {
-            while (!gentle_check(TokenType::RIGHT_BRACE)) {
-                if (gentle_check(TokenType::Eof)) {
-                    error("Expected '}' to close extern linkage block");
-                    return std::vector<std::unique_ptr<Decl>>{};
-                }
-                auto decls = parse_declaration();
-                if (decls.empty()) {
-                    error("While parsing extern linkage block, we encountered a non-declaration");
-                    return std::vector<std::unique_ptr<Decl>>{};
-                }
-                ret_vec.insert(ret_vec.end(),
-                    std::make_move_iterator(decls.begin()),
-                    std::make_move_iterator(decls.end()));
-            }
-            advance(); // consume }
-            gentle_check_and_consume(TokenType::SEMICOLON);
-            if (ret_vec.empty()) {
-                ret_vec.push_back(collect_->collect_nop_declaration(linkage_tok.loc));
-            }
-            current_language_linkage_ = saved_linkage;
-            return std::move(ret_vec);
-        }
-        auto decls = parse_declaration();
-        current_language_linkage_ = saved_linkage;
-        return decls;
-    } catch (...) {
-        current_language_linkage_ = saved_linkage;
-        throw;
-    }
-}
-
-std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_cpp_standalone_record_declaration() {
-    if (!is_cxx_mode_active() ||
-        (!gentle_check(TokenType::CLASS) &&
-         !gentle_check(TokenType::STRUCT) &&
-         !gentle_check(TokenType::UNION))) {
-        return std::nullopt;
-    }
-
-    std::vector<std::unique_ptr<Decl>> ret_vec;
-    RevertingTentativeParsingAction tentative(*this);
-    try {
-        auto cpp_record = parse_cpp_record_specifier();
-        if (gentle_check(TokenType::SEMICOLON)) {
-            tentative.commit();
-            auto* cpp_record_decl = dyn_cast<CppRecordDecl>(cpp_record.get());
-            ret_vec.push_back(std::move(cpp_record));
-            if (cpp_record_decl) {
-                if (auto semantic_decl = build_cpp_record_semantic_decl(*cpp_record_decl)) {
-                    ret_vec.push_back(std::move(semantic_decl));
-                }
-            }
-            advance();
-            return std::move(ret_vec);
-        }
-    } catch (const ParseError& e) {
-        if (e.message.find("C++ parser unsupported syntax:") == 0) {
-            throw;
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_special_declaration() {
-    if (auto extern_linkage = try_parse_extern_linkage_declaration()) {
-        return extern_linkage;
-    }
-
-    if (gentle_check(TokenType::STATIC_ASSERT)) {
-        std::vector<std::unique_ptr<Decl>> ret_vec;
-        ret_vec.push_back(parse_static_assert_declaration());
-        return std::move(ret_vec);
-    }
-
-    if (gentle_check(TokenType::EXTENSION_KW)) {
-        advance(); // consume __extension__
-        return parse_declaration();
-    }
-
-    if (gentle_check(TokenType::SEMICOLON)) {
-        std::vector<std::unique_ptr<Decl>> ret_vec;
-        SrcLoc loc = current_token().loc;
-        advance();
-        ret_vec.push_back(collect_->collect_nop_declaration(loc));
-        return std::move(ret_vec);
-    }
-
-    if (is_cxx_mode_active() &&
-        (gentle_check(TokenType::NAMESPACE) ||
-         (gentle_check(TokenType::INLINE) && peek_token().type == TokenType::NAMESPACE))) {
-        return parse_cpp_namespace_definition();
-    }
-    if (is_cxx_mode_active() && gentle_check(TokenType::USING)) {
-        return parse_cpp_using_alias_declaration();
-    }
-    if (is_cxx_mode_active() && gentle_check(TokenType::TEMPLATE)) {
-        return parse_cpp_template_declaration();
-    }
-    if (is_cxx_mode_active() && is_cpp_deduction_guide_declaration_start()) {
-        std::vector<std::unique_ptr<Decl>> ret_vec;
-        ret_vec.push_back(parse_cpp_deduction_guide_declaration());
-        return std::move(ret_vec);
-    }
-    if (is_cxx_mode_active()) {
-        if (is_cpp_out_of_line_constructor_declaration_start()) {
-            return parse_cpp_out_of_line_constructor_definition();
-        }
-        if (is_cpp_out_of_line_destructor_declaration_start()) {
-            return parse_cpp_out_of_line_destructor_definition();
-        }
-    }
-    if (auto standalone_record = try_parse_cpp_standalone_record_declaration()) {
-        return standalone_record;
-    }
-
-    return std::nullopt;
-}
-
-void Parser::validate_declaration_start(Token start_token) {
-    if (!isTokenDeclarationSpec(current_token())) {
-        // K&R / C89 implicit int: if this looks like a declarator, assume int.
-        bool looks_like_implicit_int_decl =
-            lang_opts.implicit_int &&
-            (current_token().type == TokenType::IDENTIFIER ||
-             current_token().type == TokenType::MULTIPLY ||
-             current_token().type == TokenType::LEFT_PAREN);
-        if (!looks_like_implicit_int_decl &&
-            !(current_token().type == TokenType::IDENTIFIER &&
-              peek_token().type == TokenType::LEFT_PAREN)) {
-            error("Unexpected token while parsing declaration: expected a decl specifier, got \""
-                          + start_token.value + "\" instead.");
-        }
-    }
-}
-
-void Parser::emit_declaration_head_side_decls(DeclarationParser& decl_parser,
-    const std::shared_ptr<CType>& parsed_type,
-    std::vector<std::unique_ptr<Decl>>& ret_vec) {
-    if (decl_parser.cpp_record_obj) {
-        ret_vec.push_back(std::move(decl_parser.cpp_record_obj));
-    }
-    if (canonical_type_kind(parsed_type) == TypeKind::Object && decl_parser.struct_obj) {
-        // We will "weed" out the unncessary object_decls at sema stage
-        ret_vec.push_back(std::move(decl_parser.struct_obj));
-    } else if (canonical_type_kind(parsed_type) == TypeKind::Enum && decl_parser.enum_obj) {
-        ret_vec.push_back(std::move(decl_parser.enum_obj));
-    }
-}
-
-std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
-    DeclarationParser& decl_parser,
-    std::vector<std::unique_ptr<Decl>>& ret_vec) {
-
-    // example: Distance::operator double()
-    auto looks_like_typeless_cpp_conversion_declaration =
-        [&]() -> bool {
-            if (!is_cxx_mode_active()) {
-                return false;
-            }
-            auto consume_scope_resolution =
-                [&](size_t& offset) -> bool {
-                    Token tok = peek_token_shortcut(offset);
-                    if (tok.type == TokenType::SCOPE_RESOLUTION) {
-                        ++offset;
-                        return true;
+                    if (!explicit_specialization.is_partial_replay ||
+                        explicit_specialization.display_name.empty()) {
+                        explicit_specialization.display_name =
+                            std::move(parsed_display_name);
                     }
-                    if (tok.type == TokenType::COLON &&
-                        peek_token_shortcut(offset + 1).type == TokenType::COLON) {
-                        offset += 2;
-                        return true;
-                    }
-                    return false;
-                };
-            auto skip_balanced_tokens =
-                [&](size_t& offset,
-                    TokenType open_tok,
-                    TokenType close_tok) -> bool {
-                if (peek_token_shortcut(offset).type != open_tok) {
-                    return false;
-                }
-                int depth = 0;
-                while (peek_token_shortcut(offset).type != TokenType::Eof) {
-                    TokenType tok = peek_token_shortcut(offset).type;
-                    if (tok == open_tok) {
-                        ++depth;
-                    } else if (tok == close_tok) {
-                        --depth;
-                        if (depth == 0) {
-                            ++offset;
-                            return true;
+                    collect_tag = explicit_specialization.display_name;
+                    if (!explicit_specialization.is_partial_replay) {
+                        std::string memo_key =
+                            collect_session_.template_memo_key(
+                                primary->entity,
+                                explicit_specialization.arguments);
+                        cir::EntityId cached =
+                            collect_session_.cached_instantiation(memo_key);
+                        const cir::RecordFacts* cached_facts =
+                            cached.valid() &&
+                                    collect_session_.file().valid(cached)
+                                ? collect_session_.file().record_facts(cached)
+                                : nullptr;
+                        if (!cached.valid()) {
+
+                            cir::EntityId shell = collect_session_
+                                .create_incomplete_record_specialization(
+                                    *primary,
+                                    explicit_specialization.arguments,
+                                    keyword.loc);
+                            if (shell.valid()) {
+                                collect_session_.remember_instantiation(
+                                    memo_key, shell);
+                                explicit_specialization_record_to_complete =
+                                    shell;
+                            }
+                        } else if (cached_facts &&
+                                   cached_facts->is_incomplete) {
+
+                            explicit_specialization_record_to_complete =
+                                cached;
                         }
                     }
-                    ++offset;
                 }
-                return false;
-            };
-            auto skip_explicit_specifier =
-                [&](size_t& offset) -> bool {
-                if (peek_token_shortcut(offset).type != TokenType::EXPLICIT_KW) {
-                    return false;
-                }
-                ++offset;
-                if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
-                    skip_balanced_tokens(
-                        offset,
-                        TokenType::LEFT_PAREN,
-                        TokenType::RIGHT_PAREN);
-                }
-                return true;
-            };
+            }
+        }
+    }
+
+    struct ExplicitClassSpecializationContextExit {
+        collect::Session* session = nullptr;
+
+        ~ExplicitClassSpecializationContextExit() {
+            if (session) {
+                session->leave_scope();
+            }
+        }
+    } explicit_class_specialization_context;
+    if (parses_explicit_class_specialization &&
+        explicit_class_template_specialization_parse_->matched &&
+        explicit_class_template_specialization_parse_->qualified_context
+            .valid()) {
+        cir::DeclContextId context =
+            explicit_class_template_specialization_parse_->qualified_context;
+        const cir::File& file = collect_session_.file();
+        cir::DeclContextKind context_kind = file.decl_context(context).kind;
+        if (context_kind != cir::DeclContextKind::Record &&
+            context_kind != cir::DeclContextKind::Namespace &&
+            context_kind != cir::DeclContextKind::TranslationUnit) {
+            diagnose(DiagnosticLevel::Error,
+                     "qualified class template specialization context is not a class or namespace",
+                     keyword.loc);
+            explicit_class_template_specialization_parse_->has_error = true;
+        } else {
+            collect_session_.enter_existing_context(
+                context,
+                context_kind == cir::DeclContextKind::Record
+                    ? collect::ScopeFlags::RecordScope
+                    : (collect::ScopeFlags::NamespaceScope |
+                       collect::ScopeFlags::FileScope));
+            explicit_class_specialization_context.session =
+                &collect_session_;
+        }
+    }
+
+    if (check(TokenType::ATTRIBUTE_KW)) {
+        bool attrs_introduce_body = false;
+        {
+            RevertingTentativeParsingAction lookahead(*this);
+            (void)try_parse_attributes();
+            attrs_introduce_body =
+                check(TokenType::LEFT_BRACE) ||
+                (lang_opts_.is_cxx_mode() &&
+                 (check(TokenType::COLON) ||
+                  (is_identifier_token(current().type) &&
+                   current().value == "final")));
+        }
+        if (attrs_introduce_body) {
+            LayoutAttrs post_tag_attrs = parse_layout_attributes();
+            children.insert(children.end(), post_tag_attrs.syntax.begin(),
+                            post_tag_attrs.syntax.end());
+            merge_attrs(record_attrs, std::move(post_tag_attrs));
+        }
+    }
+
+    if (lang_opts_.is_cxx_mode()) {
+
+        auto record_definition_ahead = [&]() {
 
             size_t offset = 0;
-            bool saw_scope_resolution = false;
-            skip_explicit_specifier(offset);
-            TokenType toktype = peek_token_shortcut(offset).type;
-            if (toktype == TokenType::OPERATOR_KW) {
+            while (is_identifier_token(peek(offset).type) &&
+                   peek(offset).value == "final") {
+                ++offset;
+            }
+            if (peek(offset).type == TokenType::LEFT_BRACE) {
                 return true;
             }
-
-            if (consume_scope_resolution(offset)) {
-                saw_scope_resolution = true;
-            }
-
-            while (peek_token_shortcut(offset).type == TokenType::IDENTIFIER) {
-                ++offset;
-                if (!consume_scope_resolution(offset)) {
-                    break;
-                }
-                saw_scope_resolution = true;
-            }
-            return saw_scope_resolution &&
-                   peek_token_shortcut(offset).type == TokenType::OPERATOR_KW;
-        };
-
-    if (looks_like_typeless_cpp_conversion_declaration()) {
-        decl_parser.begin_loc = current_token().loc;
-        decl_parser.first_half = nullptr;
-        decl_parser.base_qualifiers = QUAL_NONE;
-        decl_parser.qualifiers = QUAL_NONE;
-        return nullptr;
-    }
-
-    validate_declaration_start(start_token);
-
-    bool enable_implicit_int_for_decl =
-        !lang_opts.implicit_int &&
-        current_token().type == TokenType::IDENTIFIER &&
-        peek_token().type == TokenType::LEFT_PAREN;
-    bool saved_implicit_int = lang_opts.implicit_int;
-    bool saved_implicit_func_decl = lang_opts.implicit_function_declarations;
-    if (enable_implicit_int_for_decl) {
-        lang_opts.implicit_int = true;
-        lang_opts.implicit_function_declarations = true;
-        collect_->set_lang_options(lang_opts);
-    }
-    std::shared_ptr<CType> parsed_type;
-    try {
-        parsed_type = decl_parser.parse_declaration(false);
-    } catch (...) {
-        if (enable_implicit_int_for_decl) {
-            lang_opts.implicit_int = saved_implicit_int;
-            lang_opts.implicit_function_declarations = saved_implicit_func_decl;
-            collect_->set_lang_options(lang_opts);
-        }
-        throw;
-    }
-    if (enable_implicit_int_for_decl) {
-        lang_opts.implicit_int = saved_implicit_int;
-        // Keep implicit function declarations enabled after old-style
-        // implicit-int declarations to support GNU89/K&R call sites.
-        lang_opts.implicit_function_declarations = true;
-        collect_->set_lang_options(lang_opts);
-    }
-    emit_declaration_head_side_decls(decl_parser, parsed_type, ret_vec);
-    return parsed_type;
-}
-
-Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
-    DeclarationParser& decl_parser) {
-    decl_parser.reset_declarator_parsing_state();
-
-    QualifiedDeclaratorContext context;
-    context.info.loc = current_token().loc;
-    context.scope_snapshot.scope = collect_->collect_current_scope();
-    context.scope_snapshot.decl_context = collect_->get_current_decl_context();
-
-    auto starts_with_member_pointer_declarator_prefix = [&]() -> bool {
-        if (!is_cxx_mode_active() || !gentle_check(TokenType::IDENTIFIER)) {
-            return false;
-        }
-        size_t offset = 1;
-        Token sep = peek_token(offset);
-        if (sep.type == TokenType::SCOPE_RESOLUTION) {
-            ++offset;
-        } else if (sep.type == TokenType::COLON &&
-                   peek_token(offset + 1).type == TokenType::COLON) {
-            offset += 2;
-        } else {
-            return false;
-        }
-        return peek_token(offset).type == TokenType::MULTIPLY;
-    };
-
-    struct QualifiedDeclaratorComponent {
-        std::string name;
-        std::vector<TemplateArgument> template_arguments;
-        bool has_template_argument_list = false;
-
-        std::string spelling() const {
-            if (!has_template_argument_list) {
-                return name;
-            }
-            std::string spelled = name;
-            spelled += "<";
-            for (size_t idx = 0; idx < template_arguments.size(); ++idx) {
-                if (idx > 0) {
-                    spelled += ", ";
-                }
-                spelled += template_arguments[idx].to_string();
-            }
-            spelled += ">";
-            return spelled;
-        }
-    };
-
-    auto qualified_declarator_matches_primary_class_template_owner =
-        [&](const ClassTemplateDecl* class_template,
-            const std::vector<TemplateArgument>& arguments) -> bool {
-            return cpp_primary_template_owner_matches(class_template, arguments);
-        };
-
-    auto skip_leading_declarator_prefix_tokens =
-        [&]() {
-            auto consume_post_pointer_qualifiers = [&]() {
-                while (true) {
-                    if (gentle_check(TokenType::CONST) ||
-                        gentle_check(TokenType::VOLATILE) ||
-                        gentle_check(TokenType::RESTRICT) ||
-                        gentle_check(TokenType::ATOMIC) ||
-                        gentle_check(TokenType::NULLABILITY_QUALIFIER)) {
-                        advance();
-                        continue;
-                    }
-                    if (is_gnu_attribute_token(current_token())) {
-                        try_parse_attributes();
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            while (true) {
-                if (gentle_check(TokenType::MULTIPLY) ||
-                    gentle_check(TokenType::BITWISE_XOR)) {
-                    advance();
-                    consume_post_pointer_qualifiers();
-                    continue;
-                }
-                if (gentle_check(TokenType::LOGICAL_AND)) {
-                    advance();
-                    continue;
-                }
-                if (gentle_check(TokenType::BITWISE_AND)) {
-                    advance();
-                    continue;
-                }
-                break;
-            }
-        };
-
-    if (!is_cxx_mode_active() || starts_with_member_pointer_declarator_prefix()) {
-        return context;
-    }
-
-    auto prefix_annotation =
-        classify_cpp_qualified_declarator_prefix_for_lookahead();
-    if (prefix_annotation.kind ==
-        ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::NoMatch) {
-        bump_qualified_declarator_fast_reject();
-        return context;
-    }
-
-    bool has_global_qualifier = false;
-    std::vector<QualifiedDeclaratorComponent> qualifier_components;
-    std::vector<std::string> qualifier_component_spellings;
-    std::optional<size_t> terminal_token_idx;
-    {
-        RevertingTentativeParsingAction tentative(*this);
-        context.info.loc = current_token().loc;
-        skip_leading_declarator_prefix_tokens();
-        context.info.loc = current_token().loc;
-        has_global_qualifier = consume_cpp_scope_resolution();
-        auto parse_qualified_component =
-            [&]() -> std::pair<QualifiedDeclaratorComponent, size_t> {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc(
-                    "expected identifier after '::' in qualified-id declarator",
-                    current_token().loc);
-            }
-            QualifiedDeclaratorComponent component;
-            size_t ident_token_idx = get_token_idx();
-            component.name = current_token().value;
-            advance();
-            if (gentle_check(TokenType::LESS_THAN)) {
-                component.has_template_argument_list = true;
-                component.template_arguments =
-                    parse_cpp_template_argument_list();
-            }
-            return {std::move(component), ident_token_idx};
-        };
-        if (has_global_qualifier && gentle_check(TokenType::OPERATOR_KW)) {
-            terminal_token_idx = get_token_idx();
-        } else if (has_global_qualifier || gentle_check(TokenType::IDENTIFIER)) {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc(
-                    "expected identifier after '::' in qualified-id declarator",
-                    current_token().loc);
-            }
-            auto [component, ident_token_idx] = parse_qualified_component();
-            while (is_cpp_scope_resolution_here()) {
-                consume_cpp_scope_resolution();
-                qualifier_component_spellings.push_back(component.spelling());
-                qualifier_components.push_back(std::move(component));
-                if (gentle_check(TokenType::OPERATOR_KW)) {
-                    terminal_token_idx = get_token_idx();
-                    break;
-                }
-                auto next_component = parse_qualified_component();
-                component = std::move(next_component.first);
-                ident_token_idx = next_component.second;
-            }
-            if (!terminal_token_idx.has_value() &&
-                (has_global_qualifier || !qualifier_components.empty())) {
-                terminal_token_idx = ident_token_idx;
-            }
-        }
-    }
-
-    if (!terminal_token_idx.has_value()) {
-        return context;
-    }
-
-    auto current_scope = collect_->collect_current_scope();
-    auto tu_context = collect_->get_translation_unit_decl_context();
-    auto current_context = collect_->get_current_decl_context();
-    if (!current_scope || !tu_context || !current_context) {
-        diag_engine->report_error(
-            "internal error: namespace lookup context missing",
-            context.info.loc);
-        error_custloc("namespace lookup context missing", context.info.loc);
-    }
-    auto global_scope = current_scope;
-    while (global_scope && global_scope->parent) {
-        global_scope = global_scope->parent;
-    }
-    if (!global_scope) {
-        diag_engine->report_error(
-            "internal error: global scope missing",
-            context.info.loc);
-        error_custloc("global scope missing", context.info.loc);
-    }
-
-    auto lookup_scope = has_global_qualifier ? global_scope : current_scope;
-    const DeclContext* lookup_context =
-        has_global_qualifier ? tu_context.get() : current_context.get();
-    for (size_t idx = 0; idx < qualifier_components.size(); ++idx) {
-        bool allow_enclosing_lookup = (!has_global_qualifier && idx == 0);
-        bool is_last_component = idx + 1 == qualifier_components.size();
-        const auto& component = qualifier_components[idx];
-        if (component.has_template_argument_list && !is_last_component) {
-            fail_cpp_future_work(
-                "template-id nested-name specifier",
-                "template-id qualifier chains",
-                context.info.loc);
-        }
-        auto namespace_scope = resolve_named_namespace_scope(
-            lookup_context, component.name, allow_enclosing_lookup);
-        if (namespace_scope && namespace_scope->associated_decl_context) {
-            lookup_scope = namespace_scope;
-            lookup_context = namespace_scope->associated_decl_context;
-            continue;
-        }
-        if (!lookup_scope) {
-            error_custloc(
-                "internal error: missing lookup scope while resolving nested-name specifier",
-                context.info.loc);
-        }
-        if (!is_last_component) {
-            error_custloc(
-                "nested-name specifier component '" +
-                    component.spelling() +
-                    "' does not name a namespace",
-                context.info.loc);
-        }
-
-        if (component.has_template_argument_list) {
-            const DeclBinding* template_binding =
-                LookupEngine::lookup_unqualified_template_binding(
-                    component.name,
-                    lookup_scope,
-                    allow_enclosing_lookup,
-                    LookupNamespace::Tag);
-            const Decl* primary_template = nullptr;
-            if (template_binding) {
-                primary_template = template_binding->template_decl;
-                if (!primary_template &&
-                    template_binding->template_overload_candidates.size() == 1) {
-                    primary_template =
-                        template_binding->template_overload_candidates.front();
-                }
-            }
-            auto* class_template =
-                dyn_cast<ClassTemplateDecl>(primary_template);
-            if (!class_template) {
-                error_custloc(
-                    "out-of-line declaration target '" +
-                        component.spelling() +
-                        "' does not name the primary class template pattern",
-                    context.info.loc);
-            }
-            context.info.owner_class_template = class_template;
-            context.info.owner_template_arguments = component.template_arguments;
-            context.info.owner_has_specialization_argument_list =
-                component.has_template_argument_list;
-            if (!qualified_declarator_matches_primary_class_template_owner(
-                    class_template,
-                    component.template_arguments)) {
-                context.info.targets_template_pattern = false;
-                bool resolved_explicit_class_specialization = false;
-                if (!is_parsing_cpp_explicit_specialization()) {
-                    std::string normalize_error;
-                    auto normalized_arguments =
-                        complete_cpp_template_id_arguments(
-                            class_template,
-                            component.template_arguments,
-                            context.info.loc,
-                            &normalize_error);
-                    const TemplateExplicitSpecializationDecl*
-                        explicit_specialization = nullptr;
-                    if (normalized_arguments.has_value()) {
-                        explicit_specialization =
-                            collect_template_internal::
-                                find_class_template_explicit_specialization_for_lookup_identity(
-                                    class_template,
-                                    *normalized_arguments);
-                    }
-                    const ObjectDecl* specialized_owner =
-                        explicit_specialization
-                            ? explicit_specialization
-                                  ->specialized_record_semantic_decl()
-                            : nullptr;
-                    if (specialized_owner) {
-                        context.info.owner_template_arguments =
-                            std::move(*normalized_arguments);
-                        context.info.owner_record_decl = specialized_owner;
-                        if (!specialized_owner->get_record_type()) {
-                            error_custloc(
-                                "internal error: explicit class specialization owner is missing its record type",
-                                context.info.loc);
-                        }
-                        context.info.owner_type =
-                            QualType(specialized_owner->get_record_type());
-                        resolved_explicit_class_specialization = true;
-                    }
-                }
-                if (!resolved_explicit_class_specialization &&
-                    !is_parsing_cpp_explicit_specialization()) {
-                    error_custloc(
-                        "out-of-line declaration target '" +
-                            component.spelling() +
-                            "' does not name the primary class template pattern",
-                        context.info.loc);
-                }
-            } else {
-                context.info.targets_template_pattern = true;
-            }
-            if (!context.info.owner_record_decl) {
-                context.info.owner_record_decl =
-                    class_template->pattern_semantic_decl();
-            }
-            if (!context.info.owner_record_decl) {
-                error_custloc(
-                    "internal error: missing primary class template pattern owner",
-                    context.info.loc);
-            }
-            if (context.info.targets_template_pattern) {
-                const auto* template_record = class_template->record_decl();
-                context.info.owner_type =
-                    build_cpp_current_instantiation_type(
-                        class_template,
-                        template_record && !template_record->name.empty()
-                            ? template_record->name
-                            : component.name,
-                        context.info.owner_template_arguments);
-            } else if (context.info.owner_record_decl->get_record_type()) {
-                context.info.owner_type =
-                    QualType(context.info.owner_record_decl->get_record_type());
-            }
-        } else {
-            auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
-                component.name,
-                lookup_scope,
-                allow_enclosing_lookup);
-            const auto* owner_record_decl = dyn_cast<ObjectDecl>(owner_tag_decl);
-            if (!owner_record_decl) {
-                error_custloc(
-                    "out-of-line declaration target '" +
-                        component.spelling() +
-                        "' is not a class/struct/union",
-                    context.info.loc);
-            }
-            if (owner_record_decl->get_record_type()) {
-                if (auto* canonical_owner =
-                        dyn_cast<ObjectDecl>(
-                            owner_record_decl->get_record_type()->get_decl())) {
-                    owner_record_decl = canonical_owner;
-                }
-            }
-            context.info.owner_record_decl = owner_record_decl;
-            if (owner_record_decl->get_record_type()) {
-                context.info.owner_type =
-                    QualType(owner_record_decl->get_record_type());
-            }
-            context.info.owner_has_specialization_argument_list = false;
-            context.info.targets_template_pattern = false;
-        }
-        break;
-    }
-
-    if (context.info.owner_record_decl &&
-        context.scope_snapshot.scope &&
-        scope_flags_contains(
-            context.scope_snapshot.scope->flags,
-            ScopeFlags::TemplateParameterScope) &&
-        context.scope_snapshot.decl_context) {
-        auto rebased_scope =
-            std::make_shared<Scope>(*context.scope_snapshot.scope);
-        rebased_scope->parent = lookup_scope;
-        rebased_scope->associated_decl_context =
-            context.scope_snapshot.decl_context.get();
-        rebased_scope->associated_decl_context_owner =
-            context.scope_snapshot.decl_context;
-        collect_->collect_set_current_scope(std::move(rebased_scope));
-    } else {
-        collect_->collect_set_current_scope(lookup_scope);
-    }
-    if (!context.info.owner_record_decl) {
-        context.info.target_context =
-            collect_->get_current_decl_context();
-        context.info.target_scope =
-            collect_->collect_current_scope();
-        if (!context.info.target_context) {
-            diag_engine->report_error(
-                "internal error: namespace declaration context missing",
-                context.info.loc);
-            error_custloc("namespace declaration context missing",
-                          context.info.loc);
-        }
-    }
-    context.info.has_global_qualifier = has_global_qualifier;
-    context.info.qualifiers = std::move(qualifier_component_spellings);
-    return context;
-}
-
-bool Parser::qualified_variable_types_compatible(QualType declared_type,
-                                                 QualType member_type) {
-    declared_type = desugar_type(declared_type);
-    member_type = desugar_type(member_type);
-    if (!declared_type || !member_type) {
-        return declared_type.get_shared() == member_type.get_shared();
-    }
-    if (declared_type.equals_qualified(member_type) ||
-        declared_type.equals_unqualified(member_type) ||
-        cpp_out_of_line_type_matches(declared_type, member_type, false)) {
-        return true;
-    }
-    auto declared_arr = declared_type.as_shared<ArrayType>();
-    auto member_arr = member_type.as_shared<ArrayType>();
-    if (!declared_arr || !member_arr) {
-        return false;
-    }
-    if (!declared_arr->element_type.equals_qualified(member_arr->element_type)) {
-        return false;
-    }
-    bool declared_complete =
-        declared_arr->size_kind == ArraySizeKind::Constant &&
-        declared_arr->size.has_value();
-    bool member_complete =
-        member_arr->size_kind == ArraySizeKind::Constant &&
-        member_arr->size.has_value();
-    if (declared_complete && member_complete) {
-        return declared_arr->size.value() == member_arr->size.value();
-    }
-    return true;
-}
-
-bool Parser::record_method_signature_matches(
-    const RecordSemanticState::Method& method,
-    const std::shared_ptr<CType>& parsed_decl_type,
-    uint8_t parsed_trailing_cv_qualifiers) {
-    auto parsed_fn_type =
-        desugar_type(QualType(parsed_decl_type)).as_shared<FunctionType>();
-    auto method_fn_type = desugar_type(method.type).as_shared<FunctionType>();
-    if (!parsed_fn_type || !method_fn_type) {
-        return false;
-    }
-    if (parsed_fn_type->is_variadic != method_fn_type->is_variadic) {
-        return false;
-    }
-    if (parsed_fn_type->has_explicit_exception_spec !=
-        method_fn_type->has_explicit_exception_spec) {
-        return false;
-    }
-    if (!function_exception_specs_equal(*parsed_fn_type, *method_fn_type)) {
-        return false;
-    }
-    if (!cpp_out_of_line_type_matches(
-            parsed_fn_type->ret_type,
-            method_fn_type->ret_type,
-            true)) {
-        return false;
-    }
-
-    size_t method_user_param_start = method.is_static ? 0 : 1;
-    if (method_fn_type->parameters.size() < method_user_param_start) {
-        return false;
-    }
-    size_t method_user_param_count =
-        method_fn_type->parameters.size() - method_user_param_start;
-    if (parsed_fn_type->parameters.size() != method_user_param_count) {
-        return false;
-    }
-    for (size_t idx = 0; idx < parsed_fn_type->parameters.size(); ++idx) {
-        if (!cpp_out_of_line_type_matches(
-                parsed_fn_type->parameters[idx],
-                method_fn_type->parameters[method_user_param_start + idx],
-                true)) {
-            return false;
-        }
-    }
-
-    uint8_t parsed_cv =
-        parsed_trailing_cv_qualifiers &
-        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
-    if (method.is_static) {
-        return parsed_cv == QUAL_NONE;
-    }
-
-    if (method_fn_type->parameters.empty()) {
-        return false;
-    }
-    auto this_ptr_type =
-        desugar_type(method_fn_type->parameters.front()).as_shared<PointerType>();
-    if (!this_ptr_type) {
-        return false;
-    }
-    uint8_t expected_cv =
-        this_ptr_type->pointed_type.get_qualifiers() &
-        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
-    return parsed_cv == expected_cv;
-}
-
-// Used while parsing a qualified member declarator before the exception
-// specification and trailing return type have been parsed.
-bool Parser::record_method_declarator_prefix_matches(
-    const RecordSemanticState::Method& method,
-    const std::shared_ptr<CType>& parsed_decl_type,
-    uint8_t parsed_trailing_cv_qualifiers) {
-    auto parsed_fn_type =
-        QualType(parsed_decl_type).as_shared<FunctionType>();
-    auto method_fn_type = method.type.as_shared<FunctionType>();
-    if (!parsed_fn_type || !method_fn_type) {
-        return false;
-    }
-    if (parsed_fn_type->is_variadic != method_fn_type->is_variadic) {
-        return false;
-    }
-
-    size_t method_user_param_start = method.is_static ? 0 : 1;
-    if (method_fn_type->parameters.size() < method_user_param_start) {
-        return false;
-    }
-    size_t method_user_param_count =
-        method_fn_type->parameters.size() - method_user_param_start;
-    if (parsed_fn_type->parameters.size() != method_user_param_count) {
-        return false;
-    }
-    for (size_t idx = 0; idx < parsed_fn_type->parameters.size(); ++idx) {
-        if (!cpp_out_of_line_type_matches(
-                parsed_fn_type->parameters[idx],
-                method_fn_type->parameters[method_user_param_start + idx],
-                true)) {
-            return false;
-        }
-    }
-
-    uint8_t parsed_cv =
-        parsed_trailing_cv_qualifiers &
-        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
-    if (method.is_static) {
-        return parsed_cv == QUAL_NONE;
-    }
-
-    if (method_fn_type->parameters.empty()) {
-        return false;
-    }
-    auto this_ptr_type =
-        desugar_type(method_fn_type->parameters.front()).as_shared<PointerType>();
-    if (!this_ptr_type) {
-        return false;
-    }
-    uint8_t expected_cv =
-        this_ptr_type->pointed_type.get_qualifiers() &
-        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
-    return parsed_cv == expected_cv;
-}
-
-bool Parser::build_cpp_current_record_declarator_expression_context(
-    bool is_static_member,
-    uint8_t cv_qualifiers,
-    Collect::CppThisContext& cpp_this_context_out,
-    QualType& record_lookup_type_out) {
-    cpp_this_context_out = Collect::CppThisContext{};
-    record_lookup_type_out = nullptr;
-    if (!is_cxx_mode_active() || cxx_record_parse_stack_.empty()) {
-        return false;
-    }
-
-    const auto& record_frame = cxx_record_parse_stack_.back();
-    if (record_frame.name.empty()) {
-        return false;
-    }
-
-    QualType owner_type = record_frame.current_instantiation_type;
-    if (!owner_type && record_frame.semantic_owner &&
-        record_frame.semantic_owner->get_record_type()) {
-        owner_type = QualType(record_frame.semantic_owner->get_record_type());
-    }
-    if (!owner_type) {
-        auto owner_type_raw = collect_->collect_lookup_tag_type(
-            record_frame.name,
-            true);
-        if (auto owner_object_type =
-                dyn_cast_shared<ObjectType>(owner_type_raw)) {
-            owner_type = QualType(owner_object_type);
-        }
-    }
-
-    cpp_this_context_out.is_member_function = true;
-    cpp_this_context_out.is_static_member_function = is_static_member;
-    cpp_this_context_out.access_context_type = owner_type;
-    record_lookup_type_out = owner_type;
-    if (!is_static_member && owner_type) {
-        uint8_t object_qualifiers =
-            static_cast<uint8_t>(
-                cv_qualifiers &
-                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
-        QualType qualified_owner = owner_type.with_qualifiers(
-            static_cast<uint8_t>(
-                owner_type.get_qualifiers() | object_qualifiers));
-        cpp_this_context_out.this_type =
-            QualType(std::make_shared<PointerType>(qualified_owner));
-    }
-    return true;
-}
-
-bool Parser::build_cpp_member_declarator_expression_context(
-    const DeclarationParser& decl_parser,
-    const FunctionType& function_type,
-    Collect::CppThisContext& cpp_this_context_out,
-    QualType& record_lookup_type_out) {
-    bool is_static_member = decl_parser.str_class == StorageClass::STATIC;
-
-    const auto& qualified_context =
-        active_cpp_qualified_declarator_context_;
-    if (is_cxx_mode_active() && qualified_context.owner_record_decl) {
-        bool found_static_match = false;
-        bool found_nonstatic_match = false;
-        auto parsed_function_type = std::make_shared<FunctionType>(function_type);
-        const RecordSemanticState* owner_state =
-            collect_->query_lookup_record_semantics(
-                qualified_context.owner_record_decl);
-        if (owner_state && !owner_state->is_incomplete) {
-            for (const auto& method : owner_state->methods) {
-                if (method.name != decl_parser.name) {
-                    continue;
-                }
-                if (!record_method_declarator_prefix_matches(
-                        method,
-                        parsed_function_type,
-                        decl_parser.trailing_function_cv_qualifiers)) {
-                    continue;
-                }
-                if (method.is_static) {
-                    found_static_match = true;
-                } else {
-                    found_nonstatic_match = true;
-                }
-            }
-            for (const auto& method_template : owner_state->method_templates) {
-                if (method_template.name != decl_parser.name ||
-                    !method_template.decl ||
-                    !method_template.decl->function_decl()) {
-                    continue;
-                }
-                if (!active_template_parameter_stack_.empty() &&
-                    !active_template_parameter_list_matches(
-                        method_template.decl->parameters)) {
-                    continue;
-                }
-                RecordSemanticState::Method synthetic_method;
-                synthetic_method.type =
-                    QualType(method_template.decl->function_decl()->type);
-                synthetic_method.is_static = method_template.is_static;
-                if (!record_method_declarator_prefix_matches(
-                        synthetic_method,
-                        parsed_function_type,
-                        decl_parser.trailing_function_cv_qualifiers)) {
-                    continue;
-                }
-                if (method_template.is_static) {
-                    found_static_match = true;
-                } else {
-                    found_nonstatic_match = true;
-                }
-            }
-        }
-
-        if (found_static_match && !found_nonstatic_match) {
-            is_static_member = true;
-        }
-
-        QualType owner_type = qualified_context.owner_type;
-        if (!owner_type &&
-            qualified_context.owner_record_decl->get_record_type()) {
-            owner_type =
-                QualType(qualified_context.owner_record_decl->get_record_type());
-        }
-
-        cpp_this_context_out = Collect::CppThisContext{};
-        cpp_this_context_out.is_member_function = true;
-        cpp_this_context_out.is_static_member_function = is_static_member;
-        cpp_this_context_out.access_context_type = owner_type;
-        record_lookup_type_out = owner_type;
-        if (!is_static_member && owner_type) {
-            uint8_t object_qualifiers =
-                static_cast<uint8_t>(
-                    decl_parser.trailing_function_cv_qualifiers &
-                    static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
-            QualType qualified_owner = owner_type.with_qualifiers(
-                static_cast<uint8_t>(
-                    owner_type.get_qualifiers() |
-                    object_qualifiers));
-            cpp_this_context_out.this_type =
-                QualType(std::make_shared<PointerType>(qualified_owner));
-        }
-        return true;
-    }
-
-    if (build_cpp_current_record_declarator_expression_context(
-            is_static_member,
-            decl_parser.trailing_function_cv_qualifiers,
-            cpp_this_context_out,
-            record_lookup_type_out)) {
-        return true;
-    }
-
-    cpp_this_context_out = Collect::CppThisContext{};
-    record_lookup_type_out = nullptr;
-    return false;
-}
-
-bool Parser::active_template_parameter_list_matches(
-    const TemplateParameterList& parameters) {
-    if (active_template_parameter_stack_.empty()) {
-        return false;
-    }
-    const auto& active_parameters = active_template_parameter_stack_.back();
-    if (active_parameters.size() != parameters.size()) {
-        return false;
-    }
-    for (size_t idx = 0; idx < parameters.size(); ++idx) {
-        const auto* active_parameter = active_parameters[idx];
-        const auto* existing_parameter = parameters[idx].get();
-        if (!active_parameter || !existing_parameter ||
-            active_parameter->get_kind() != existing_parameter->get_kind() ||
-            active_parameter->is_parameter_pack !=
-                existing_parameter->is_parameter_pack) {
-            return false;
-        }
-        if (auto* active_non_type =
-                dyn_cast<TemplateNonTypeParmDecl>(active_parameter)) {
-            auto* existing_non_type =
-                dyn_cast<TemplateNonTypeParmDecl>(existing_parameter);
-            if (!existing_non_type ||
-                !cpp_out_of_line_type_matches(
-                    active_non_type->type,
-                    existing_non_type->type,
-                    false)) {
+            if (peek(offset).type != TokenType::COLON) {
                 return false;
             }
-        }
-    }
-    return true;
-}
+            ++offset;
 
-bool Parser::record_method_template_signature_matches(
-    const RecordSemanticState::MethodTemplate& method_template,
-    const std::shared_ptr<CType>& parsed_decl_type,
-    uint8_t parsed_trailing_cv_qualifiers) {
-    if (!method_template.decl || !method_template.decl->function_decl() ||
-        !active_template_parameter_list_matches(
-            method_template.decl->parameters)) {
-        return false;
-    }
-    RecordSemanticState::Method synthetic_method;
-    synthetic_method.type =
-        QualType(method_template.decl->function_decl()->type);
-    synthetic_method.is_static = method_template.is_static;
-    return record_method_signature_matches(
-        synthetic_method,
-        parsed_decl_type,
-        parsed_trailing_cv_qualifiers);
-}
-
-bool Parser::record_method_template_explicit_specialization_matches(
-    const RecordSemanticState::MethodTemplate& method_template,
-    const std::shared_ptr<CType>& parsed_decl_type,
-    uint8_t parsed_trailing_cv_qualifiers,
-    const ClassTemplateDecl* owner_class_template,
-    const std::vector<TemplateArgument>& owner_template_arguments,
-    bool owner_has_specialization_argument_list,
-    bool targets_template_pattern,
-    SrcLoc declarator_loc,
-    std::vector<TemplateArgument>& deduced_arguments_out) {
-    deduced_arguments_out.clear();
-    if (!is_parsing_cpp_explicit_specialization() ||
-        !method_template.decl ||
-        !method_template.decl->function_decl() ||
-        !parsed_decl_type) {
-        return false;
-    }
-
-    QualType pattern_type(method_template.decl->function_decl()->type);
-    if (owner_class_template &&
-        owner_has_specialization_argument_list &&
-        !targets_template_pattern) {
-        pattern_type = collect_->collect_partially_substitute_template_type(
-            pattern_type,
-            owner_class_template->parameters,
-            owner_template_arguments,
-            declarator_loc);
-    }
-
-    return collect_->deduce_function_template_specialization_arguments_from_pattern(
-        pattern_type,
-        method_template.decl->parameters,
-        method_template.decl,
-        QualType(parsed_decl_type),
-        deduced_arguments_out,
-        nullptr,
-        parsed_trailing_cv_qualifiers,
-        method_template.is_static ? 0u : 1u);
-}
-
-void Parser::resolve_qualified_declarator_match(
-    QualifiedDeclaratorInfo& qualified_declarator,
-    const DeclarationParser& decl_parser,
-    const std::shared_ptr<CType>& parsed_decl_type) {
-    if (qualified_declarator.target_context) {
-        auto prior_decls = LookupEngine::lookup_qualified_ordinary_bindings(
-            decl_parser.name,
-            qualified_declarator.target_context.get(),
-            qualified_declarator.target_scope,
-            LookupEngine::OrdinaryFilter::Any,
-            LookupEngine::NamespaceReachability::InlineVisible);
-        const LookupEngine::QualifiedOrdinaryBindingMatch* matched_prior_decl =
-            nullptr;
-        if (canonical_type_kind(parsed_decl_type) == TypeKind::Function) {
-            QualType declared_function_type = desugar_type(QualType(parsed_decl_type));
-            for (const auto& prior_decl : prior_decls) {
-                if (!namespace_function_prior_match(
-                        prior_decl.binding,
-                        declared_function_type)) {
-                    continue;
+            int parens = 0;
+            int brackets = 0;
+            int angles = 0;
+            for (;; ++offset) {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof) {
+                    return false;
                 }
-                matched_prior_decl = &prior_decl;
+                if (parens == 0 && brackets == 0 && angles == 0) {
+                    if (type == TokenType::LEFT_BRACE) {
+                        return true;
+                    }
+                    if (type == TokenType::SEMICOLON) {
+                        return false;
+                    }
+                }
+                switch (type) {
+                    case TokenType::LEFT_PAREN:
+                        ++parens;
+                        break;
+                    case TokenType::RIGHT_PAREN:
+                        parens = std::max(0, parens - 1);
+                        break;
+                    case TokenType::LEFT_BRACKET:
+                        ++brackets;
+                        break;
+                    case TokenType::RIGHT_BRACKET:
+                        brackets = std::max(0, brackets - 1);
+                        break;
+                    case TokenType::LESS_THAN:
+                        ++angles;
+                        break;
+                    case TokenType::GREATER_THAN:
+                        angles = std::max(0, angles - 1);
+                        break;
+                    case TokenType::RIGHT_SHIFT:
+                        angles = std::max(0, angles - 2);
+                        break;
+                    default:
+                        break;
+                }
+            }
+        };
+        cir::EntityId member_owner = collect_session_.enclosing_record_for_context(
+            collect_session_.current_decl_context());
+        bool declared_in_member_scope = false;
+        for (cir::DeclContextId declaration_context =
+                 collect_session_.current_decl_context();
+             declaration_context.valid() &&
+             collect_session_.file().valid(declaration_context);
+             declaration_context = collect_session_.file()
+                                       .decl_context(declaration_context)
+                                       .parent) {
+            const cir::DeclContext& context =
+                collect_session_.file().decl_context(declaration_context);
+            if (context.kind == cir::DeclContextKind::Record) {
+                declared_in_member_scope = context.owner == member_owner;
                 break;
             }
-        } else {
-            for (const auto& prior_decl : prior_decls) {
-                if (!namespace_variable_prior_match(prior_decl.binding)) {
-                    continue;
-                }
-                matched_prior_decl = &prior_decl;
+            if (context.kind == cir::DeclContextKind::Function ||
+                context.kind == cir::DeclContextKind::Block ||
+                context.kind == cir::DeclContextKind::Namespace ||
+                context.kind == cir::DeclContextKind::TranslationUnit) {
                 break;
             }
         }
-        if (!matched_prior_decl) {
-            error_custloc(
-                "out-of-line declaration of '" +
-                    qualified_name_utils::format_cpp_qualified_name(
-                        qualified_declarator.has_global_qualifier,
-                        qualified_declarator.qualifiers,
-                        decl_parser.name) +
-                    "' does not match any declaration in the target namespace",
-                qualified_declarator.loc);
-        }
-        if (matched_prior_decl->owner_context &&
-            matched_prior_decl->owner_context !=
-                qualified_declarator.target_context.get()) {
-            if (!matched_prior_decl->owner_scope) {
-                error_custloc(
-                    "internal error: missing owning scope for inline namespace member declaration",
-                    qualified_declarator.loc);
+        bool has_enclosing_specialization = false;
+        cir::DeclContextId owner_context =
+            collect_session_.current_decl_context();
+        while (owner_context.valid() &&
+               collect_session_.file().valid(owner_context)) {
+            const cir::DeclContext& context =
+                collect_session_.file().decl_context(owner_context);
+            if (context.kind == cir::DeclContextKind::Record &&
+                context.owner.valid() &&
+                collect_session_.file().template_specialization(context.owner)) {
+                has_enclosing_specialization = true;
+                break;
             }
-            collect_->collect_set_current_scope(matched_prior_decl->owner_scope);
-            qualified_declarator.target_context =
-                collect_->get_current_decl_context();
-            qualified_declarator.target_scope =
-                collect_->collect_current_scope();
+            owner_context = context.parent;
         }
-        return;
-    }
-
-    if (!qualified_declarator.owner_record_decl) {
-        return;
-    }
-
-    const RecordSemanticState* owner_state =
-        collect_->query_lookup_record_semantics(
-            qualified_declarator.owner_record_decl);
-    if (!owner_state || owner_state->is_incomplete) {
-        std::vector<std::string> owner_qualifiers = qualified_declarator.qualifiers;
-        std::string owner_terminal;
-        if (!owner_qualifiers.empty()) {
-            owner_terminal = owner_qualifiers.back();
-            owner_qualifiers.pop_back();
-        } else if (qualified_declarator.owner_record_decl) {
-            owner_terminal = qualified_declarator.owner_record_decl->tag;
-        }
-        error_custloc(
-            "incomplete type '" +
-                qualified_name_utils::format_cpp_qualified_name(
-                    qualified_declarator.has_global_qualifier,
-                    owner_qualifiers,
-                    owner_terminal) +
-                "' named in nested name specifier",
-            qualified_declarator.loc);
-    }
-
-    std::string qualified_name = qualified_name_utils::format_cpp_qualified_name(
-        qualified_declarator.has_global_qualifier,
-        qualified_declarator.qualifiers,
-        decl_parser.name);
-    if (canonical_type_kind(parsed_decl_type) == TypeKind::Function) {
-        bool saw_method_name_match = false;
-        bool saw_method_template_name_match = false;
-        for (const auto& method : owner_state->methods) {
-            if (method.name != decl_parser.name) {
-                continue;
+        bool defer_member_class =
+            !tag.empty() && member_owner.valid() &&
+            declared_in_member_scope &&
+            has_enclosing_specialization &&
+            collect_session_.is_instantiating() &&
+            !collect_session_.validating_template_info() &&
+            !collect_session_.current_instantiation_replay_will_claim_record(
+                tag) &&
+            replaying_deferred_member_class_begin_ != begin &&
+            record_definition_ahead();
+        if (defer_member_class) {
+            collect::RecordDeclResult nested =
+                collect_session_.begin_record_definition(kind,
+                                                         collect_tag,
+                                                         keyword.loc);
+            size_t definition_end = skip_balanced_until_semicolon_or_brace();
+            if (nested.entity.valid()) {
+                uint64_t key = static_cast<uint64_t>(nested.entity.index);
+                deferred_member_class_definitions_[key] =
+                    DeferredMemberClassDefinition{nested.entity,
+                                                  member_owner,
+                                                  begin,
+                                                  definition_end,
+                                                  keyword.loc};
+                collect_session_.track_speculative_rollback([this, key] {
+                    deferred_member_class_definitions_.erase(key);
+                });
             }
-            saw_method_name_match = true;
-            if (!record_method_signature_matches(
-                    method,
-                    parsed_decl_type,
-                    decl_parser.trailing_function_cv_qualifiers)) {
-                continue;
+            if (type_out) {
+                *type_out = nested.type;
             }
-            qualified_declarator.method_match = &method;
-            break;
+            std::string text = std::string(cir::record_kind_name(kind));
+            text += ' ';
+            text += tag;
+            return make_node(NodeKind::RecordDecl,
+                             begin,
+                             definition_end,
+                             children,
+                             text_payload(std::move(text)),
+                             nested.has_error ? NodeFlagHasError
+                                              : NodeFlagNone);
         }
-        if (!qualified_declarator.method_match) {
-            for (const auto& method_template : owner_state->method_templates) {
-                if (method_template.name != decl_parser.name) {
+
+        bool header_has_error = false;
+        bool is_final = false;
+        size_t final_count = 0;
+        while (is_identifier_token(peek(final_count).type) &&
+               peek(final_count).value == "final") {
+            ++final_count;
+        }
+
+        if (final_count > 0 &&
+            (peek(final_count).type == TokenType::LEFT_BRACE ||
+             peek(final_count).type == TokenType::COLON)) {
+            is_final = true;
+            for (size_t i = 0; i < final_count; ++i) {
+                SrcLoc final_loc = current().loc;
+                consume();
+                if (i > 0) {
+                    diagnose(DiagnosticLevel::Error,
+                             "duplicate 'final' class property specifier",
+                             final_loc);
+                    header_has_error = true;
+                }
+            }
+        }
+        if (!tag.empty() && !explicit_member_record_specialization_ &&
+            (check(TokenType::COLON) || check(TokenType::LEFT_BRACE))) {
+
+            collect::RecordDeclResult class_head =
+                collect_session_.declare_record_tag_in_current_scope(
+                    kind,
+                    collect_tag,
+                    keyword.loc,
+                    explicit_specialization_record_to_complete);
+            header_has_error = header_has_error || class_head.has_error;
+        }
+        std::vector<collect::RecordBaseInput> bases;
+        bool record_has_dependent_bases = false;
+        collect::Session::AccessCaptureToken base_access_capture{};
+        auto append_base = [&](collect::RecordBaseInput base) {
+            if (!base.type.valid()) {
+                return;
+            }
+            base.is_dependent = base.is_dependent ||
+                collect_session_.in_template_definition() &&
+                    collect_session_.is_dependent_type(base.type);
+            record_has_dependent_bases =
+                record_has_dependent_bases || base.is_dependent;
+            if (!base.is_dependent) {
+
+                (void)collect_session_.require_complete_class_type(
+                    base.type,
+                    base.loc,
+                    cir::InstantiationDemandKind::BaseMemberList);
+            }
+            bases.push_back(std::move(base));
+        };
+        if (match(TokenType::COLON)) {
+            base_access_capture = collect_session_.begin_access_capture();
+            size_t base_begin = last_consumed_raw_index();
+            auto parse_base_specifier =
+                [&]() -> std::optional<collect::RecordBaseInput> {
+                collect::RecordBaseInput base;
+                base.loc = current_loc();
+                bool saw_virtual = match(TokenType::VIRTUAL_KW);
+                if (is_cxx_access_specifier(current().type)) {
+                    base.declared_access = access_from_token(current().type);
+                    consume();
+                }
+                if (!saw_virtual) {
+                    saw_virtual = match(TokenType::VIRTUAL_KW);
+                }
+                base.is_virtual = saw_virtual;
+                if (auto qualified = peek_cxx_qualified_type()) {
+                    SrcLoc qualified_loc = current_loc();
+                    for (size_t i = 0; i < qualified->tokens_to_consume; ++i) {
+                        consume();
+                    }
+                    if (qualified->template_info) {
+                        cir::EntityId instantiated = instantiate_template(
+                            *qualified->template_info, qualified_loc);
+                        if (instantiated.valid()) {
+                            base.type = collect_session_.file()
+                                .entity(instantiated).type;
+                        } else {
+                            header_has_error = true;
+                        }
+                    } else {
+                        cir::TypeId checked = collect_session_
+                            .lookup_qualified_type_name_checked(
+                                qualified->terminal_context,
+                                qualified->terminal_name,
+                                qualified->terminal_loc);
+                        base.type = checked.valid() ? checked
+                                                    : qualified->type.type;
+                    }
+                } else if (check(TokenType::SCOPE_RESOLUTION) ||
+                           (is_identifier_token(current().type) &&
+                            (peek(1).type == TokenType::SCOPE_RESOLUTION ||
+                             (peek(1).type == TokenType::LESS_THAN &&
+                              template_id_precedes_scope(0))))) {
+                    std::optional<cir::TypeRef> dependent_base =
+                        parse_cxx_qualified_type_name(
+                            TypeParseContext::type_only(
+                                TypeParseContext::Origin::ClassOrDecltype));
+                    if (dependent_base.has_value()) {
+                        base.type = dependent_base->type;
+                    } else {
+                        header_has_error = true;
+                    }
+                } else if (const collect::Session::TemplateInfo* base_template =
+                               lang_opts_.is_cxx_mode() &&
+                                       is_identifier_token(current().type) &&
+                                       peek(1).type == TokenType::LESS_THAN
+                                   ? collect_session_.template_info_for_name(
+                                         current().value)
+                                   : nullptr;
+                           base_template &&
+                               (base_template->is_class_template ||
+                                base_template->is_alias_template)) {
+
+                    SrcLoc base_loc = current_loc();
+                    consume();
+                    cir::EntityId instantiated =
+                        instantiate_template(*base_template, base_loc);
+                    if (instantiated.valid()) {
+                        base.type = collect_session_.file()
+                            .entity(instantiated).type;
+                    } else {
+                        header_has_error = true;
+                    }
+                } else if (check(TokenType::DECLTYPE_KW)) {
+                    DeclarationParser type_parser(
+                        *this,
+                        TypeParseContext::type_only(
+                            TypeParseContext::Origin::ClassOrDecltype));
+                    cir::TypeRef parsed =
+                        type_parser.parse_declaration(false, true);
+                    base.type = parsed.type;
+                    if (!base.type.valid()) {
+                        header_has_error = true;
+                    }
+                } else if (is_identifier_token(current().type)) {
+                    collect_session_.capture_type_parameter_pack_name(
+                        current().value);
+                    base.type =
+                        collect_session_.lookup_type_name(current().value);
+                    if (!base.type.valid()) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "base specifier does not name a class",
+                                 current_loc());
+                        header_has_error = true;
+                    }
+                    consume();
+                } else {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected a class name in the base clause",
+                             current_loc());
+                    header_has_error = true;
+                    return std::nullopt;
+                }
+                return base;
+            };
+            auto base_specifier_may_contain_ellipsis = [&]() {
+                int paren_depth = 0;
+                int bracket_depth = 0;
+                int angle_depth = 0;
+                for (size_t offset = 0; true; ++offset) {
+                    TokenType type = peek(offset).type;
+                    if (type == TokenType::Eof) {
+                        return false;
+                    }
+                    if (paren_depth == 0 && bracket_depth == 0 &&
+                        angle_depth == 0 &&
+                        (type == TokenType::COMMA ||
+                         type == TokenType::LEFT_BRACE)) {
+                        return false;
+                    }
+                    if (paren_depth == 0 && bracket_depth == 0 &&
+                        angle_depth == 0 &&
+                        type == TokenType::ELLIPSIS) {
+                        return true;
+                    }
+                    switch (type) {
+                        case TokenType::LEFT_PAREN:
+                            ++paren_depth;
+                            break;
+                        case TokenType::RIGHT_PAREN:
+                            if (paren_depth > 0) {
+                                --paren_depth;
+                            }
+                            break;
+                        case TokenType::LEFT_BRACKET:
+                            ++bracket_depth;
+                            break;
+                        case TokenType::RIGHT_BRACKET:
+                            if (bracket_depth > 0) {
+                                --bracket_depth;
+                            }
+                            break;
+                        case TokenType::LESS_THAN:
+                            ++angle_depth;
+                            break;
+                        case TokenType::GREATER_THAN:
+                            if (angle_depth > 0) {
+                                --angle_depth;
+                            }
+                            break;
+                        case TokenType::RIGHT_SHIFT:
+                            if (angle_depth > 1) {
+                                angle_depth -= 2;
+                            } else {
+                                angle_depth = 0;
+                            }
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            };
+            do {
+                bool handled_pack_expansion = false;
+                if (base_specifier_may_contain_ellipsis()) {
+
+                    collect::RecordBaseInput placeholder;
+                    bool placeholder_parsed = false;
+                    std::optional<PackExpansionPattern> pattern =
+                        try_parse_pack_expansion_pattern([&] {
+                            std::optional<collect::RecordBaseInput> parsed =
+                                parse_base_specifier();
+                            if (parsed.has_value()) {
+                                placeholder = std::move(*parsed);
+                                placeholder_parsed = true;
+                            }
+                        });
+                    if (pattern.has_value()) {
+                        handled_pack_expansion = true;
+                        if (!pattern->has_pack_names()) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "pack expansion pattern does not contain a template parameter pack",
+                                     pattern->ellipsis_loc);
+                            header_has_error = true;
+                            cursor_ = pattern->after_ellipsis_cursor;
+                            last_consumed_raw_end_ =
+                                pattern->after_ellipsis_last_consumed_raw_end;
+                        } else {
+                            bool arity_dependent = false;
+                            std::optional<size_t> element_count =
+                                resolve_pack_expansion_element_count(
+                                    *pattern, &arity_dependent);
+                            if (arity_dependent) {
+                                if (!placeholder_parsed ||
+                                    !placeholder.type.valid() ||
+                                    !collect_session_.file().valid(
+                                        placeholder.type)) {
+                                    placeholder.loc =
+                                        pattern->ellipsis_loc.isInvalid()
+                                            ? current_loc()
+                                            : pattern->ellipsis_loc;
+                                    placeholder.type =
+                                        collect_session_.file()
+                                            .dependent_type(
+                                                "base pack expansion");
+                                }
+                                placeholder.is_dependent = true;
+                                append_base(std::move(placeholder));
+                                cursor_ = pattern->after_ellipsis_cursor;
+                                last_consumed_raw_end_ =
+                                    pattern
+                                        ->after_ellipsis_last_consumed_raw_end;
+                            } else {
+                                replay_pack_expansion_elements(
+                                    *pattern,
+                                    element_count.value_or(0),
+                                    [&](size_t) {
+                                        std::optional<
+                                            collect::RecordBaseInput>
+                                            replayed =
+                                                parse_base_specifier();
+                                        if (replayed.has_value()) {
+                                            append_base(
+                                                std::move(*replayed));
+                                        }
+                                    });
+                            }
+                        }
+                    }
+                }
+                if (!handled_pack_expansion) {
+                    auto capture_scope = collect_session_
+                        .begin_parameter_pack_pattern_capture();
+                    std::optional<collect::RecordBaseInput> base =
+                        parse_base_specifier();
+                    std::vector<collect::Session::ParameterPackIdentity>
+                        unexpanded_packs = collect_session_
+                            .finish_parameter_pack_pattern_capture(
+                                capture_scope);
+                    if (base.has_value() && !unexpanded_packs.empty()) {
+                        std::string pack_name =
+                            unexpanded_packs.front().name.empty()
+                                ? ""
+                                : " '" + unexpanded_packs.front().name + "'";
+                        diagnose(DiagnosticLevel::Error,
+                                 "unexpanded template parameter pack" +
+                                     pack_name +
+                                     " is not supported yet",
+                                 base->loc);
+                        header_has_error = true;
+                        base->type = collect_session_.file().unknown_type();
+                    }
+                    if (base.has_value()) {
+                        append_base(std::move(*base));
+                    }
+                }
+            } while (match(TokenType::COMMA));
+            children.push_back(make_node(NodeKind::AmbiguousSyntax,
+                                         base_begin,
+                                         last_consumed_raw_end(),
+                                         {},
+                                         text_payload("base-clause")));
+            collect_session_.suspend_access_capture(base_access_capture);
+        }
+
+        collect::RecordDeclResult record;
+        if (!check(TokenType::LEFT_BRACE)) {
+
+            record = check(TokenType::SEMICOLON)
+                ? collect_session_.declare_record_tag_in_current_scope(
+                      kind,
+                      collect_tag,
+                      keyword.loc,
+                      explicit_specialization_record_to_complete)
+                : collect_session_.declare_record_tag(kind,
+                                                      collect_tag,
+                                                      keyword.loc);
+            if (type_out) {
+                *type_out = record.type;
+            }
+            collect_session_.discard_access_capture(base_access_capture);
+
+            std::string text = std::string(cir::record_kind_name(kind));
+            if (!tag.empty()) {
+                text += ' ';
+                text += tag;
+            }
+            return make_node(NodeKind::RecordDecl,
+                             begin,
+                             last_consumed_raw_end(),
+                             children,
+                             text_payload(std::move(text)),
+                             (record.has_error || header_has_error) ? NodeFlagHasError : NodeFlagNone);
+        }
+
+        record = explicit_member_record_specialization_
+            ? collect_session_.begin_explicit_member_record_specialization(
+                  kind,
+                  collect_tag,
+                  keyword.loc)
+            : collect_session_.begin_record_definition(kind,
+                                                       collect_tag,
+                                                       keyword.loc,
+                                                       explicit_specialization_record_to_complete);
+        if (record.fold_duplicate_definition) {
+
+            collect_session_.discard_access_capture(base_access_capture);
+            if (match(TokenType::LEFT_BRACE)) {
+                int depth = 1;
+                while (depth > 0 && !at_end()) {
+                    if (check(TokenType::LEFT_BRACE)) {
+                        ++depth;
+                    } else if (check(TokenType::RIGHT_BRACE)) {
+                        --depth;
+                    }
+                    consume();
+                }
+            }
+            if (type_out) {
+                *type_out = record.type;
+            }
+            std::string text = std::string(cir::record_kind_name(kind));
+            if (!tag.empty()) {
+                text += ' ';
+                text += tag;
+            }
+            return make_node(NodeKind::RecordDecl,
+                             begin,
+                             last_consumed_raw_end(),
+                             children,
+                             text_payload(std::move(text)),
+                             header_has_error ? NodeFlagHasError
+                                              : NodeFlagNone);
+        }
+        if (parses_explicit_class_specialization &&
+            explicit_class_template_specialization_parse_->matched &&
+            !explicit_class_template_specialization_parse_
+                 ->is_partial_replay &&
+            record.entity.valid()) {
+            const collect::Session::TemplateInfo* primary =
+                collect_session_.template_info(
+                    explicit_class_template_specialization_parse_
+                        ->template_entity);
+            if (primary && primary->is_class_template) {
+                collect_session_.remember_template_specialization(
+                    record.entity,
+                    *primary,
+                    explicit_class_template_specialization_parse_->arguments);
+
+                std::string memo_key = collect_session_.template_memo_key(
+                    primary->entity,
+                    explicit_class_template_specialization_parse_->arguments);
+                cir::EntityId cached =
+                    collect_session_.cached_instantiation(memo_key);
+                if (!cached.valid()) {
+                    collect_session_.remember_instantiation(memo_key,
+                                                            record.entity);
+                }
+            }
+        }
+        collect_session_.note_current_instantiation_dependent_bases(
+            record.entity,
+            record_has_dependent_bases);
+        collect_session_.enter_record_scope(record.entity, keyword.loc);
+        struct LocalClassSeparateConstructScope {
+            Parser& parser;
+            bool previous = false;
+
+            LocalClassSeparateConstructScope(Parser& parser,
+                                             bool instantiate)
+                : parser(parser),
+                  previous(parser.instantiate_member_parameter_defaults_) {
+                parser.instantiate_member_parameter_defaults_ =
+                    previous || instantiate;
+            }
+
+            ~LocalClassSeparateConstructScope() {
+                parser.instantiate_member_parameter_defaults_ = previous;
+            }
+        } local_class_separate_construct_scope(
+            *this,
+            current_record_is_local(collect_session_) &&
+                collect_session_.is_instantiating());
+        if (parses_explicit_class_specialization &&
+            explicit_class_template_specialization_parse_->matched) {
+            collect_session_.bind_record_injected_class_name(
+                explicit_class_template_specialization_parse_->source_name,
+                record.entity,
+                keyword.loc);
+        }
+        collect_session_.set_current_record_pending_bases(bases);
+        consume();
+
+        std::vector<collect::RecordFieldInput> fields;
+        std::vector<collect::RecordStaticDataMemberInput> static_data_members;
+        std::vector<collect::RecordMethodInput> methods;
+        bool has_friend_equality_declaration = false;
+        cir::RecordMemberAccess current_access = default_access_for(kind);
+
+        std::vector<PendingMemberBody> pending_bodies;
+        std::vector<PendingMemberTemplate> pending_member_templates;
+        struct PendingMethodConstraints {
+            size_t method_index = 0;
+            std::vector<collect::Session::TemplateInfo::IntroducedConstraint>
+                constraints;
+        };
+        std::vector<PendingMethodConstraints> pending_method_constraints;
+        auto retain_method_constraint =
+            [&](size_t method_index,
+                collect::RecordMethodInput& method,
+                size_t constraint_begin,
+                size_t constraint_end,
+                std::optional<collect::Session::NormalizedConstraint> normal_form,
+                std::optional<bool> value) {
+                if (!normal_form.has_value()) {
+                    method.constraint_satisfaction =
+                        cir::ConstraintSatisfactionKind::Invalid;
+                    return;
+                }
+                method.associated_constraint_fingerprint =
+                    collect_session_.normalized_constraint_fingerprint(
+                        *normal_form);
+                method.constraint_satisfaction = value.has_value()
+                    ? (*value
+                           ? cir::ConstraintSatisfactionKind::Satisfied
+                           : cir::ConstraintSatisfactionKind::Unsatisfied)
+                    : cir::ConstraintSatisfactionKind::Dependent;
+                collect::Session::TemplateInfo::IntroducedConstraint
+                    constraint{
+                        collect::Session::TemplateInfo::
+                            IntroducedConstraintKind::FunctionTrailingRequires,
+                        constraint_begin,
+                        constraint_end};
+                constraint.normal_form = std::move(normal_form);
+                pending_method_constraints.push_back(
+                    PendingMethodConstraints{method_index,
+                                             {std::move(constraint)}});
+            };
+        auto parse_member_function_tail =
+            [&](collect::RecordMethodInput& method,
+                std::vector<NodeId>& member_children,
+                bool is_constructor,
+                std::vector<ParsedParam> body_params,
+                bool declared_through_function_type) {
+            bool parsed_body = false;
+            while (is_identifier_token(current().type) &&
+                   (current().value == "override" ||
+                    current().value == "final")) {
+                Token specifier = current();
+                consume();
+                bool& fact = specifier.value == "override"
+                    ? method.is_override
+                    : method.is_final;
+                if (fact) {
+                    diagnose(DiagnosticLevel::Error,
+                             "duplicate '" + std::string(specifier.value) +
+                                 "' virt-specifier",
+                             specifier.loc);
+                }
+                fact = true;
+            }
+            bool forbidden_typedef_definition =
+                declared_through_function_type &&
+                (check(TokenType::LEFT_BRACE) ||
+                 check(TokenType::TRY_KW) ||
+                 (check(TokenType::ASSIGN) &&
+                  (peek(1).type == TokenType::DEFAULT ||
+                   peek(1).type == TokenType::DELETE)));
+            if (forbidden_typedef_definition) {
+                diagnose(DiagnosticLevel::Error,
+                         "a member function declared through a function type "
+                         "alias cannot be defined",
+                         current_loc());
+            }
+            size_t init_begin = 0;
+            size_t init_end = 0;
+            if (is_constructor && match(TokenType::COLON)) {
+
+                init_begin = current_raw_index();
+                int depth = 0;
+                TokenType previous = TokenType::COLON;
+                while (!at_end()) {
+                    TokenType type = current().type;
+                    if (depth == 0 &&
+                        (type == TokenType::SEMICOLON ||
+                         type == TokenType::RIGHT_BRACE)) {
+                        break;
+                    }
+                    if (depth == 0 && type == TokenType::LEFT_BRACE &&
+                        !is_identifier_token(previous) &&
+                        previous != TokenType::GREATER_THAN) {
+                        break;
+                    }
+                    if (type == TokenType::LEFT_PAREN ||
+                        type == TokenType::LEFT_BRACE) {
+                        ++depth;
+                    }
+                    if (type == TokenType::RIGHT_PAREN ||
+                        type == TokenType::RIGHT_BRACE) {
+                        --depth;
+                    }
+                    previous = type;
+                    consume();
+                }
+                init_end = current_raw_index();
+            }
+
+            if (match(TokenType::ASSIGN)) {
+                SrcLoc suffix_loc = last_consumed_loc();
+                if (match(TokenType::DEFAULT)) {
+                    method.is_defaulted = true;
+                } else if (match(TokenType::DELETE)) {
+                    method.is_deleted = true;
+                } else if (check(TokenType::INTEGER_CONST) && current().value == "0") {
+                    consume();
+                    method.is_pure = true;
+                } else {
+                    ParsedExpr suffix = parse_expression(PrecLevel::ASSIGNMENT);
+                    member_children.push_back(suffix.syntax);
+                    diagnose(DiagnosticLevel::Error,
+                             "C++ function declaration suffixes are not supported",
+                             suffix_loc);
+                }
+            }
+
+            bool forbidden_pure_definition =
+                method.is_pure &&
+                (check(TokenType::LEFT_BRACE) || check(TokenType::TRY_KW));
+            if (forbidden_pure_definition) {
+                diagnose(DiagnosticLevel::Error,
+                         "a pure-specifier cannot be combined with a function definition",
+                         current_loc());
+            }
+
+            if (check(TokenType::TRY_KW)) {
+                size_t body_begin = current_raw_index();
+                size_t body_end = skip_function_try_block_tokens();
+                bool supported_constructor_try = is_constructor &&
+                    !forbidden_typedef_definition &&
+                    !forbidden_pure_definition;
+                member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                    body_begin,
+                                                    body_end,
+                                                    {},
+                                                    text_payload("member body"),
+                                                    supported_constructor_try
+                                                        ? NodeFlagNone
+                                                        : NodeFlagHasError));
+                if (supported_constructor_try) {
+                    PendingMemberBody pending;
+                    pending.method_index = methods.size();
+                    pending.body_begin = body_begin;
+                    pending.body_end = body_end;
+                    pending.is_constructor_function_try = true;
+                    pending.params = std::move(body_params);
+                    pending_bodies.push_back(std::move(pending));
+                } else {
+                    diagnose(DiagnosticLevel::Error,
+                             "function try blocks are supported only for "
+                             "constructors",
+                             loc_for_index(body_begin));
+                }
+                parsed_body = true;
+            } else if (check(TokenType::LEFT_BRACE)) {
+
+                size_t body_begin = current_raw_index();
+                size_t body_end = skip_balanced_until_semicolon_or_brace();
+                member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                    body_begin,
+                                                    body_end,
+                                                    {},
+                                                    text_payload("member body"),
+                                                    forbidden_pure_definition
+                                                        ? NodeFlagHasError
+                                                        : NodeFlagNone));
+                if (!forbidden_typedef_definition &&
+                    !forbidden_pure_definition) {
+                    PendingMemberBody pending;
+                    pending.method_index = methods.size();
+                    pending.body_begin = body_begin;
+                    pending.body_end = body_end;
+                    pending.init_begin = init_begin;
+                    pending.init_end = init_end;
+                    pending.params = std::move(body_params);
+                    pending_bodies.push_back(std::move(pending));
+                }
+                parsed_body = true;
+            } else if (init_begin != init_end) {
+                diagnose(DiagnosticLevel::Error,
+                         "constructor member initializers require a body",
+                         loc_for_index(init_begin));
+            }
+            return parsed_body;
+        };
+
+        struct ParsedRecordExceptionSpec {
+            cir::FunctionExceptionSpec spec;
+            bool has_explicit = false;
+            bool deferred = false;
+            size_t operand_begin = 0;
+            size_t operand_end = 0;
+            SrcLoc operand_loc{};
+            cir::DeclContextId declaration_context{};
+            uint64_t lookup_generation = 0;
+        };
+        auto parse_special_member_exception_spec =
+            [&](std::vector<NodeId>& member_children) {
+                ParsedRecordExceptionSpec result;
+                if (check(TokenType::THROW_KW)) {
+                    result.has_explicit = true;
+                    SrcLoc throw_loc = current_loc();
+                    consume();
+                    if (!match(TokenType::LEFT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected '(' after 'throw'",
+                                 throw_loc);
+                    } else if (match(TokenType::RIGHT_PAREN)) {
+
+                        result.spec =
+                            cir::FunctionExceptionSpecKind::NonThrowing;
+                    } else {
+                        diagnose(DiagnosticLevel::Error,
+                                 "dynamic exception specifications are not supported; use 'noexcept' instead",
+                                 throw_loc);
+                        int depth = 1;
+                        while (!at_end() && depth > 0) {
+                            TokenType type = current().type;
+                            consume();
+                            if (type == TokenType::LEFT_PAREN) ++depth;
+                            if (type == TokenType::RIGHT_PAREN) --depth;
+                        }
+                    }
+                    return result;
+                }
+                if (!match(TokenType::NOEXCEPT_KW)) {
+                    return result;
+                }
+                result.has_explicit = true;
+                result.spec = cir::FunctionExceptionSpecKind::NonThrowing;
+                if (match(TokenType::LEFT_PAREN)) {
+                    result.operand_begin = current_raw_index();
+                    result.operand_loc = current_loc();
+                    result.declaration_context =
+                        collect_session_.current_decl_context();
+                    result.lookup_generation =
+                        collect_session_.lookup_generation();
+                    result.deferred = should_defer_complete_class_region();
+                    size_t diagnostic_watermark = diagnostics_.size();
+                    if (result.deferred) {
+                        collect_session_.begin_speculative_parse();
+                    }
+                    ParsedExpr operand =
+                        parse_conditional_expression();
+                    result.operand_end = current_raw_index();
+                    if (result.deferred) {
+                        collect_session_.rollback_speculative_parse();
+                        diagnostics_.resize(diagnostic_watermark);
+                    }
+                    member_children.push_back(operand.syntax);
+                    if (!match(TokenType::RIGHT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected ')' after noexcept specifier operand",
+                                 current_loc());
+                    }
+                    if (result.deferred) {
+                        result.spec = cir::FunctionExceptionSpecKind::PotentiallyThrowing;
+                    } else {
+                        result.spec = collect_session_.evaluate_noexcept_spec(
+                            operand.sem, last_consumed_loc());
+                    }
+                }
+                return result;
+            };
+
+        auto skip_balanced_prefix_parentheses = [&](size_t offset) {
+            if (peek(offset).type != TokenType::LEFT_PAREN) {
+                return offset;
+            }
+            int depth = 0;
+            do {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof) {
+                    return offset;
+                }
+                if (type == TokenType::LEFT_PAREN) {
+                    ++depth;
+                } else if (type == TokenType::RIGHT_PAREN) {
+                    --depth;
+                }
+                ++offset;
+            } while (depth > 0);
+            return offset;
+        };
+
+        auto skip_member_prefix_attributes =
+            [&](size_t offset) {
+                while (true) {
+                    if (peek(offset).type == TokenType::ATTRIBUTE_KW) {
+                        ++offset;
+                        offset = skip_balanced_prefix_parentheses(offset);
+                        continue;
+                    }
+                    if (peek(offset).type == TokenType::ALIGNAS) {
+                        ++offset;
+                        offset = skip_balanced_prefix_parentheses(offset);
+                        continue;
+                    }
+                    if (peek(offset).type != TokenType::LEFT_BRACKET ||
+                        peek(offset + 1).type != TokenType::LEFT_BRACKET) {
+                        break;
+                    }
+                    offset += 2;
+                    int paren_depth = 0;
+                    int brace_depth = 0;
+                    int bracket_depth = 0;
+                    while (true) {
+                        TokenType type = peek(offset).type;
+                        if (type == TokenType::Eof) {
+                            return offset;
+                        }
+                        if (type == TokenType::RIGHT_BRACKET &&
+                            peek(offset + 1).type ==
+                                TokenType::RIGHT_BRACKET &&
+                            paren_depth == 0 && brace_depth == 0 &&
+                            bracket_depth == 0) {
+                            offset += 2;
+                            break;
+                        }
+                        if (type == TokenType::LEFT_PAREN) {
+                            ++paren_depth;
+                        } else if (type == TokenType::RIGHT_PAREN &&
+                                   paren_depth > 0) {
+                            --paren_depth;
+                        } else if (type == TokenType::LEFT_BRACE) {
+                            ++brace_depth;
+                        } else if (type == TokenType::RIGHT_BRACE &&
+                                   brace_depth > 0) {
+                            --brace_depth;
+                        } else if (type == TokenType::LEFT_BRACKET) {
+                            ++bracket_depth;
+                        } else if (type == TokenType::RIGHT_BRACKET &&
+                                   bracket_depth > 0) {
+                            --bracket_depth;
+                        }
+                        ++offset;
+                    }
+                }
+                return offset;
+            };
+
+        auto skip_cxx_special_member_prefix = [&](size_t offset) {
+            while (true) {
+                size_t after_attributes =
+                    skip_member_prefix_attributes(offset);
+                if (after_attributes != offset) {
+                    offset = after_attributes;
                     continue;
                 }
-                saw_method_name_match = true;
-                saw_method_template_name_match = true;
-                if (record_method_template_signature_matches(
-                        method_template,
-                        parsed_decl_type,
-                        decl_parser.trailing_function_cv_qualifiers)) {
-                    qualified_declarator.method_template_match = &method_template;
-                    qualified_declarator
-                        .method_template_specialization_arguments.clear();
+                TokenType type = peek(offset).type;
+                if (type == TokenType::INLINE ||
+                    type == TokenType::CONSTEXPR_KW ||
+                    type == TokenType::CONSTEVAL_KW ||
+                    type == TokenType::CONSTINIT_KW ||
+                    type == TokenType::STATIC) {
+                    ++offset;
+                    continue;
+                }
+                if (type != TokenType::EXPLICIT_KW) {
                     break;
                 }
-                if (record_method_template_explicit_specialization_matches(
-                        method_template,
-                        parsed_decl_type,
-                        decl_parser.trailing_function_cv_qualifiers,
-                        qualified_declarator.owner_class_template,
-                        qualified_declarator.owner_template_arguments,
-                        qualified_declarator
-                            .owner_has_specialization_argument_list,
-                        qualified_declarator.targets_template_pattern,
-                        qualified_declarator.loc,
-                        qualified_declarator
-                            .method_template_specialization_arguments)) {
-                    qualified_declarator.method_template_match = &method_template;
+                ++offset;
+                offset = skip_balanced_prefix_parentheses(offset);
+            }
+            return offset;
+        };
+
+        struct ParsedSpecialMemberPrefix {
+            collect::DeclFlags flags;
+            LayoutAttrs attrs;
+            ParsedExplicitSpecifier explicit_specifier;
+            bool invalid_static = false;
+            bool has_error = false;
+
+            bool is_explicit() const {
+                return explicit_specifier.effective_value();
+            }
+        };
+
+        auto parse_special_member_prefix = [&](LayoutAttrs initial_attrs) {
+            ParsedSpecialMemberPrefix result;
+            result.attrs = std::move(initial_attrs);
+            while (true) {
+                size_t attribute_begin = current_raw_index();
+                LayoutAttrs next_attrs = parse_layout_attributes();
+                if (current_raw_index() != attribute_begin) {
+                    merge_attrs(result.attrs, std::move(next_attrs));
+                    continue;
+                }
+                if (match(TokenType::INLINE)) {
+                    result.flags.is_inline = true;
+                } else if (match(TokenType::CONSTEXPR_KW)) {
+                    result.flags.is_constexpr = true;
+                } else if (match(TokenType::CONSTEVAL_KW)) {
+                    result.flags.is_consteval = true;
+                } else if (match(TokenType::CONSTINIT_KW)) {
+                    result.flags.is_constinit = true;
+                } else if (match(TokenType::STATIC)) {
+                    result.invalid_static = true;
+                } else if (check(TokenType::EXPLICIT_KW)) {
+                    if (result.explicit_specifier.present()) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "duplicate explicit specifier",
+                                 current_loc());
+                        result.has_error = true;
+                    }
+                    result.explicit_specifier = parse_explicit_specifier();
+                    result.has_error = result.has_error ||
+                        result.explicit_specifier.has_error;
+                } else {
                     break;
                 }
             }
-        }
-        if (!qualified_declarator.method_match &&
-            !qualified_declarator.method_template_match) {
-            if (saw_method_name_match) {
-                error_custloc(
-                    "conflicting types for '" + qualified_name + "'",
-                    qualified_declarator.loc);
+            return result;
+        };
+
+        auto parse_special_member = [&](size_t member_begin,
+                                        bool leading_virtual,
+                                        const LayoutAttrs& leading_attrs) -> bool {
+            size_t lookahead = skip_cxx_special_member_prefix(0);
+
+            size_t structor_name_offset = lookahead;
+            size_t structor_parentheses = 0;
+            while (peek(structor_name_offset).type ==
+                   TokenType::LEFT_PAREN) {
+                ++structor_parentheses;
+                ++structor_name_offset;
             }
-            error_custloc(
-                "out-of-line declaration of '" + qualified_name +
-                    "' does not match any declaration in the target class",
-                qualified_declarator.loc);
-        }
-        return;
-    }
-
-    bool saw_name_match = false;
-    QualType declared_member_type(parsed_decl_type, decl_parser.qualifiers);
-    for (const auto& static_member : owner_state->static_data_members) {
-        if (static_member.name != decl_parser.name) {
-            continue;
-        }
-        saw_name_match = true;
-        if (!qualified_variable_types_compatible(
-                declared_member_type, static_member.type)) {
-            continue;
-        }
-        qualified_declarator.static_data_match = &static_member;
-        break;
-    }
-
-    if (!qualified_declarator.static_data_match) {
-        if (saw_name_match) {
-            error_custloc(
-                "conflicting types for '" + qualified_name + "'",
-                qualified_declarator.loc);
-        }
-        error_custloc(
-            "out-of-line declaration of '" + qualified_name +
-                "' does not match any declaration in the target class",
-            qualified_declarator.loc);
-    }
-}
-
-void Parser::merge_function_asm_label(DeclarationParser& decl_parser,
-                                      const std::shared_ptr<Symbol>& sym,
-                                      SrcLoc loc) {
-    if (!sym) {
-        return;
-    }
-    if (decl_parser.asm_label.has_value()) {
-        if (sym->asm_label.has_value() &&
-            sym->asm_label.value() != decl_parser.asm_label.value()) {
-            diag_engine->report_error(
-                "conflicting asm label for function '" + decl_parser.name + "'",
-                loc);
-            // Keep the previously established asm label as canonical.
-            decl_parser.asm_label = sym->asm_label;
-            return;
-        }
-        sym->asm_label = decl_parser.asm_label;
-        return;
-    }
-    if (sym->asm_label.has_value()) {
-        // Preserve asm label from a prior declaration on later redeclarations/definition.
-        decl_parser.asm_label = sym->asm_label;
-    }
-}
-
-void Parser::remap_out_of_line_primary_template_method(
-    CppMethodDecl* method_decl,
-    const ClassTemplateDecl* owner_class_template,
-    SrcLoc declarator_loc) {
-    if (!method_decl ||
-        !owner_class_template ||
-        active_template_parameter_stack_.empty()) {
-        return;
-    }
-
-    const auto& active_parameters = active_template_parameter_stack_.back();
-    if (active_parameters.size() != owner_class_template->parameters.size()) {
-        error_custloc(
-            "internal error: out-of-line template head does not match owner template parameter list",
-            declarator_loc);
-    }
-
-    ASTCloneContext clone_ctx;
-    clone_ctx.ast_ctx = ast_ctx.get();
-    std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
-        parameter_rebinds;
-    parameter_rebinds.reserve(active_parameters.size());
-
-    for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
-        const auto* active_parameter = active_parameters[idx];
-        const auto* canonical_parameter =
-            owner_class_template->parameters[idx].get();
-        if (!active_parameter || !canonical_parameter ||
-            active_parameter->get_kind() != canonical_parameter->get_kind()) {
-            error_custloc(
-                "internal error: out-of-line template head is not structurally compatible with the owner template",
-                declarator_loc);
-        }
-        parameter_rebinds.emplace(active_parameter, canonical_parameter);
-
-        if (auto* canonical_type =
-                dyn_cast<TemplateTypeParmDecl>(
-                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
-            (void)canonical_type;
-            continue;
-        }
-
-        if (auto* canonical_non_type =
-                dyn_cast<TemplateNonTypeParmDecl>(
-                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
-            auto* active_non_type =
-                dyn_cast<TemplateNonTypeParmDecl>(
-                    const_cast<TemplateParameterDecl*>(active_parameter));
-            if (active_non_type && active_non_type->sym &&
-                canonical_non_type->sym) {
-                clone_ctx.symbol_remap.emplace(
-                    active_non_type->sym.get(),
-                    canonical_non_type->sym);
-            }
-            continue;
-        }
-
-        error_custloc(
-            "internal error: unsupported out-of-line owner template parameter kind",
-            declarator_loc);
-    }
-
-    clone_ctx.rewrite_type = [&](QualType type) -> QualType {
-        return collect_template_internal::remap_template_parameter_types_in_type(
-            type,
-            parameter_rebinds);
-    };
-    clone_ctx.rewrite_symbol =
-        [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
-        if (!sym) {
-            return nullptr;
-        }
-        if (auto it = clone_ctx.symbol_remap.find(sym.get());
-            it != clone_ctx.symbol_remap.end()) {
-            return it->second;
-        }
-        return sym;
-    };
-
-    method_decl->type =
-        clone_ctx.rewrite_type(QualType(method_decl->type)).get_shared();
-
-    std::vector<std::unique_ptr<Decl>> remapped_parameters;
-    remapped_parameters.reserve(method_decl->parameters.size());
-    for (const auto& parameter : method_decl->parameters) {
-        std::string clone_error;
-        auto remapped_parameter =
-            clone_decl_tree(parameter.get(), clone_ctx, &clone_error);
-        if (!remapped_parameter) {
-            error_custloc(
-                clone_error.empty()
-                    ? "failed to remap out-of-line template method parameter"
-                    : clone_error,
-                parameter ? parameter->location : declarator_loc);
-        }
-        remapped_parameters.push_back(std::move(remapped_parameter));
-    }
-    method_decl->parameters = std::move(remapped_parameters);
-
-    if (method_decl->body) {
-        std::string clone_error;
-        auto remapped_body =
-            clone_stmt_tree(method_decl->body.get(), clone_ctx, &clone_error);
-        if (!remapped_body) {
-            error_custloc(
-                clone_error.empty()
-                    ? "failed to remap out-of-line template method body"
-                    : clone_error,
-                method_decl->body->location);
-        }
-        method_decl->body = std::move(remapped_body);
-    }
-}
-
-void Parser::remap_out_of_line_primary_template_static_member(
-    QualType& declared_type,
-    std::unique_ptr<Expr>& init_expr,
-    const ClassTemplateDecl* owner_class_template,
-    SrcLoc declarator_loc) {
-    if (!owner_class_template || active_template_parameter_stack_.empty()) {
-        return;
-    }
-
-    const auto& active_parameters = active_template_parameter_stack_.back();
-    if (active_parameters.size() != owner_class_template->parameters.size()) {
-        error_custloc(
-            "internal error: out-of-line template head does not match owner template parameter list",
-            declarator_loc);
-    }
-
-    ASTCloneContext clone_ctx;
-    clone_ctx.ast_ctx = ast_ctx.get();
-    std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
-        parameter_rebinds;
-    parameter_rebinds.reserve(active_parameters.size());
-
-    for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
-        const auto* active_parameter = active_parameters[idx];
-        const auto* canonical_parameter =
-            owner_class_template->parameters[idx].get();
-        if (!active_parameter || !canonical_parameter ||
-            active_parameter->get_kind() != canonical_parameter->get_kind()) {
-            error_custloc(
-                "internal error: out-of-line template head is not structurally compatible with the owner template",
-                declarator_loc);
-        }
-        parameter_rebinds.emplace(active_parameter, canonical_parameter);
-
-        if (auto* canonical_type =
-                dyn_cast<TemplateTypeParmDecl>(
-                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
-            (void)canonical_type;
-            continue;
-        }
-
-        if (auto* canonical_non_type =
-                dyn_cast<TemplateNonTypeParmDecl>(
-                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
-            auto* active_non_type =
-                dyn_cast<TemplateNonTypeParmDecl>(
-                    const_cast<TemplateParameterDecl*>(active_parameter));
-            if (active_non_type && active_non_type->sym &&
-                canonical_non_type->sym) {
-                clone_ctx.symbol_remap.emplace(
-                    active_non_type->sym.get(),
-                    canonical_non_type->sym);
-            }
-            continue;
-        }
-
-        error_custloc(
-            "internal error: unsupported out-of-line owner template parameter kind",
-            declarator_loc);
-    }
-
-    clone_ctx.rewrite_type = [&](QualType type) -> QualType {
-        return collect_template_internal::remap_template_parameter_types_in_type(
-            type,
-            parameter_rebinds);
-    };
-    clone_ctx.rewrite_symbol =
-        [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
-        if (!sym) {
-            return nullptr;
-        }
-        if (auto it = clone_ctx.symbol_remap.find(sym.get());
-            it != clone_ctx.symbol_remap.end()) {
-            return it->second;
-        }
-        return sym;
-    };
-
-    declared_type = clone_ctx.rewrite_type(declared_type);
-
-    if (init_expr) {
-        std::string clone_error;
-        auto remapped_init =
-            clone_expr_with_substitution(
-                init_expr.get(),
-                clone_ctx,
-                &clone_error);
-        if (!remapped_init) {
-            error_custloc(
-                clone_error.empty()
-                    ? "failed to remap out-of-line template static data member initializer"
-                    : clone_error,
-                init_expr->location);
-        }
-        init_expr = std::move(remapped_init);
-    }
-}
-
-Parser::DeclaratorHandlingResult Parser::handle_typedef_declarator(
-    DeclarationParser& decl_parser,
-    Token declarator_token,
-    std::shared_ptr<CType>& parsed_decl_type,
-    std::vector<ParsedAttribute>& trailing_attrs,
-    bool declaration_is_constexpr,
-    bool declaration_is_consteval,
-    std::vector<std::unique_ptr<Decl>>& ret_vec) {
-    if (decl_parser.explicit_specifier.is_present) {
-        error_custloc(
-            "'explicit' is only allowed on constructors and conversion functions",
-            decl_parser.explicit_specifier.location);
-    }
-    if (decl_parser.is_mutable) {
-        error_custloc(
-            "'mutable' cannot be applied to typedef declarations",
-            decl_parser.begin_loc);
-    }
-    if (declaration_is_constexpr || declaration_is_consteval) {
-        error("'constexpr' or 'consteval' cannot be combined with 'typedef'");
-    }
-    if (gentle_check(TokenType::ASSIGN)) {
-        error("illegal initializer in typedef (typedefs do not declare objects)");
-    }
-    auto all_attrs_for_typedef = decl_parser.leading_attrs;
-    all_attrs_for_typedef.insert(
-        all_attrs_for_typedef.end(),
-        trailing_attrs.begin(),
-        trailing_attrs.end());
-    for (const auto& attr : all_attrs_for_typedef) {
-        std::string canon = attr.canonical_name();
-        if (canon == "vector_size" && !attr.args.empty() &&
-            attr.args[0].kind == AttributeArg::Kind::INTEGER) {
-            if (parsed_decl_type &&
-                canonical_type_kind(parsed_decl_type) == TypeKind::Vector) {
-                continue;
-            }
-            size_t vec_bytes = static_cast<size_t>(attr.args[0].int_value);
-            auto base = parsed_decl_type;
-            if (!base->isArithmetic() || base->isVoid()) {
-                error("vector_size attribute requires an integer or floating-point base type");
-            }
-            if (vec_bytes == 0 || (vec_bytes & (vec_bytes - 1)) != 0) {
-                error("vector_size must be a power of 2");
-            }
-            int64_t elem_bytes = base->getWidthBytes();
-            if (elem_bytes <= 0 ||
-                vec_bytes % static_cast<size_t>(elem_bytes) != 0) {
-                error("vector_size must be a multiple of the base type size");
-            }
-            parsed_decl_type =
-                std::make_shared<VectorType>(QualType(parsed_decl_type), vec_bytes);
-            continue;
-        }
-        if (canon == "transparent_union") {
-            auto obj = dyn_cast_shared<ObjectType>(parsed_decl_type);
-            if (obj && obj->is_union) {
-                obj->is_transparent_union = true;
-            }
-        }
-    }
-    auto typedef_underlying =
-        QualType(parsed_decl_type, decl_parser.qualifiers);
-    auto td_sym = collect_->collect_declare_typedef_symbol(
-        decl_parser.name, typedef_underlying, declarator_token.loc);
-    if (td_sym) {
-        for (const auto& attr : decl_parser.leading_attrs) {
-            td_sym->sym_attrs.attrs.push_back(attr);
-        }
-        for (const auto& attr : trailing_attrs) {
-            td_sym->sym_attrs.attrs.push_back(attr);
-        }
-    }
-    auto typedef_decl = collect_->collect_typedef_declaration(
-        decl_parser.name,
-        td_sym ? td_sym->type : typedef_underlying,
-        td_sym,
-        declarator_token.loc);
-    if (td_sym && td_sym->type->kind == TypeKind::Typedef) {
-        auto ttype = td_sym->type.as<TypedefType>();
-        auto tdecl = dyn_cast<TypedefDecl>(typedef_decl.get());
-        ttype->typedef_decl = tdecl;
-    }
-    ret_vec.push_back(std::move(typedef_decl));
-    return DeclaratorHandlingResult::Continue;
-}
-
-Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
-    DeclarationParser& decl_parser,
-    Token declarator_token,
-    const std::shared_ptr<CType>& parsed_decl_type,
-    std::vector<ParsedAttribute>& trailing_attrs,
-    StorageClass storage_class,
-    bool declaration_is_constexpr,
-    bool declaration_is_consteval,
-    LanguageLinkage declaration_language_linkage,
-    QualifiedDeclaratorInfo& qualified_declarator,
-    std::vector<std::unique_ptr<Decl>>& ret_vec) {
-    if (decl_parser.explicit_specifier.is_present) {
-        error_custloc(
-            qualified_declarator.owner_record_decl
-                ? "'explicit' is only allowed on declarations inside a class definition"
-                : "'explicit' is only allowed on constructors and conversion functions",
-            decl_parser.explicit_specifier.location);
-    }
-    if (decl_parser.is_mutable) {
-        error_custloc(
-            "'mutable' cannot be applied to functions",
-            decl_parser.begin_loc);
-    }
-    if (qualified_declarator.owner_record_decl) {
-        bool matched_member_template =
-            qualified_declarator.method_template_match != nullptr;
-        bool preserve_member_template_explicit_specialization =
-            is_parsing_cpp_explicit_specialization() &&
-            matched_member_template;
-        bool preserve_ordinary_member_explicit_specialization =
-            is_parsing_cpp_explicit_specialization() &&
-            qualified_declarator.owner_class_template != nullptr &&
-            qualified_declarator.owner_has_specialization_argument_list &&
-            !matched_member_template &&
-            !qualified_declarator.targets_template_pattern;
-        bool preserve_explicit_specialization_member_decl =
-            preserve_member_template_explicit_specialization ||
-            preserve_ordinary_member_explicit_specialization;
-        auto method_sym =
-            preserve_explicit_specialization_member_decl
-                ? nullptr
-                : qualified_declarator.method_match
-                ? qualified_declarator.method_match->symbol
-                : nullptr;
-        if (!preserve_explicit_specialization_member_decl &&
-            !matched_member_template &&
-            (!qualified_declarator.method_match || !method_sym)) {
-            error_custloc(
-                "internal error: missing member function symbol for out-of-line declaration",
-                qualified_declarator.loc);
-        }
-        if (storage_class == StorageClass::STATIC) {
-            error_custloc(
-                "out-of-line member function declaration must not use 'static'",
-                qualified_declarator.loc);
-        }
-        bool is_static_method = matched_member_template
-            ? qualified_declarator.method_template_match->is_static
-            : qualified_declarator.method_match->is_static;
-        if (is_static_method &&
-            (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-             decl_parser.trailing_function_ref_qualifier != 0)) {
-            error_custloc(
-                "static member function cannot have cv/ref qualifier",
-                qualified_declarator.loc);
-        }
-        validate_cpp_operator_function_declaration(
-            decl_parser.name,
-            true,
-            is_static_method,
-            declarator_token.loc);
-
-        cxx_record_parse_stack_.push_back(CppRecordParseFrame{
-            qualified_declarator.owner_record_decl->is_union
-                ? CppRecordKind::Union
-                : CppRecordKind::Class,
-            qualified_declarator.owner_record_decl->tag,
-            qualified_declarator.owner_record_decl,
-            qualified_declarator.owner_class_template,
-            qualified_declarator.targets_template_pattern
-                ? qualified_declarator.owner_type
-                : QualType()});
-        struct RecordParseScopeGuard {
-            std::vector<CppRecordParseFrame>* stack = nullptr;
-            ~RecordParseScopeGuard() {
-                if (stack && !stack->empty()) {
-                    stack->pop_back();
-                }
-            }
-        } record_parse_scope_guard{&cxx_record_parse_stack_};
-
-        merge_function_asm_label(decl_parser, method_sym, declarator_token.loc);
-        TemplateParameterList out_of_line_abbreviated_template_parameters;
-        auto parsed_method_decl =
-            parse_function(
-                &decl_parser,
-                declarator_token.loc,
-                method_sym,
-                &out_of_line_abbreviated_template_parameters);
-        if (!out_of_line_abbreviated_template_parameters.empty()) {
-            fail_cpp_future_work(
-                "out-of-line abbreviated member function templates",
-                "out_of_line_abbreviated_member_function_template",
-                declarator_token.loc);
-        }
-        auto* parsed_method_func_raw = dyn_cast<FuncDecl>(parsed_method_decl.get());
-        if (!parsed_method_func_raw) {
-            error_custloc(
-                "internal error: expected function declaration for out-of-line member function",
-                qualified_declarator.loc);
-        }
-        auto parsed_method_func = std::unique_ptr<FuncDecl>(
-            static_cast<FuncDecl*>(parsed_method_decl.release()));
-
-        auto out_of_line_method = std::make_unique<CppMethodDecl>(
-            parsed_method_func->name,
-            parsed_method_func->type,
-            std::move(parsed_method_func->parameters),
-            std::move(parsed_method_func->body),
-            std::move(parsed_method_func->stmt_labels),
-            parsed_method_func->storage_class,
-            parsed_method_func->is_inline != 0,
-            parsed_method_func->location);
-        out_of_line_method->node_id = parsed_method_func->node_id;
-        out_of_line_method->scope = parsed_method_func->scope;
-        out_of_line_method->type = parsed_method_func->type;
-        out_of_line_method->is_constexpr = parsed_method_func->is_constexpr;
-        out_of_line_method->is_consteval = parsed_method_func->is_consteval;
-        if (out_of_line_method->is_consteval) {
-            out_of_line_method->is_constexpr = true;
-            out_of_line_method->is_inline = true;
-        }
-        out_of_line_method->is_deleted = parsed_method_func->is_deleted;
-        out_of_line_method->is_defaulted = parsed_method_func->is_defaulted;
-        out_of_line_method->is_defaulted_on_first_declaration = false;
-        out_of_line_method->explicit_specialization_arguments =
-            parsed_method_func->explicit_specialization_arguments;
-        out_of_line_method->has_explicit_specialization_argument_list =
-            parsed_method_func->has_explicit_specialization_argument_list;
-        out_of_line_method->set_language_linkage(
-            parsed_method_func->get_language_linkage());
-        if (parsed_method_func->asm_label) {
-            out_of_line_method->set_asm_label(*parsed_method_func->asm_label);
-        }
-
-        auto* matched_method_decl = matched_member_template
-            ? const_cast<CppMethodDecl*>(
-                  dyn_cast<CppMethodDecl>(
-                      qualified_declarator.method_template_match->decl
-                          ? qualified_declarator.method_template_match->decl
-                                ->function_decl()
-                          : nullptr))
-            : const_cast<CppMethodDecl*>(qualified_declarator.method_match->decl);
-        if (matched_member_template && !matched_method_decl) {
-            error_custloc(
-                "internal error: missing member template method declaration for out-of-line definition",
-                qualified_declarator.loc);
-        }
-        out_of_line_method->is_virtual = matched_method_decl
-            ? matched_method_decl->is_virtual
-            : qualified_declarator.method_match->is_virtual;
-        out_of_line_method->is_override = matched_method_decl
-            ? matched_method_decl->is_override
-            : qualified_declarator.method_match->is_override;
-        out_of_line_method->is_final = matched_method_decl
-            ? matched_method_decl->is_final
-            : qualified_declarator.method_match->is_final;
-        out_of_line_method->is_pure = matched_method_decl
-            ? matched_method_decl->is_pure
-            : qualified_declarator.method_match->is_pure;
-        out_of_line_method->is_conversion_function = matched_method_decl
-            ? matched_method_decl->is_conversion_function
-            : qualified_declarator.method_match->is_conversion_function;
-        out_of_line_method->is_explicit_conversion = matched_method_decl
-            ? matched_method_decl->is_explicit_conversion
-            : qualified_declarator.method_match->is_explicit;
-        out_of_line_method->explicit_specifier = matched_method_decl
-            ? matched_method_decl->explicit_specifier
-            : CppExplicitSpecifier{};
-        out_of_line_method->conversion_target_type = matched_method_decl
-            ? matched_method_decl->conversion_target_type
-            : qualified_declarator.method_match->conversion_target_type;
-
-        if (matched_method_decl) {
-            if (auto* existing_prefix =
-                    get_func_decl_cxx_qualifier_prefix(matched_method_decl)) {
-                set_func_decl_cxx_qualifier_prefix(
-                    out_of_line_method.get(), *existing_prefix);
-            }
-        }
-
-        QualType explicit_specialized_owner_type;
-        if (preserve_explicit_specialization_member_decl &&
-            qualified_declarator.owner_class_template &&
-            qualified_declarator.owner_has_specialization_argument_list &&
-            !qualified_declarator.targets_template_pattern) {
-            auto owner_record_kind =
-                qualified_declarator.owner_record_decl->is_union
-                    ? CppRecordKind::Union
-                    : CppRecordKind::Class;
-            auto* specialized_owner_decl =
-                ensure_cpp_specialized_record_semantic_owner(
-                    owner_record_kind,
-                    qualified_declarator.owner_class_template
-                        ->record_decl()
-                        ->name,
-                    qualified_declarator.owner_template_arguments,
-                    qualified_declarator.loc,
-                    qualified_declarator.owner_class_template,
-                    qualified_declarator.owner_has_specialization_argument_list);
-            if (!specialized_owner_decl ||
-                !specialized_owner_decl->get_record_type()) {
-                error_custloc(
-                    "internal error: failed to realize specialized owner for explicit specialization",
-                    qualified_declarator.loc);
-            }
-            explicit_specialized_owner_type =
-                QualType(specialized_owner_decl->get_record_type());
-            std::string specialized_owner_prefix =
-                qualified_name_utils::format_cpp_qualified_name(
-                    qualified_declarator.has_global_qualifier,
-                    qualified_declarator.qualifiers,
-                    "");
-            if (specialized_owner_prefix.size() >= 2 &&
-                specialized_owner_prefix.ends_with("::")) {
-                specialized_owner_prefix.erase(
-                    specialized_owner_prefix.size() - 2);
-            }
-            if (!specialized_owner_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(
-                    out_of_line_method.get(),
-                    specialized_owner_prefix);
-            }
-            set_func_decl_owner_record_type(
-                out_of_line_method.get(),
-                explicit_specialized_owner_type);
-        }
-
-        if (!is_static_method) {
-            auto method_fn_type = desugar_type(
-                matched_member_template
-                    ? QualType(matched_method_decl->type)
-                    : qualified_declarator.method_match->type)
-                .as_shared<FunctionType>();
-            if (!method_fn_type || method_fn_type->parameters.empty()) {
-                error_custloc(
-                    "internal error: out-of-line method is missing implicit object parameter",
-                    qualified_declarator.loc);
-            }
-            QualType this_type = method_fn_type->parameters.front();
-            if (explicit_specialized_owner_type) {
-                if (auto this_ptr_type =
-                        desugar_type(this_type).as_shared<PointerType>()) {
-                    QualType specialized_pointee = explicit_specialized_owner_type;
-                    if (this_ptr_type->pointed_type.is_const()) {
-                        specialized_pointee = specialized_pointee.with_const();
-                    }
-                    if (this_ptr_type->pointed_type.is_volatile()) {
-                        specialized_pointee =
-                            specialized_pointee.with_volatile();
-                    }
-                    this_type = QualType(
-                        std::make_shared<PointerType>(specialized_pointee));
-                }
-            }
-            auto this_param = collect_->collect_parameter_declaration(
-                this_type,
-                "this",
-                nullptr,
-                StorageClass::NONE,
-                qualified_declarator.loc);
-            out_of_line_method->parameters.insert(
-                out_of_line_method->parameters.begin(), std::move(this_param));
-            if (auto fn_type =
-                    dyn_cast_shared<FunctionType>(out_of_line_method->type)) {
-                fn_type->insert_parameter(0, this_type);
-                fn_type->has_prototype = true;
-            }
-        }
-
-        if (out_of_line_method->is_defaulted &&
-            !is_defaultable_method(
-                out_of_line_method.get(),
-                QualType(qualified_declarator.owner_record_decl->get_record_type()),
-                ast_ctx.get())) {
-            error_custloc(
-                "only comparison operators and copy/move assignment operators may be defaulted here",
-                    qualified_declarator.loc);
-        }
-
-        if (matched_method_decl &&
-            matched_method_decl->is_consteval != out_of_line_method->is_consteval) {
-            error_custloc(
-                "conflicting consteval specifier for '" +
-                    qualified_name_utils::format_cpp_qualified_name(
-                        qualified_declarator.has_global_qualifier,
-                        qualified_declarator.qualifiers,
-                        decl_parser.name) +
-                    "'",
-                qualified_declarator.loc);
-        }
-
-        bool is_definition = function_decl_defines_entity(out_of_line_method.get());
-        if (preserve_explicit_specialization_member_decl) {
-            const Decl* primary_member_decl = nullptr;
-            const FunctionTemplateDecl* primary_member_template = nullptr;
-            std::vector<TemplateArgument> specialization_arguments;
-            std::vector<TemplateArgument> owner_specialization_arguments;
-
-            if (preserve_member_template_explicit_specialization) {
-                primary_member_template =
-                    qualified_declarator.method_template_match
-                        ? qualified_declarator.method_template_match->decl
-                        : nullptr;
-                primary_member_decl =
-                    primary_member_template
-                        ? static_cast<const Decl*>(
-                              primary_member_template->function_decl())
-                        : nullptr;
-                specialization_arguments =
-                    qualified_declarator
-                        .method_template_specialization_arguments;
-                owner_specialization_arguments =
-                    qualified_declarator.owner_template_arguments;
-            } else {
-                primary_member_decl =
-                    qualified_declarator.method_match
-                        ? static_cast<const Decl*>(
-                              qualified_declarator.method_match->decl)
-                        : nullptr;
-                specialization_arguments =
-                    qualified_declarator.owner_template_arguments;
-            }
-
-            if (!primary_member_decl) {
-                error_custloc(
-                    "internal error: missing primary member declaration for explicit specialization",
-                    qualified_declarator.loc);
-            }
-            pending_cpp_explicit_specialization_info_ =
-                PendingCppExplicitSpecializationInfo{
-                    qualified_declarator.owner_class_template,
-                    primary_member_template,
-                    std::move(specialization_arguments),
-                    std::move(owner_specialization_arguments),
-                    primary_member_decl,
-                };
-            ast_ctx->append_attrs(
-                out_of_line_method->node_id,
-                std::move(decl_parser.leading_attrs));
-            ast_ctx->append_attrs(
-                out_of_line_method->node_id,
-                std::move(trailing_attrs));
-            ret_vec.push_back(std::move(out_of_line_method));
-            return is_definition ? DeclaratorHandlingResult::Return
-                                 : DeclaratorHandlingResult::Continue;
-        }
-
-        if (qualified_declarator.owner_class_template &&
-            qualified_declarator.targets_template_pattern &&
-            !matched_member_template) {
-            remap_out_of_line_primary_template_method(
-                out_of_line_method.get(),
-                qualified_declarator.owner_class_template,
-                qualified_declarator.loc);
-        }
-
-        if (is_definition) {
-            if (!matched_method_decl) {
-                error_custloc(
-                    "internal error: missing member declaration for out-of-line definition",
-                    qualified_declarator.loc);
-            }
-            if (matched_method_decl->body != nullptr ||
-                matched_method_decl->has_deferred_inline_body() ||
-                (method_sym && method_sym->is_defined)) {
-                error_custloc(
-                    "redefinition of '" +
-                        qualified_name_utils::format_cpp_qualified_name(
-                            qualified_declarator.has_global_qualifier,
-                            qualified_declarator.qualifiers,
-                            decl_parser.name) +
-                        "'",
-                    qualified_declarator.loc);
-            }
-
-            matched_method_decl->parameters =
-                std::move(out_of_line_method->parameters);
-            matched_method_decl->type = out_of_line_method->type;
-            matched_method_decl->body = std::move(out_of_line_method->body);
-            matched_method_decl->scope = out_of_line_method->scope;
-            matched_method_decl->stmt_labels =
-                std::move(out_of_line_method->stmt_labels);
-            matched_method_decl->is_constexpr =
-                out_of_line_method->is_constexpr;
-            matched_method_decl->is_consteval =
-                out_of_line_method->is_consteval;
-            if (matched_method_decl->is_consteval) {
-                matched_method_decl->is_constexpr = true;
-                matched_method_decl->is_inline = true;
-            }
-            matched_method_decl->is_deleted =
-                out_of_line_method->is_deleted;
-            matched_method_decl->is_defaulted =
-                out_of_line_method->is_defaulted;
-            matched_method_decl->is_defaulted_on_first_declaration = false;
-            matched_method_decl->has_deferred_defaulted_body =
-                matched_method_decl->is_defaulted;
-            matched_method_decl->is_conversion_function =
-                out_of_line_method->is_conversion_function;
-            matched_method_decl->is_explicit_conversion =
-                out_of_line_method->is_explicit_conversion;
-            matched_method_decl->explicit_specifier =
-                out_of_line_method->explicit_specifier;
-            matched_method_decl->conversion_target_type =
-                out_of_line_method->conversion_target_type;
-            matched_method_decl->set_language_linkage(
-                out_of_line_method->get_language_linkage());
-            if (out_of_line_method->asm_label) {
-                matched_method_decl->set_asm_label(*out_of_line_method->asm_label);
-            } else {
-                matched_method_decl->clear_asm_label();
-            }
-            if (auto* parsed_prefix =
-                    get_func_decl_cxx_qualifier_prefix(out_of_line_method.get())) {
-                set_func_decl_cxx_qualifier_prefix(
-                    matched_method_decl, *parsed_prefix);
-            }
-
-            if (method_sym) {
-                method_sym->is_defined =
-                    matched_method_decl->body != nullptr ||
-                    matched_method_decl->is_deleted;
-                method_sym->is_deleted = matched_method_decl->is_deleted;
-                method_sym->is_defaulted = matched_method_decl->is_defaulted;
-                method_sym->is_constexpr = matched_method_decl->is_constexpr;
-                method_sym->is_consteval = matched_method_decl->is_consteval;
-                method_sym->is_inline = matched_method_decl->is_inline;
-                method_sym->type = QualType(matched_method_decl->type);
-                method_sym->function_definition = matched_method_decl;
-            }
-
-            if (const auto* owner_state =
-                    collect_->query_lookup_record_semantics(
-                        qualified_declarator.owner_record_decl)) {
-                RecordSemanticState updated_state = *owner_state;
-                if (!matched_member_template) {
-                    for (auto& method : updated_state.methods) {
-                        if (method.decl != qualified_declarator.method_match->decl) {
-                            continue;
+            auto skip_standard_attribute_lists = [&](size_t offset) {
+                while (peek(offset).type == TokenType::LEFT_BRACKET &&
+                       peek(offset + 1).type == TokenType::LEFT_BRACKET) {
+                    offset += 2;
+                    int paren_depth = 0;
+                    int brace_depth = 0;
+                    int bracket_depth = 0;
+                    bool closed = false;
+                    for (size_t guard = 0; guard < 4096; ++guard) {
+                        TokenType type = peek(offset).type;
+                        if (type == TokenType::Eof) {
+                            break;
                         }
-                        method.decl = matched_method_decl;
-                        method.type = QualType(matched_method_decl->type);
-                        method.is_deleted = matched_method_decl->is_deleted;
-                        method.is_defaulted = matched_method_decl->is_defaulted;
-                        method.is_constexpr = matched_method_decl->is_constexpr;
-                        method.is_consteval = matched_method_decl->is_consteval;
-                        method.is_explicit =
-                            matched_method_decl->is_explicit_conversion;
-                        method.is_conversion_function =
-                            matched_method_decl->is_conversion_function;
-                        method.conversion_target_type =
-                            matched_method_decl->conversion_target_type;
-                        if (method_sym) {
-                            method.symbol = method_sym;
+                        if (type == TokenType::RIGHT_BRACKET &&
+                            peek(offset + 1).type ==
+                                TokenType::RIGHT_BRACKET &&
+                            paren_depth == 0 && brace_depth == 0 &&
+                            bracket_depth == 0) {
+                            offset += 2;
+                            closed = true;
+                            break;
                         }
+                        if (type == TokenType::LEFT_PAREN) {
+                            ++paren_depth;
+                        } else if (type == TokenType::RIGHT_PAREN &&
+                                   paren_depth > 0) {
+                            --paren_depth;
+                        } else if (type == TokenType::LEFT_BRACE) {
+                            ++brace_depth;
+                        } else if (type == TokenType::RIGHT_BRACE &&
+                                   brace_depth > 0) {
+                            --brace_depth;
+                        } else if (type == TokenType::LEFT_BRACKET) {
+                            ++bracket_depth;
+                        } else if (type == TokenType::RIGHT_BRACKET &&
+                                   bracket_depth > 0) {
+                            --bracket_depth;
+                        }
+                        ++offset;
+                    }
+                    if (!closed) {
                         break;
                     }
                 }
-                collect_->query_publish_record_semantics(
-                    qualified_declarator.owner_record_decl,
-                    std::move(updated_state));
-            }
-
-            ast_ctx->append_attrs(
-                matched_method_decl->node_id,
-                std::move(decl_parser.leading_attrs));
-            ast_ctx->append_attrs(
-                matched_method_decl->node_id,
-                std::move(trailing_attrs));
-            ret_vec.push_back(
-                collect_->collect_nop_declaration(qualified_declarator.loc));
-            return DeclaratorHandlingResult::Return;
-        }
-
-        ast_ctx->append_attrs(
-            out_of_line_method->node_id,
-            std::move(decl_parser.leading_attrs));
-        ast_ctx->append_attrs(
-            out_of_line_method->node_id,
-            std::move(trailing_attrs));
-        ret_vec.push_back(
-            collect_->collect_nop_declaration(qualified_declarator.loc));
-        return DeclaratorHandlingResult::Continue;
-    }
-
-    if (is_cxx_mode_active() &&
-        (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-         decl_parser.trailing_function_ref_qualifier != 0)) {
-        error("non-member function cannot have cv/ref qualifier");
-    }
-    if (declaration_is_constexpr && !is_cxx_mode_active()) {
-        error("'constexpr' can only be applied to object declarations");
-    }
-    validate_cpp_operator_function_declaration(
-        decl_parser.name,
-        false,
-        false,
-        declarator_token.loc);
-    bool preserve_function_explicit_specialization_decl =
-        is_parsing_cpp_explicit_specialization();
-    bool has_abbreviated_function_parameters =
-        is_cxx_mode_active() &&
-        function_type_has_ordinary_cxx_auto_parameters(parsed_decl_type);
-    bool active_template_declaration_will_wrap_abbreviated_function =
-        active_abbreviated_function_template_parameters() != nullptr;
-    bool suppress_primary_function_template_symbol_binding =
-        is_cxx_mode_active() &&
-        ((template_pattern_depth_ > 0 &&
-          !preserve_function_explicit_specialization_decl) ||
-         has_abbreviated_function_parameters) &&
-        !preserve_function_explicit_specialization_decl;
-    std::shared_ptr<Symbol> predecl_sym = nullptr;
-    if (!preserve_function_explicit_specialization_decl &&
-        !suppress_primary_function_template_symbol_binding) {
-        predecl_sym = collect_->collect_declare_function_symbol(
-            decl_parser.name,
-            QualType(parsed_decl_type),
-            storage_class,
-            declaration_is_constexpr,
-            declaration_is_consteval,
-            decl_parser.is_inline,
-            false,
-            declarator_token.loc,
-            declaration_language_linkage,
-            false,
-            false,
-            false,
-            QualType(),
-            std::nullopt,
-            decl_parser.trailing_requires_clause.get());
-        if (predecl_sym && declaration_is_consteval) {
-            predecl_sym->is_consteval = true;
-            predecl_sym->is_constexpr = true;
-            predecl_sym->is_inline = true;
-        }
-        merge_function_asm_label(decl_parser, predecl_sym, declarator_token.loc);
-    }
-    TemplateParameterList abbreviated_template_parameters;
-    auto funct = parse_function(
-        &decl_parser,
-        declarator_token.loc,
-        predecl_sym,
-        &abbreviated_template_parameters);
-    auto* func_decl_check = dyn_cast<FuncDecl>(funct.get());
-    if (func_decl_check && func_decl_check->is_defaulted) {
-        error_custloc(
-            "only non-static member special member functions may be defaulted",
-            declarator_token.loc);
-    }
-    bool is_definition =
-        func_decl_check && function_decl_defines_entity(func_decl_check);
-    std::shared_ptr<Symbol> final_sym = nullptr;
-    if (!preserve_function_explicit_specialization_decl &&
-        !suppress_primary_function_template_symbol_binding) {
-        final_sym = collect_->collect_declare_function_symbol(
-            decl_parser.name,
-            QualType(parsed_decl_type),
-            storage_class,
-            declaration_is_constexpr,
-            declaration_is_consteval,
-            decl_parser.is_inline,
-            is_definition,
-            declarator_token.loc,
-            declaration_language_linkage,
-            false,
-            func_decl_check && func_decl_check->is_deleted,
-            func_decl_check && func_decl_check->is_defaulted,
-            QualType(),
-            std::nullopt,
-            func_decl_check
-                ? func_decl_check->trailing_requires_clause.get()
-                : nullptr);
-        if (final_sym && declaration_is_consteval) {
-            final_sym->is_consteval = true;
-            final_sym->is_constexpr = true;
-            final_sym->is_inline = true;
-        }
-        if (final_sym) {
-            final_sym->is_hidden_friend = false;
-            if (!final_sym->friend_access_type && func_decl_check &&
-                func_decl_check->friend_access_type) {
-                final_sym->friend_access_type =
-                    func_decl_check->friend_access_type;
-            }
-        }
-        if (is_definition && func_decl_check) {
-            if (predecl_sym) {
-                predecl_sym->is_hidden_friend = false;
-                if (!predecl_sym->friend_access_type &&
-                    func_decl_check->friend_access_type) {
-                    predecl_sym->friend_access_type =
-                        func_decl_check->friend_access_type;
-                }
-                predecl_sym->function_definition = func_decl_check;
-                predecl_sym->function_trailing_requires_clause =
-                    func_decl_check->trailing_requires_clause.get();
-            }
-            if (final_sym) {
-                final_sym->function_definition = func_decl_check;
-                final_sym->function_trailing_requires_clause =
-                    func_decl_check->trailing_requires_clause.get();
-            }
-        }
-        if (func_decl_check && final_sym && final_sym != predecl_sym) {
-            register_function_default_arguments(
-                final_sym, func_decl_check, declarator_token.loc);
-        }
-        merge_function_asm_label(decl_parser, final_sym, declarator_token.loc);
-    }
-    auto append_function_attrs_to_symbol = [&](const std::shared_ptr<Symbol>& sym) {
-        if (!sym) {
-            return;
-        }
-        for (const auto& attr : decl_parser.leading_attrs) {
-            sym->sym_attrs.attrs.push_back(attr);
-        }
-        for (const auto& attr : trailing_attrs) {
-            sym->sym_attrs.attrs.push_back(attr);
-        }
-    };
-    append_function_attrs_to_symbol(predecl_sym);
-    if (final_sym != predecl_sym) {
-        append_function_attrs_to_symbol(final_sym);
-    }
-    ast_ctx->append_attrs(funct->node_id, std::move(decl_parser.leading_attrs));
-    ast_ctx->append_attrs(funct->node_id, std::move(trailing_attrs));
-    if (!abbreviated_template_parameters.empty()) {
-        funct = wrap_abbreviated_function_template_if_needed(
-            std::move(funct),
-            std::move(abbreviated_template_parameters),
-            declarator_token.loc,
-            !active_template_declaration_will_wrap_abbreviated_function &&
-                !preserve_function_explicit_specialization_decl);
-    }
-    ret_vec.push_back(std::move(funct));
-    return is_definition ? DeclaratorHandlingResult::Return
-                         : DeclaratorHandlingResult::Continue;
-}
-
-Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
-    DeclarationParser& decl_parser,
-    Token declarator_token,
-    const std::shared_ptr<CType>& parsed_decl_type,
-    std::vector<ParsedAttribute>& trailing_attrs,
-    StorageClass storage_class,
-    bool declaration_is_constexpr,
-    bool declaration_is_consteval,
-    LanguageLinkage declaration_language_linkage,
-    QualifiedDeclaratorInfo& qualified_declarator,
-    std::optional<QualType>& first_cxx_auto_deduced_type,
-    std::vector<std::unique_ptr<Decl>>& ret_vec) {
-    if (decl_parser.explicit_specifier.is_present) {
-        error_custloc(
-            "'explicit' is only allowed on constructors and conversion functions",
-            decl_parser.explicit_specifier.location);
-    }
-    if (decl_parser.is_mutable) {
-        error_custloc(
-            "'mutable' can only be applied to non-static data members",
-            decl_parser.begin_loc);
-    }
-    auto has_cxx_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
-        return auto_type_utils::has_cxx_auto_type(type);
-    };
-    auto has_gnu_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
-        return auto_type_utils::has_gnu_auto_type(type);
-    };
-
-    bool declarator_has_gnu_auto_type = has_gnu_auto_type(parsed_decl_type);
-    bool declarator_has_cxx_auto_type = has_cxx_auto_type(parsed_decl_type);
-    bool declarator_has_decltype_auto_type =
-        auto_type_utils::has_decltype_auto_type(parsed_decl_type);
-    if (declarator_has_gnu_auto_type && declarator_has_cxx_auto_type) {
-        error("cannot mix '__auto_type' and 'auto' in the same declaration");
-    }
-    if (declarator_has_decltype_auto_type &&
-        !auto_type_utils::is_decltype_auto_placeholder(parsed_decl_type)) {
-        error("'decltype(auto)' cannot be used with pointers, references, arrays, or function declarators");
-    }
-    if (declarator_has_gnu_auto_type && !gentle_check(TokenType::ASSIGN)) {
-        error("'__auto_type' requires an initializer");
-    }
-    if (declaration_is_consteval) {
-        error("'consteval' can only be applied to function declarations");
-    }
-    QualType declared_type(parsed_decl_type, decl_parser.qualifiers);
-    if (declaration_is_constexpr && storage_class == StorageClass::EXTERN) {
-        error("'constexpr' cannot be combined with 'extern'");
-    }
-    if (declaration_is_constexpr && storage_class == StorageClass::AUTO) {
-        error("'constexpr' cannot be combined with 'auto'");
-    }
-    if (declaration_is_constexpr && decl_parser.is_thread_local) {
-        error("'constexpr' cannot be combined with '_Thread_local'");
-    }
-    bool is_out_of_line_static_data_member =
-        qualified_declarator.owner_record_decl != nullptr;
-    std::shared_ptr<Symbol> declared_sym = nullptr;
-    bool is_variable_template_specialization_declarator =
-        is_cxx_mode_active() &&
-        decl_parser.has_explicit_specialization_argument_list &&
-        (is_parsing_cpp_explicit_specialization() ||
-         is_in_template_pattern_context());
-    bool preserve_explicit_specialization_static_decl =
-        is_parsing_cpp_explicit_specialization() &&
-        qualified_declarator.owner_class_template != nullptr &&
-        qualified_declarator.owner_has_specialization_argument_list &&
-        !qualified_declarator.targets_template_pattern;
-    if (qualified_declarator.owner_record_decl) {
-        if (storage_class == StorageClass::STATIC) {
-            error_custloc(
-                "out-of-line static data member definition must not use 'static'",
-                qualified_declarator.loc);
-        }
-        if (!preserve_explicit_specialization_static_decl &&
-            (!qualified_declarator.static_data_match ||
-             !qualified_declarator.static_data_match->symbol)) {
-            error_custloc(
-                "internal error: missing static data member symbol for out-of-line definition",
-                qualified_declarator.loc);
-        }
-        if (!preserve_explicit_specialization_static_decl) {
-            declared_sym = qualified_declarator.static_data_match->symbol;
-            declared_sym->type = desugar_type(declared_type);
-            declared_sym->storage_class = StorageClass::STATIC;
-            declared_sym->is_constexpr = declaration_is_constexpr;
-            if (declared_sym->get_language_linkage() == LanguageLinkage::None) {
-                declared_sym->set_language_linkage(
-                    declaration_language_linkage);
-            }
-        }
-    } else if (!is_variable_template_specialization_declarator) {
-        declared_sym = collect_->collect_declare_variable_symbol(
-            decl_parser.name,
-            declared_type,
-            storage_class,
-            declaration_is_constexpr,
-            decl_parser.is_inline,
-            declarator_token.loc,
-            declaration_language_linkage,
-            true);
-    }
-    if (declared_sym) {
-        declared_sym->is_constexpr = declaration_is_constexpr;
-    }
-    bool declared_sym_was_defined =
-        declared_sym ? declared_sym->is_defined != 0 : false;
-    const VariableDecl* declared_sym_prior_definition =
-        declared_sym ? declared_sym->variable_definition : nullptr;
-    if (declared_sym) {
-        for (const auto& attr : decl_parser.leading_attrs) {
-            declared_sym->sym_attrs.attrs.push_back(attr);
-        }
-        for (const auto& attr : trailing_attrs) {
-            declared_sym->sym_attrs.attrs.push_back(attr);
-        }
-    }
-    bool is_file_scope = collect_->collect_is_file_scope();
-    QualType previous_record_lookup_type =
-        collect_ ? collect_->collect_current_cpp_record_lookup_type()
-                 : QualType();
-    struct StaticDataMemberInitializerContextGuard {
-        Collect* collect = nullptr;
-        QualType previous_type = nullptr;
-        ~StaticDataMemberInitializerContextGuard() {
-            if (collect) {
-                collect->collect_set_current_cpp_record_lookup_type(previous_type);
-            }
-        }
-    } static_data_member_initializer_context_guard{
-        collect_.get(),
-        previous_record_lookup_type
-    };
-    if (collect_ &&
-        qualified_declarator.owner_record_decl &&
-        qualified_declarator.owner_record_decl->get_record_type()) {
-        collect_->collect_set_current_cpp_record_lookup_type(
-            qualified_declarator.owner_type
-                ? qualified_declarator.owner_type
-                : QualType(qualified_declarator.owner_record_decl->get_record_type()));
-    }
-    if (is_cxx_mode_active() &&
-        !qualified_declarator.owner_record_decl &&
-        !is_variable_template_specialization_declarator &&
-        !decl_parser.has_explicit_specialization_argument_list) {
-        try_publish_pending_primary_variable_template_pattern(
-            decl_parser.name,
-            declared_type,
-            declared_sym,
-            storage_class,
-            decl_parser.is_inline,
-            declaration_is_constexpr,
-            decl_parser.is_thread_local,
-            decl_parser.is_block_byref,
-            decl_parser.asm_label,
-            declaration_language_linkage,
-            declarator_token.loc);
-    }
-    std::unique_ptr<Expr> init_expr;
-    VariableInitializationKind initialization_kind = VariableInitializationKind::None;
-    bool is_cxx_object_decl =
-        is_cxx_mode_active() &&
-        can_parse_cxx_object_initializer_syntax(declared_type);
-    if (gentle_check_and_consume(TokenType::ASSIGN)) {
-        if (gentle_check(TokenType::LEFT_BRACE)) {
-            initialization_kind = VariableInitializationKind::CopyList;
-            init_expr = parse_init_list();
-        } else {
-            initialization_kind = VariableInitializationKind::Copy;
-            init_expr = parse_assignment_expression();
-        }
-    } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_PAREN)) {
-        initialization_kind = VariableInitializationKind::Direct;
-        init_expr = parse_paren_init_list();
-    } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
-        initialization_kind = VariableInitializationKind::DirectList;
-        init_expr = parse_init_list();
-    }
-
-    if (qualified_declarator.owner_record_decl &&
-        qualified_declarator.targets_template_pattern &&
-        qualified_declarator.owner_class_template) {
-        remap_out_of_line_primary_template_static_member(
-            declared_type,
-            init_expr,
-            qualified_declarator.owner_class_template,
-            qualified_declarator.loc);
-        if (declared_sym) {
-            declared_sym->type = desugar_type(declared_type);
-        }
-    }
-
-    auto var_decl_base = collect_->collect_variable_declaration(
-        declared_type,
-        decl_parser.name,
-        std::move(init_expr),
-        declared_sym,
-        storage_class,
-        {declaration_is_constexpr,
-         decl_parser.is_inline,
-         is_file_scope,
-         is_out_of_line_static_data_member,
-         is_out_of_line_static_data_member &&
-             declaration_is_constexpr,
-         decl_parser.is_thread_local,
-         decl_parser.is_block_byref,
-         initialization_kind,
-         false,
-         qualified_declarator.owner_record_decl != nullptr &&
-             !preserve_explicit_specialization_static_decl},
-        declarator_token.loc,
-        declaration_language_linkage);
-    auto* var_decl = cast<VariableDecl>(var_decl_base.get());
-    var_decl->is_thread_local = decl_parser.is_thread_local;
-    var_decl->is_block_byref = decl_parser.is_block_byref;
-    var_decl->is_constexpr = declaration_is_constexpr;
-    var_decl->explicit_specialization_arguments =
-        decl_parser.explicit_specialization_arguments;
-    var_decl->has_explicit_specialization_argument_list =
-        decl_parser.has_explicit_specialization_argument_list;
-    var_decl->set_asm_label(decl_parser.asm_label);
-    if (decl_parser.asm_label.has_value() &&
-        !is_file_scope &&
-        storage_class != StorageClass::STATIC &&
-        storage_class != StorageClass::REGISTER) {
-        error("asm label on automatic local variable is not allowed");
-    }
-    ast_ctx->append_attrs(var_decl->node_id, std::move(decl_parser.leading_attrs));
-    ast_ctx->append_attrs(var_decl->node_id, std::move(trailing_attrs));
-    if (qualified_declarator.owner_record_decl &&
-        declared_sym &&
-        !preserve_explicit_specialization_static_decl) {
-        declared_sym->is_defined = declared_sym_was_defined;
-        declared_sym->variable_definition = declared_sym_prior_definition;
-    }
-
-    if (preserve_explicit_specialization_static_decl) {
-        const Decl* primary_member_decl =
-            qualified_declarator.static_data_match
-                ? static_cast<const Decl*>(
-                      qualified_declarator.static_data_match->decl)
-                : nullptr;
-        if (!primary_member_decl) {
-            error_custloc(
-                "internal error: missing primary static data member declaration for explicit specialization",
-                qualified_declarator.loc);
-        }
-        pending_cpp_explicit_specialization_info_ =
-            PendingCppExplicitSpecializationInfo{
-                qualified_declarator.owner_class_template,
-                nullptr,
-                qualified_declarator.owner_template_arguments,
-                {},
-                primary_member_decl,
+                return offset;
             };
-        ret_vec.push_back(std::move(var_decl_base));
-        return DeclaratorHandlingResult::Continue;
-    }
-
-    if (qualified_declarator.owner_record_decl &&
-        declared_sym &&
-        !qualified_declarator.targets_template_pattern) {
-        bool is_definition =
-            collect_->is_definition_bearing_variable_declaration(
-                storage_class,
-                {declaration_is_constexpr,
-                 decl_parser.is_inline,
-                 is_file_scope,
-                 is_out_of_line_static_data_member,
-                 false,
-                 decl_parser.is_thread_local,
-                 decl_parser.is_block_byref,
-                 initialization_kind,
-                 false},
-                var_decl->init.get());
-        if (is_definition) {
-            if (declared_sym->is_defined) {
-                error_custloc(
-                    "redefinition of '" +
-                        qualified_name_utils::format_cpp_qualified_name(
-                            qualified_declarator.has_global_qualifier,
-                            qualified_declarator.qualifiers,
-                            decl_parser.name) +
-                        "'",
-                    qualified_declarator.loc);
-            }
-            declared_sym->is_defined = true;
-            declared_sym->variable_definition = var_decl;
-        }
-    }
-
-    if (qualified_declarator.owner_record_decl &&
-        qualified_declarator.targets_template_pattern) {
-        auto* matched_static_decl =
-            qualified_declarator.static_data_match
-                ? const_cast<VariableDecl*>(
-                      qualified_declarator.static_data_match->decl)
-                : nullptr;
-        if (!matched_static_decl) {
-            error_custloc(
-                "internal error: missing primary template static data member declaration",
-                qualified_declarator.loc);
-        }
-
-        bool is_definition =
-            collect_->is_definition_bearing_variable_declaration(
-                storage_class,
-                {declaration_is_constexpr,
-                 decl_parser.is_inline,
-                 is_file_scope,
-                 is_out_of_line_static_data_member,
-                 false,
-                 decl_parser.is_thread_local,
-                 decl_parser.is_block_byref,
-                 initialization_kind,
-                 false},
-                var_decl->init.get());
-        if (is_definition &&
-            (matched_static_decl->init != nullptr ||
-             (declared_sym && declared_sym->is_defined))) {
-            error_custloc(
-                "redefinition of '" +
-                    qualified_name_utils::format_cpp_qualified_name(
-                        qualified_declarator.has_global_qualifier,
-                        qualified_declarator.qualifiers,
-                        decl_parser.name) +
-                    "'",
-                qualified_declarator.loc);
-        }
-
-        matched_static_decl->type = var_decl->type;
-        matched_static_decl->sym = declared_sym;
-        matched_static_decl->storage_class = StorageClass::STATIC;
-        matched_static_decl->is_inline = var_decl->is_inline;
-        matched_static_decl->is_constexpr = var_decl->is_constexpr;
-        matched_static_decl->is_thread_local = var_decl->is_thread_local;
-        matched_static_decl->set_language_linkage(
-            var_decl->get_language_linkage());
-        if (var_decl->asm_label) {
-            matched_static_decl->set_asm_label(*var_decl->asm_label);
-        } else {
-            matched_static_decl->clear_asm_label();
-        }
-        if (is_definition) {
-            matched_static_decl->init = std::move(var_decl->init);
-        }
-
-        if (declared_sym) {
-            declared_sym->type = desugar_type(matched_static_decl->type);
-            declared_sym->storage_class = StorageClass::STATIC;
-            declared_sym->is_constexpr = matched_static_decl->is_constexpr;
-            if (declared_sym->get_language_linkage() ==
-                LanguageLinkage::None) {
-                declared_sym->set_language_linkage(
-                    matched_static_decl->get_language_linkage());
-            }
-            if (is_definition) {
-                declared_sym->is_defined = true;
-                declared_sym->variable_definition = matched_static_decl;
-            }
-        }
-
-        if (const auto* owner_state =
-                collect_->query_lookup_record_semantics(
-                    qualified_declarator.owner_record_decl)) {
-            RecordSemanticState updated_state = *owner_state;
-            for (auto& static_member : updated_state.static_data_members) {
-                if (static_member.decl !=
-                    qualified_declarator.static_data_match->decl) {
-                    continue;
+            auto structor_suffix_matches = [&](size_t suffix_offset) {
+                suffix_offset = skip_standard_attribute_lists(suffix_offset);
+                for (size_t index = 0; index < structor_parentheses; ++index) {
+                    if (peek(suffix_offset + index).type !=
+                        TokenType::RIGHT_PAREN) {
+                        return false;
+                    }
                 }
-                static_member.decl = matched_static_decl;
-                static_member.type = matched_static_decl->type;
-                static_member.symbol = declared_sym;
-                break;
-            }
-            collect_->query_publish_record_semantics(
-                qualified_declarator.owner_record_decl,
-                std::move(updated_state));
-        }
-
-        const auto& parsed_attrs = ast_ctx->get_attrs(var_decl->node_id).attrs;
-        if (!parsed_attrs.empty()) {
-            auto& dst_attrs =
-                ast_ctx->get_attrs_mut(matched_static_decl->node_id).attrs;
-            dst_attrs.insert(
-                dst_attrs.end(), parsed_attrs.begin(), parsed_attrs.end());
-        }
-
-        ret_vec.push_back(
-            collect_->collect_nop_declaration(qualified_declarator.loc));
-        return DeclaratorHandlingResult::Continue;
-    }
-
-    ret_vec.push_back(std::move(var_decl_base));
-
-    if (declarator_has_cxx_auto_type) {
-        auto deduced = auto_type_utils::extract_auto_placeholder_replacement(
-            declared_type, var_decl->type);
-        if (deduced.has_value() &&
-            deduced->get_shared() &&
-            auto_type_utils::auto_type_flavors_in(deduced->get_shared()) == 0) {
-            QualType deduced_canonical = desugar_type(*deduced);
-            if (!first_cxx_auto_deduced_type.has_value()) {
-                first_cxx_auto_deduced_type = deduced_canonical;
-            } else {
-                QualType first_canonical =
-                    desugar_type(first_cxx_auto_deduced_type.value());
-                if (!deduced_canonical.equals_qualified(first_canonical)) {
-                    error(
-                        "inconsistent deduction for 'auto': '" +
-                        first_canonical.to_string() + "' and then '" +
-                        deduced_canonical.to_string() + "'");
-                }
-            }
-        }
-    }
-
-    if (declarator_has_gnu_auto_type && gentle_check(TokenType::COMMA)) {
-        error("'__auto_type' cannot be used in a multi-declarator statement");
-    }
-    if (!gentle_check(TokenType::SEMICOLON) &&
-        !gentle_check(TokenType::COMMA)) {
-        error("expected ',' or ';' after declarator");
-    }
-    return DeclaratorHandlingResult::Continue;
-}
-
-std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
-    Token t = current_token();
-    if (auto special_declaration = try_parse_special_declaration()) {
-        return std::move(*special_declaration);
-    }
-    std::vector<std::unique_ptr<Decl>> ret_vec;
-    auto decl_parser = DeclarationParser(this);
-    auto new_type = parse_declaration_head(t, decl_parser, ret_vec);
-    auto storage_class = decl_parser.str_class;
-    const bool declaration_is_constexpr = decl_parser.is_constexpr;
-    const bool declaration_is_consteval = decl_parser.is_consteval;
-    const LanguageLinkage declaration_language_linkage = current_decl_language_linkage();
-    std::optional<QualType> first_cxx_auto_deduced_type;
-    // Error production: missing ';' after struct/union/enum definition
-    // Detect: struct S { ... } <type-keyword> — likely forgot ';'
-    if ((canonical_type_kind(new_type) == TypeKind::Object ||
-         canonical_type_kind(new_type) == TypeKind::Enum)
-        && !gentle_check(TokenType::SEMICOLON) && !gentle_check(TokenType::IDENTIFIER)
-        && !gentle_check(TokenType::MULTIPLY) && !gentle_check(TokenType::LEFT_PAREN)
-        && !gentle_check(TokenType::COMMA)
-        && isTokenDeclarationSpec(current_token())) {
-        diag_engine->report_note("possibly missing ';' after struct/union/enum definition", current_token().loc);
-    }
-    while (true) {
-        if (gentle_check(TokenType::SEMICOLON)) {
-            if (ret_vec.empty()) {
-                if (storage_class == StorageClass::TYPEDEF) {
-                    error("typedef requires a name for the type alias");
-                }
-                ret_vec.push_back(collect_->collect_nop_declaration(current_token().loc));
-            }
-            advance();
-            break;
-        } else if (gentle_check(TokenType::COMMA)) {
-            advance();
-        }
-        t = current_token();
-        auto qualified_declarator_context =
-            prepare_qualified_declarator_context(decl_parser);
-        auto& qualified_declarator = qualified_declarator_context.info;
-        struct QualifiedDeclaratorScopeRestoreGuard {
-            Collect* collect = nullptr;
-            std::shared_ptr<Scope> scope;
-            std::shared_ptr<DeclContext> decl_context;
-
-            ~QualifiedDeclaratorScopeRestoreGuard() {
-                if (!collect) {
-                    return;
-                }
-                collect->collect_set_current_scope(scope);
-                collect->set_current_decl_context(decl_context);
-            }
-        } scope_restore_guard {
-            collect_.get(),
-            qualified_declarator_context.scope_snapshot.scope,
-            qualified_declarator_context.scope_snapshot.decl_context
-        };
-        auto saved_qualified_declarator_context =
-            active_cpp_qualified_declarator_context_;
-        struct ActiveQualifiedDeclaratorGuard {
-            Parser* parser = nullptr;
-            ActiveCppQualifiedDeclaratorContext saved_context;
-            ~ActiveQualifiedDeclaratorGuard() {
-                if (parser) {
-                    parser->active_cpp_qualified_declarator_context_ =
-                        saved_context;
-                }
-            }
-        } active_qualified_declarator_guard {
-            this,
-            saved_qualified_declarator_context
-        };
-        active_cpp_qualified_declarator_context_ =
-            ActiveCppQualifiedDeclaratorContext{
-                qualified_declarator.owner_record_decl,
-                qualified_declarator.owner_type
+                suffix_offset += structor_parentheses;
+                return peek(suffix_offset).type == TokenType::LEFT_PAREN;
             };
-        QualType previous_record_lookup_type =
-            collect_ ? collect_->collect_current_cpp_record_lookup_type()
-                     : QualType();
-        struct QualifiedDeclaratorRecordLookupGuard {
-            Collect* collect = nullptr;
-            QualType previous_type = nullptr;
-            ~QualifiedDeclaratorRecordLookupGuard() {
-                if (collect) {
-                    collect->collect_set_current_cpp_record_lookup_type(
-                        previous_type);
-                }
-            }
-        } record_lookup_guard{collect_.get(), previous_record_lookup_type};
-        QualType qualified_record_lookup_type = qualified_declarator.owner_type;
-        if (!qualified_record_lookup_type &&
-            qualified_declarator.owner_record_decl &&
-            qualified_declarator.owner_record_decl->get_record_type()) {
-            qualified_record_lookup_type =
-                QualType(qualified_declarator.owner_record_decl->get_record_type());
-        }
-        if (collect_ && qualified_record_lookup_type) {
-            collect_->collect_set_current_cpp_record_lookup_type(
-                qualified_record_lookup_type);
-        }
-        if (qualified_declarator.owner_record_decl) {
-            cxx_record_parse_stack_.push_back(CppRecordParseFrame{
-                qualified_declarator.owner_record_decl->is_union
-                    ? CppRecordKind::Union
-                    : CppRecordKind::Class,
-                qualified_declarator.owner_record_decl->tag,
-                qualified_declarator.owner_record_decl,
-                qualified_declarator.owner_class_template,
-                qualified_declarator.targets_template_pattern
-                    ? qualified_declarator.owner_type
-                    : QualType()});
-        }
-        struct QualifiedDeclaratorRecordParseGuard {
-            std::vector<CppRecordParseFrame>* stack = nullptr;
-            bool active = false;
-            ~QualifiedDeclaratorRecordParseGuard() {
-                if (active && stack && !stack->empty()) {
-                    stack->pop_back();
-                }
-            }
-        } record_parse_guard{
-            &cxx_record_parse_stack_,
-            qualified_declarator.owner_record_decl != nullptr
-        };
-        std::shared_ptr<CType> newer_type = decl_parser.parse_declarator(new_type);
-        retain_type_specifier_decl_if_needed(decl_parser);
-        if (is_cxx_mode_active() && is_cpp_scope_resolution_here()) {
-            error_custloc(
-                "unsupported qualified declarator form after declarator-id",
-                current_token().loc);
-        }
-        // Parse optional __asm__("name") label after declarator
-        if (gentle_check(TokenType::ASM_KW)) {
-            advance(); // consume asm/__asm__/__asm
-            check_and_consume(TokenType::LEFT_PAREN);
-            decl_parser.asm_label = parse_asm_string_literal();
-            check_and_consume(TokenType::RIGHT_PAREN);
-        }
-        // Parse trailing attributes after declarator (e.g., int x __attribute__((aligned(16)));)
-        auto trailing_attrs = try_parse_attributes();
-        if (!decl_parser.asm_label.has_value()) {
-            if (auto alias = extract_weakref_target(decl_parser.leading_attrs)) {
-                decl_parser.asm_label = alias.value();
-            } else if (auto alias = extract_weakref_target(trailing_attrs)) {
-                decl_parser.asm_label = alias.value();
-            }
-        }
-        if (newer_type == nullptr) {
-            error("failed to parse declarator");
-        }
-        // GNU alias pattern:
-        //   extern __typeof__(fn) alias __asm__("real_name");
-        // When typeof(fn) is represented as pointer-to-function in expression
-        // form, treat this declaration as a function declaration.
-        if (newer_type && canonical_type_kind(newer_type) == TypeKind::Pointer &&
-            decl_parser.asm_label.has_value() &&
-            storage_class == StorageClass::EXTERN &&
-            collect_->collect_is_file_scope()) {
-            auto ptr = dyn_cast_shared<PointerType>(desugar_type(newer_type));
-            auto pointed_fn = ptr ? ptr->pointed_type.as_shared<FunctionType>() : nullptr;
-            if (pointed_fn) {
-                newer_type = ptr->pointed_type.get_shared();
-            }
-        }
-        if (newer_type && canonical_type_kind(newer_type) != TypeKind::Function &&
-            decl_parser.asm_label.has_value() &&
-            storage_class == StorageClass::EXTERN &&
-            collect_->collect_is_file_scope() &&
-            !decl_parser.name.empty()) {
-            auto existing = collect_->collect_lookup_variable_symbol(decl_parser.name, true);
-            if (existing && existing->kind == SymbolKind::FUNCTION && existing->type &&
-                canonical_type_kind(existing->type) == TypeKind::Function) {
-                newer_type = existing->type.get_shared();
-            }
-        }
-        if (decl_parser.name.empty()) {
-            if (is_in_tentative_context()) {
-                throw ParseError("tentative declarator parse failed");
-            }
-            if (storage_class == StorageClass::TYPEDEF) {
-                error("typedef requires a name for the type alias");
-            }
-            error("didn't catch the name of the declarator");
-        }
-        resolve_qualified_declarator_match(
-            qualified_declarator,
-            decl_parser,
-            newer_type);
-        if (is_cxx_mode_active()) {
-            auto current_decl_context = collect_->get_current_decl_context();
-            bool collides_with_namespace_name = false;
-            if (current_decl_context && !decl_parser.name.empty()) {
-                collides_with_namespace_name =
-                    static_cast<bool>(current_decl_context->lookup_local_namespace_binding(
-                        decl_parser.name));
-            }
-            if (collides_with_namespace_name) {
-                if (storage_class == StorageClass::TYPEDEF) {
-                    error("redefinition of '" + decl_parser.name + "' as typedef");
-                }
-                if (canonical_type_kind(newer_type) == TypeKind::Function) {
-                    error("redefinition of '" + decl_parser.name + "' as function");
-                }
-                error("redefinition of '" + decl_parser.name + "' as variable");
-            }
-        }
-        if (storage_class == StorageClass::TYPEDEF) {
-            handle_typedef_declarator(
-                decl_parser,
-                t,
-                newer_type,
-                trailing_attrs,
-                declaration_is_constexpr,
-                declaration_is_consteval,
-                ret_vec);
-            continue;
-        }
-        if (canonical_type_kind(newer_type) == TypeKind::Function) {
-            if (handle_function_declarator(
-                    decl_parser,
-                    t,
-                    newer_type,
-                    trailing_attrs,
-                    storage_class,
-                    declaration_is_constexpr,
-                    declaration_is_consteval,
-                    declaration_language_linkage,
-                    qualified_declarator,
-                    ret_vec) == DeclaratorHandlingResult::Return) {
-                return ret_vec;
-            }
-            continue;
-        }
-        if (handle_variable_declarator(
-                decl_parser,
-                t,
-                newer_type,
-                trailing_attrs,
-                storage_class,
-                declaration_is_constexpr,
-                declaration_is_consteval,
-                declaration_language_linkage,
-                qualified_declarator,
-                first_cxx_auto_deduced_type,
-                ret_vec) == DeclaratorHandlingResult::Return) {
-            return ret_vec;
-        }
-    }
-    return ret_vec;
-}
-std::unique_ptr<Decl> Parser::parse_parameter_declaration() {
-    Token t = current_token();
-    auto decl_parser = DeclarationParser(this);
-    // Keep array types for parameters; decay happens in semantic analysis.
-    decl_parser.arrays_are_pointers = false;
-    decl_parser.in_function_parameter = true;
-    auto new_type = decl_parser.parse_declaration();
-    retain_type_specifier_decl_if_needed(decl_parser);
-    auto ctype = new_type;
-    std::string name = decl_parser.name;
-    StorageClass sclass = decl_parser.str_class;
-    if (decl_parser.is_consteval) {
-        error("'consteval' is not valid for function parameter declarations");
-    }
-    if (decl_parser.is_constexpr) {
-        error("'constexpr' is not valid for function parameter declarations");
-    }
-    if (decl_parser.is_friend) {
-        error("'friend' is not valid for function parameter declarations");
-    }
-    if (decl_parser.explicit_specifier.is_present) {
-        error("'explicit' is not valid for function parameter declarations");
-    }
-    if (decl_parser.is_mutable) {
-        error("'mutable' is not valid for function parameter declarations");
-    }
-    std::shared_ptr<Symbol> sym = nullptr;
-    if (!name.empty()) {
-        sym = collect_->collect_declare_variable_symbol(
-            name, ctype, sclass, false, false, t.loc);
-    }
-    auto param_decl = collect_->collect_parameter_declaration(ctype, name, sym, sclass, t.loc);
-    if (auto* parsed_param = dyn_cast<ParamDecl>(param_decl.get())) {
-        parsed_param->is_constexpr = decl_parser.is_constexpr;
-        parsed_param->is_parameter_pack = decl_parser.is_parameter_pack;
-    }
-    return param_decl;
-
-}
-
-// Parse struct declaration (field inside struct body)
-// Handles both regular fields and bitfields:
-//   type-specifier declarator ;
-//   type-specifier declarator : constant-expression ;
-//   type-specifier : constant-expression ;  (anonymous bitfield)
-std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading_virtual_specifier) {
-    Token t = current_token();
-    std::vector<std::unique_ptr<Decl>> fields;
-
-    // C11/C23: _Static_assert is allowed inside struct/union declarations.
-    if (gentle_check(TokenType::STATIC_ASSERT)) {
-        fields.push_back(parse_static_assert_declaration());
-        return fields;
-    }
-
-    auto current_granting_record_type = [&]() -> QualType {
-        if (cxx_record_parse_stack_.empty()) {
-            return QualType(nullptr);
-        }
-        const auto& record_frame = cxx_record_parse_stack_.back();
-        if (record_frame.semantic_owner &&
-            record_frame.semantic_owner->get_record_type()) {
-            return QualType(record_frame.semantic_owner->get_record_type());
-        }
-        if (!record_frame.name.empty()) {
-            auto owner_type = dyn_cast_shared<ObjectType>(
-                collect_->collect_lookup_tag_type(
-                    record_frame.name,
-                    true));
-            if (owner_type) {
-                return QualType(owner_type);
-            }
-        }
-        return QualType(nullptr);
-    };
-    auto current_friend_access_record_type = [&]() -> QualType {
-        if (!cxx_record_parse_stack_.empty()) {
-            const auto& record_frame = cxx_record_parse_stack_.back();
-            if (record_frame.current_instantiation_type) {
-                return record_frame.current_instantiation_type;
-            }
-        }
-        return current_granting_record_type();
-    };
-
-    auto resolve_or_declare_elaborated_friend_type =
-        [&](const std::string& tag_name,
-            bool is_union,
-            SrcLoc loc) -> QualType {
-        if (tag_name.empty()) {
-            return QualType(nullptr);
-        }
-        if (auto* existing_decl =
-                collect_->collect_lookup_tag_decl(tag_name, true)) {
-            auto* object_decl = dyn_cast<ObjectDecl>(existing_decl);
-            if (!object_decl || !object_decl->get_record_type()) {
-                error_custloc(
-                    "friend type names a tag previously declared with a different kind",
-                    loc);
-            }
-            auto object_type = object_decl->get_record_type();
-            if (object_type && object_type->is_union != is_union) {
-                error_custloc(
-                    "friend type names a tag previously declared with a different kind",
-                    loc);
-            }
-            return QualType(object_type);
-        }
-
-        auto object_type =
-            std::make_shared<ObjectType>(tag_name, is_union, true);
-        auto object_decl = collect_->collect_record_declaration(
-            tag_name,
-            object_type,
-            is_union,
-            loc);
-        if (!object_decl) {
-            return QualType(nullptr);
-        }
-        collect_->query_publish_record_semantics(
-            object_decl.get(),
-            RecordSemanticState{});
-        object_type->set_decl(object_decl.get());
-        collect_->collect_add_tag_decl(tag_name, object_decl.get());
-        cpp_transient_semantic_decls_.push_back(std::move(object_decl));
-        return QualType(object_type);
-    };
-
-    auto try_parse_cpp_type_friend_declaration = [&]() -> bool {
-        if (!is_cxx_mode_active() ||
-            !is_parsing_cpp_record_body() ||
-            !gentle_check(TokenType::FRIEND_KW)) {
-            return false;
-        }
-
-        size_t saved_idx = get_token_idx();
-        auto saved_split_state = tok_mgnt.get_split_token_state();
-        auto restore = [&]() {
-            set_token_idx(saved_idx);
-            tok_mgnt.set_split_token_state(saved_split_state);
-        };
-
-        Token friend_tok = current_token();
-        advance();
-
-        bool has_elaborated_key = false;
-        bool elaborated_is_union = false;
-        bool fallback_elaborated_name = false;
-        std::string fallback_name;
-        SrcLoc fallback_loc;
-        QualType friend_type = nullptr;
-
-        if (gentle_check(TokenType::CLASS) ||
-            gentle_check(TokenType::STRUCT) ||
-            gentle_check(TokenType::UNION)) {
-            has_elaborated_key = true;
-            elaborated_is_union = gentle_check(TokenType::UNION);
-            advance();
-
-            if (auto parsed_type = try_parse_cpp_named_type_specifier()) {
-                friend_type = parsed_type->type;
-            } else if (gentle_check(TokenType::IDENTIFIER)) {
-                fallback_name = current_token().value;
-                fallback_loc = current_token().loc;
-                fallback_elaborated_name = true;
-                advance();
-            }
-        } else if (auto parsed_type = try_parse_cpp_named_type_specifier()) {
-            friend_type = parsed_type->type;
-        }
-
-        if (!friend_type && !fallback_elaborated_name) {
-            restore();
-            return false;
-        }
-
-        if (!gentle_check(TokenType::SEMICOLON)) {
-            restore();
-            return false;
-        }
-
-        if (leading_virtual_specifier) {
-            error_custloc(
-                "'virtual' is not allowed on friend declarations",
-                friend_tok.loc);
-        }
-        if (fallback_elaborated_name) {
-            if (cpp_template_declaration_subject_parse_depth_ == 0) {
-                friend_type = resolve_or_declare_elaborated_friend_type(
-                    fallback_name,
-                    elaborated_is_union,
-                    fallback_loc);
-            }
-        }
-        if (!friend_type) {
-            if (!fallback_elaborated_name ||
-                cpp_template_declaration_subject_parse_depth_ == 0) {
-                error_custloc(
-                    "friend type declaration requires a type",
-                    friend_tok.loc);
-            }
-        }
-        if (!has_elaborated_key &&
-            canonical_type_kind(friend_type, ast_ctx.get()) != TypeKind::Object &&
-            !type_depends_on_template_parameters(friend_type, ast_ctx.get())) {
-            error_custloc(
-                "friend type declaration must name a class type",
-                friend_tok.loc);
-        }
-
-        auto friend_decl = make_ast<FriendDecl>(
-            *ast_ctx,
-            friend_type,
-            current_granting_record_type(),
-            friend_tok.loc);
-        if (!friend_type && fallback_elaborated_name) {
-            friend_decl->set_unresolved_friend_type_name(
-                fallback_name,
-                elaborated_is_union);
-        }
-        fields.push_back(std::move(friend_decl));
-        check_and_consume(TokenType::SEMICOLON);
-        return true;
-    };
-
-    if (try_parse_cpp_type_friend_declaration()) {
-        return fields;
-    }
-
-    DeclarationParser decl_parser(this);
-    decl_parser.allow_typeless_conversion_function =
-        is_cxx_mode_active() &&
-        is_parsing_cpp_record_body() &&
-        !cxx_record_parse_stack_.empty() &&
-        !cxx_record_parse_stack_.back().name.empty();
-    std::shared_ptr<CType> base_type = nullptr;
-    base_type = decl_parser.parse_declaration(false);
-    bool declaration_leading_virtual = leading_virtual_specifier;
-    auto ensure_namespace_qualifier_prefix = [&](std::string& qualifier_prefix) {
-        if (!is_cxx_mode_active()) {
-            return;
-        }
-        qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
-            collect_->collect_current_scope(), qualifier_prefix);
-    };
-
-    auto build_member_param_decls =
-        [&](std::vector<std::unique_ptr<DeclarationParser>>& parsed_params,
-            const std::shared_ptr<CType>& function_type,
-            TemplateParameterList* abbreviated_template_parameters = nullptr,
-            SrcLoc function_loc = SrcLoc())
-        -> std::vector<std::unique_ptr<Decl>> {
-        std::vector<std::unique_ptr<Decl>> member_params;
-        bool seen_void_param = false;
-        for (auto& param_parser : parsed_params) {
-            if (!param_parser) {
-                continue;
-            }
-            retain_type_specifier_decl_if_needed(*param_parser);
-            if (param_parser->is_constexpr || param_parser->is_consteval) {
-                error("'constexpr/consteval' is not valid for function parameter declarations");
-            }
-            if (param_parser->explicit_specifier.is_present) {
-                error("'explicit' is not valid for function parameter declarations");
-            }
-            if (param_parser->is_mutable) {
-                error("'mutable' is not valid for function parameter declarations");
-            }
-            if (param_parser->result_type &&
-                param_parser->result_type->isVoid()) {
-                seen_void_param = true;
-                if (!param_parser->name.empty()) {
-                    error("Argument cannot have 'void' type");
-                }
-            }
-            QualType param_type(
-                param_parser->result_type, param_parser->qualifiers);
-            auto param_decl = collect_->collect_parameter_declaration(
-                param_type,
-                param_parser->name,
-                nullptr,
-                param_parser->str_class,
-                param_parser->begin_loc);
-            if (auto* typed_param = dyn_cast<ParamDecl>(param_decl.get())) {
-                typed_param->is_constexpr = param_parser->is_constexpr;
-                typed_param->is_parameter_pack = param_parser->is_parameter_pack;
-                set_param_decl_default_argument(
-                    typed_param,
-                    std::move(param_parser->default_argument));
-            }
-            member_params.push_back(std::move(param_decl));
-        }
-        auto func_ty = dyn_cast_shared<FunctionType>(function_type);
-        validate_function_parameter_auto_placeholders(func_ty, function_loc);
-        if (func_ty &&
-            function_type_has_ordinary_cxx_auto_parameters(func_ty)) {
-            TemplateParameterList local_abbreviated_template_parameters;
-            TemplateParameterList* target_template_parameters =
-                active_abbreviated_function_template_parameters();
-            if (!target_template_parameters) {
-                target_template_parameters =
-                    &local_abbreviated_template_parameters;
-            }
-            lower_cxx_auto_function_parameter_placeholders(
-                member_params,
-                func_ty,
-                *target_template_parameters,
-                active_abbreviated_function_template_parameter_depth(),
-                function_loc);
-            if (abbreviated_template_parameters &&
-                !active_abbreviated_function_template_parameters()) {
-                *abbreviated_template_parameters =
-                    std::move(local_abbreviated_template_parameters);
-            }
-        } else if (func_ty) {
-            func_ty->parameter_pack_flags.clear();
-            func_ty->parameter_pack_flags.reserve(member_params.size());
-            for (const auto& member_param : member_params) {
-                const auto* typed_param =
-                    dyn_cast<ParamDecl>(member_param.get());
-                func_ty->parameter_pack_flags.push_back(
-                    typed_param && typed_param->is_parameter_pack ? 1 : 0);
-            }
-            func_ty->normalize_parameter_pack_flags();
-        }
-        if (seen_void_param) {
-            if (func_ty && func_ty->is_variadic) {
-                error("'void' parameter cannot be combined with '...'");
-            }
-            if (member_params.size() != 1) {
-                error("mixed up 'void' with other function arguments in declaration");
-            }
-        }
-        return member_params;
-    };
-
-    // If a struct/union was defined as the type specifier, include it so sema
-    // can process nested enum/struct declarations in the enclosing scope.
-    if (decl_parser.struct_obj) {
-        fields.push_back(std::move(decl_parser.struct_obj));
-    }
-
-    // If an enum was defined as the type specifier, include it so sema
-    // can register the enum constants in the enclosing scope.
-    if (decl_parser.enum_obj) {
-        fields.push_back(std::move(decl_parser.enum_obj));
-    }
-
-    if (!fields.empty() &&
-        gentle_check(TokenType::SEMICOLON) &&
-        dyn_cast<EnumDecl>(fields.back().get()) != nullptr) {
-        check_and_consume(TokenType::SEMICOLON);
-        return fields;
-    }
-
-    while (true) {
-        decl_parser.reset_declarator_parsing_state();
-        auto field_type = decl_parser.parse_declarator(base_type);
-        std::string field_name = decl_parser.name;
-        CppExplicitSpecifier member_explicit_specifier =
-            decl_parser.explicit_specifier;
-        bool member_explicit = member_explicit_specifier.effective_value;
-        auto declared_field_type = [&]() {
-            return QualType(field_type, decl_parser.qualifiers);
-        };
-        auto validate_mutable_data_member = [&]() {
-            if (!decl_parser.is_mutable) {
-                return;
-            }
-            QualType field_qual_type = declared_field_type();
-            if (field_qual_type.is_const()) {
-                error_custloc(
-                    "'mutable' and 'const' cannot be mixed",
-                    decl_parser.begin_loc);
-            }
-            auto canonical_field_type =
-                desugar_type(field_qual_type, ast_ctx.get());
-            if (canonical_field_type.as_shared<ReferenceType>()) {
-                error_custloc(
-                    "'mutable' cannot be applied to references",
-                    decl_parser.begin_loc);
-            }
-        };
-
-        // Parse attributes that appear right after the declarator.
-        auto field_attrs_before_colon = try_parse_attributes();
-
-        if (auto_type_utils::has_decltype_auto_type(field_type)) {
-            if (auto fn_type = dyn_cast_shared<FunctionType>(field_type)) {
-                if (!auto_type_utils::is_decltype_auto_placeholder(
-                        fn_type->ret_type.get_shared())) {
-                    error("'decltype(auto)' can only be used as a function return placeholder");
-                }
-            } else if (!auto_type_utils::is_decltype_auto_placeholder(field_type)) {
-                error("'decltype(auto)' cannot be used with pointers, references, arrays, or function declarators");
-            }
-        }
-
-        // In C++ record bodies, function declarators are methods/constructors, not fields.
-        if (is_cxx_mode_active() &&
-            is_parsing_cpp_record_body() &&
-            field_type &&
-            canonical_type_kind(field_type) == TypeKind::Function) {
-            if (decl_parser.is_mutable) {
-                error_custloc(
-                    "'mutable' cannot be applied to functions",
-                    decl_parser.begin_loc);
-            }
-            bool current_record_is_union =
-                !cxx_record_parse_stack_.empty() &&
-                cxx_record_parse_stack_.back().kind == CppRecordKind::Union;
-            std::string record_name =
-                !cxx_record_parse_stack_.empty()
-                    ? cxx_record_parse_stack_.back().name
-                    : std::string();
-            bool is_constructor_member = false;
-            auto base_record_type = dyn_cast_shared<ObjectType>(desugar_type(base_type));
-            bool looks_like_ctor_name =
-                field_name.empty() || field_name == record_name;
-            if (!record_name.empty() && looks_like_ctor_name && base_record_type) {
-                const TagDecl* base_decl = base_record_type->get_decl();
-                if (base_decl && base_decl->get_tag_name() == record_name) {
-                    is_constructor_member = true;
-                }
-            }
-
-            if (gentle_check(TokenType::COLON) && !is_constructor_member) {
-                error("member function declaration cannot be a bitfield");
-                return {};
-            }
-
-            auto capture_deferred_inline_body_tokens =
-                [&](auto* callable_decl, const char* missing_closing_brace_diag) {
-                if (!callable_decl) {
-                    return;
-                }
-                size_t body_begin_token_idx = get_token_idx();
-                if (gentle_check(TokenType::TRY_KW)) {
-                    skip_cpp_function_try_block_tokens(false);
-                } else {
-                    skip_balanced_token_sequence_tokens(
-                        TokenType::LEFT_BRACE,
-                        TokenType::RIGHT_BRACE,
-                        missing_closing_brace_diag);
-                }
-                size_t body_end_token_idx = get_token_idx();
-                callable_decl->set_deferred_inline_body_token_range(
-                    body_begin_token_idx, body_end_token_idx);
-            };
-
-            if (decl_parser.is_friend) {
-                if (declaration_leading_virtual) {
-                    error("'virtual' is not allowed on friend declarations");
-                }
-                if (member_explicit_specifier.is_present) {
-                    error("'explicit' is not allowed on friend declarations");
-                }
-                if (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-                    decl_parser.trailing_function_ref_qualifier != 0) {
-                    error("non-member function cannot have cv/ref qualifier");
-                }
-                validate_cpp_operator_function_declaration(
-                    decl_parser.name,
-                    false,
-                    false,
-                    t.loc);
-
-                auto friend_function = collect_->collect_function_declaration(
-                    decl_parser.name,
-                    field_type,
-                    StorageClass::NONE,
-                    decl_parser.is_inline,
-                    decl_parser.asm_label,
-                    t.loc,
-                    current_decl_language_linkage());
-                TemplateParameterList friend_abbreviated_template_parameters;
-                friend_function->parameters =
-                    build_member_param_decls(
-                        decl_parser.func_args,
-                        friend_function->type,
-                        &friend_abbreviated_template_parameters,
-                        t.loc);
-                if (!friend_abbreviated_template_parameters.empty()) {
-                    fail_cpp_future_work(
-                        "abbreviated friend function templates",
-                        "abbreviated_friend_function_template",
-                        t.loc);
-                }
-                friend_function->is_constexpr = decl_parser.is_constexpr;
-                friend_function->is_consteval = decl_parser.is_consteval;
-                if (friend_function->is_consteval) {
-                    friend_function->is_constexpr = true;
-                    friend_function->is_inline = true;
-                }
-                friend_function->trailing_requires_clause =
-                    std::move(decl_parser.trailing_requires_clause);
-                friend_function->explicit_specialization_arguments =
-                    decl_parser.explicit_specialization_arguments;
-                friend_function->has_explicit_specialization_argument_list =
-                    decl_parser.has_explicit_specialization_argument_list;
-
-                if (gentle_check(TokenType::ASSIGN)) {
-                    SrcLoc suffix_loc = current_token().loc;
-                    advance();
-                    if (gentle_check(TokenType::DELETE)) {
-                        friend_function->is_deleted = true;
-                        advance();
-                    } else if (gentle_check(TokenType::DEFAULT)) {
-                        friend_function->is_defaulted = true;
-                        advance();
-                    } else {
-                        fail_cpp_unsupported("function declaration suffix",
-                                             suffix_loc);
-                    }
-                }
-                friend_function->is_inline =
-                    cpp_in_class_definition_is_inline(
-                        friend_function->is_inline,
-                        friend_function->is_deleted ||
-                            friend_function->is_defaulted);
-
-                QualType granting_record_type = current_granting_record_type();
-                QualType friend_access_type = current_friend_access_record_type();
-
-                auto friend_decl = make_ast<FriendDecl>(
-                    *ast_ctx,
-                    std::move(friend_function),
-                    granting_record_type,
-                    CppFriendKind::Function,
-                    t.loc);
-                auto* friend_function_ptr = friend_decl->function_decl();
-                if (friend_function_ptr) {
-                    friend_function_ptr->friend_access_type =
-                        friend_access_type;
-                    apply_cpp_friend_namespace_prefix(friend_function_ptr);
-                }
-                if (friend_function_ptr &&
-                    friend_function_ptr->is_defaulted &&
-                    !is_defaultable_comparison_function(
-                        friend_function_ptr,
-                        granting_record_type,
-                        ast_ctx.get())) {
-                    error_custloc(
-                        "only comparison friend functions may be defaulted here",
-                        friend_function_ptr->location);
-                }
-
-                bool friend_has_inline_body = false;
-                if (gentle_check(TokenType::LEFT_BRACE) ||
-                    gentle_check(TokenType::TRY_KW)) {
-                    friend_has_inline_body = true;
-                    if (friend_function_ptr) {
-                        friend_function_ptr->is_inline = true;
-                    }
-                    capture_deferred_inline_body_tokens(
-                        friend_decl.get(),
-                        "expected '}' to close friend function body");
-                }
-
-                if (friend_function_ptr) {
-                    auto nearest_namespace_scope = [&]() {
-                        auto scope = collect_->collect_current_scope();
-                        while (scope &&
-                               !scope_flags_contains(
-                                   scope->flags,
-                                   ScopeFlags::FileScope) &&
-                               !scope_flags_contains(
-                                   scope->flags,
-                                   ScopeFlags::NamespaceScope)) {
-                            scope = scope->parent;
-                        }
-                        return scope ? scope : collect_->collect_current_scope();
-                    };
-                    auto friend_scope = nearest_namespace_scope();
-                    bool has_visible_matching_namespace_decl = false;
-                    for (const auto& candidate :
-                         LookupEngine::lookup_unqualified_function_candidates(
-                             friend_function_ptr->name,
-                             friend_scope,
-                             false)) {
-                        if (candidate &&
-                            candidate->type.equals_unqualified(
-                                QualType(friend_function_ptr->type))) {
-                            has_visible_matching_namespace_decl = true;
-                            break;
-                        }
-                    }
-                    bool is_definition =
-                        friend_function_ptr->is_deleted ||
-                        friend_function_ptr->is_defaulted ||
-                        friend_decl->has_deferred_inline_body();
-                    auto friend_sym = collect_->collect_declare_function_symbol(
-                        friend_scope,
-                        ast_ctx ? ast_ctx->global_tracker : nullptr,
-                        friend_function_ptr->name,
-                        QualType(friend_function_ptr->type),
-                        StorageClass::NONE,
-                        friend_function_ptr->is_constexpr,
-                        friend_function_ptr->is_consteval,
-                        friend_function_ptr->is_inline,
-                        is_definition,
-                        friend_function_ptr->location,
-                        friend_function_ptr->get_language_linkage(),
-                        false,
-                        friend_function_ptr->is_deleted,
-                        friend_function_ptr->is_defaulted,
-                        QualType(),
-                        std::nullopt,
-                        friend_function_ptr->trailing_requires_clause.get());
-                    if (friend_sym) {
-                        if (!friend_sym->friend_access_type) {
-                            friend_sym->friend_access_type =
-                                friend_access_type;
-                        }
-                        if (is_definition) {
-                            friend_sym->function_definition =
-                                friend_function_ptr;
-                        }
-                        friend_sym->function_trailing_requires_clause =
-                            friend_function_ptr->trailing_requires_clause.get();
-                        friend_sym->is_hidden_friend =
-                            !has_visible_matching_namespace_decl;
-                        register_function_default_arguments(
-                            friend_sym,
-                            friend_function_ptr,
-                            friend_function_ptr->location);
-                        merge_function_asm_label(
-                            decl_parser,
-                            friend_sym,
-                            friend_function_ptr->location);
-                    }
-                    friend_decl->function_symbol = std::move(friend_sym);
-                    ast_ctx->append_attrs(friend_function_ptr->node_id,
-                                          std::move(decl_parser.leading_attrs));
-                    ast_ctx->append_attrs(friend_function_ptr->node_id,
-                                          std::move(field_attrs_before_colon));
-                }
-                fields.push_back(std::move(friend_decl));
-
-                if (friend_has_inline_body) {
-                    return fields;
-                }
-
-                if (gentle_check(TokenType::COMMA)) {
-                    advance();
-                    continue;
-                }
-                check_and_consume(TokenType::SEMICOLON);
-                break;
-            }
-
-            if (member_explicit &&
-                !is_constructor_member &&
-                !decl_parser.is_conversion_function) {
-                error("'explicit' is only allowed on constructors and conversion functions");
-            }
-            if (decl_parser.is_conversion_function) {
-                auto method_fn_type = dyn_cast_shared<FunctionType>(field_type);
-                if (method_fn_type && !method_fn_type->parameters.empty()) {
-                    error("conversion function cannot have parameters");
-                }
-            }
-
-            if (is_constructor_member) {
-                if (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-                    decl_parser.trailing_function_ref_qualifier != 0) {
-                    error("constructor cannot have cv/ref qualifier");
-                }
-                if (declaration_leading_virtual) {
-                    error("constructor cannot be declared 'virtual'");
-                }
-                if (decl_parser.str_class == StorageClass::STATIC) {
-                    error("constructor cannot be declared 'static'");
-                }
-                std::vector<CppCtorInitializer> parsed_ctor_initializers;
-                if (gentle_check(TokenType::COLON)) {
-                    parsed_ctor_initializers =
-                        parse_cpp_ctor_mem_initializer_list(record_name);
-                }
-                bool ctor_is_deleted = false;
-                bool ctor_is_defaulted = false;
-                if (gentle_check(TokenType::ASSIGN)) {
-                    SrcLoc suffix_loc = current_token().loc;
-                    advance(); // '='
-                    if (gentle_check(TokenType::DEFAULT)) {
-                        ctor_is_defaulted = true;
-                        advance(); // 'default'
-                    } else if (gentle_check(TokenType::DELETE)) {
-                        ctor_is_deleted = true;
-                        advance(); // 'delete'
-                    } else {
-                        fail_cpp_unsupported("constructor declaration suffix",
-                                             suffix_loc);
-                    }
-                }
-
-                auto ctor_fn_type = dyn_cast_shared<FunctionType>(field_type);
-                if (!ctor_fn_type) {
-                    error("internal error: constructor declarator is not a function type");
-                    return {};
-                }
-                ctor_fn_type->ret_type = QualType(type_ctx->get_builtin(BuiltinTypes::Void));
-
-                bool has_inline_body = gentle_check(TokenType::LEFT_BRACE) ||
-                    gentle_check(TokenType::TRY_KW);
-                bool ctor_is_inline =
-                    cpp_in_class_definition_is_inline(
-                        decl_parser.is_inline,
-                        has_inline_body || ctor_is_deleted || ctor_is_defaulted);
-                TemplateParameterList ctor_abbreviated_template_parameters;
-                auto ctor_params = build_member_param_decls(
-                    decl_parser.func_args,
-                    field_type,
-                    &ctor_abbreviated_template_parameters,
-                    t.loc);
-                auto ctor_decl = make_ast<CppConstructorDecl>(
-                    *ast_ctx,
-                    record_name,
-                    field_type,
-                    std::move(ctor_params),
-                    nullptr,
-                    std::unordered_set<std::string>{},
-                    decl_parser.str_class,
-                    ctor_is_inline,
-                    member_explicit,
-                    t.loc);
-                ctor_decl->type = field_type;
-                ctor_decl->explicit_specifier =
-                    std::move(member_explicit_specifier);
-                ctor_decl->is_constexpr = decl_parser.is_constexpr;
-                ctor_decl->trailing_requires_clause =
-                    std::move(decl_parser.trailing_requires_clause);
-                ctor_decl->is_deleted = ctor_is_deleted;
-                ctor_decl->is_defaulted = ctor_is_defaulted;
-                ctor_decl->is_defaulted_on_first_declaration =
-                    ctor_is_defaulted;
-                ctor_decl->has_deferred_defaulted_body = ctor_is_defaulted;
-                ctor_decl->set_language_linkage(current_decl_language_linkage());
-                ctor_decl->ctor_initializers = std::move(parsed_ctor_initializers);
-                if (ctor_is_defaulted) {
-                    ctor_decl->body = make_ast<CompoundStmt>(
-                        *ast_ctx,
-                        std::vector<std::unique_ptr<Stmt>>{},
-                        t.loc);
-                }
-                if ((ctor_is_defaulted || ctor_is_deleted) &&
-                    !ctor_decl->ctor_initializers.empty()) {
-                    error("defaulted/deleted constructor cannot have a member initializer list");
-                }
-                if (!ctor_is_defaulted && !ctor_is_deleted &&
-                    !has_inline_body && !ctor_decl->ctor_initializers.empty()) {
-                    error("constructor with mem-initializer-list requires a function body");
-                }
-
-                std::string ctor_qualifier_prefix;
-                if (auto* existing_prefix =
-                        get_func_decl_cxx_qualifier_prefix(ctor_decl.get())) {
-                    ctor_qualifier_prefix = *existing_prefix;
-                }
-                if (has_inline_body) {
-                    capture_deferred_inline_body_tokens(
-                        ctor_decl.get(),
-                        "expected '}' to close constructor body");
-                }
-
-                std::string record_qualifier_prefix = current_cpp_record_qualifier_prefix();
-                ensure_namespace_qualifier_prefix(ctor_qualifier_prefix);
-                if (!record_qualifier_prefix.empty()) {
-                    if (!ctor_qualifier_prefix.empty()) {
-                        ctor_qualifier_prefix += "::";
-                    }
-                    ctor_qualifier_prefix += record_qualifier_prefix;
-                }
-                if (!ctor_qualifier_prefix.empty()) {
-                    set_func_decl_cxx_qualifier_prefix(
-                        ctor_decl.get(), ctor_qualifier_prefix);
-                }
-
-                if (!record_name.empty()) {
-                    const auto& record_frame = cxx_record_parse_stack_.back();
-                    auto owner_type =
-                        record_frame.semantic_owner
-                            ? record_frame.semantic_owner->get_record_type()
-                            : nullptr;
-                    if (!owner_type) {
-                        auto owner_type_raw =
-                            collect_->collect_lookup_tag_type(record_name, true);
-                        owner_type = dyn_cast_shared<ObjectType>(owner_type_raw);
-                    }
-                    if (owner_type) {
-                        QualType this_type(
-                            std::make_shared<PointerType>(QualType(owner_type)));
-                        auto this_param = collect_->collect_parameter_declaration(
-                            this_type, "this", nullptr, StorageClass::NONE, t.loc);
-                        ctor_decl->parameters.insert(
-                            ctor_decl->parameters.begin(), std::move(this_param));
-                        if (auto fn_type = dyn_cast_shared<FunctionType>(ctor_decl->type)) {
-                            fn_type->insert_parameter(0, this_type);
-                            fn_type->has_prototype = true;
-                        }
-                    }
-                }
-
-                ast_ctx->append_attrs(ctor_decl->node_id,
-                                      std::move(decl_parser.leading_attrs));
-                ast_ctx->append_attrs(ctor_decl->node_id,
-                                      std::move(field_attrs_before_colon));
-                auto* ctor_for_control_flow = ctor_decl.get();
-                std::unique_ptr<Decl> ctor_member = std::move(ctor_decl);
-                ctor_member = wrap_abbreviated_function_template_if_needed(
-                    std::move(ctor_member),
-                    std::move(ctor_abbreviated_template_parameters),
-                    t.loc,
-                    false);
-                fields.push_back(std::move(ctor_member));
-
-                if (ctor_for_control_flow &&
-                    !ctor_for_control_flow->is_defaulted &&
-                    !ctor_for_control_flow->is_deleted &&
-                    (ctor_for_control_flow->body != nullptr ||
-                     ctor_for_control_flow->has_deferred_inline_body())) {
-                    // In-class constructor definitions do not require a trailing semicolon.
-                    return fields;
-                }
-
-                if (ctor_is_deleted || ctor_is_defaulted) {
-                    check_and_consume(TokenType::SEMICOLON);
-                    break;
-                }
-
-                if (gentle_check(TokenType::COMMA)) {
-                    advance();
-                    continue;
-                }
-                if (lang_opts.implicit_int && gentle_check(TokenType::RIGHT_BRACE)) {
-                    diag_engine->report_warning(
-                        "missing ';' after class member declaration; assuming ';'",
-                        current_token().loc);
-                    break;
-                }
-                check_and_consume(TokenType::SEMICOLON);
-                break;
-            }
-
-            validate_cpp_operator_function_declaration(
-                decl_parser.name,
-                true,
-                decl_parser.str_class == StorageClass::STATIC,
-                t.loc);
-
-            bool method_is_virtual = declaration_leading_virtual;
-            bool method_is_override = false;
-            bool method_is_final = false;
-            bool method_is_pure = false;
-
-            while (gentle_check(TokenType::IDENTIFIER)) {
-                const std::string& spelling = current_token().value;
-                if (spelling == "override") {
-                    if (method_is_override) {
-                        error("duplicate 'override' specifier");
-                    }
-                    method_is_override = true;
-                    advance();
-                    continue;
-                }
-                if (spelling == "final") {
-                    if (method_is_final) {
-                        error("duplicate 'final' specifier");
-                    }
-                    method_is_final = true;
-                    advance();
-                    continue;
-                }
-                break;
-            }
-
-            if ((method_is_virtual || method_is_override || method_is_final) &&
-                decl_parser.str_class == StorageClass::STATIC) {
-                error("static member function cannot be declared virtual/override/final");
-            }
-            if (decl_parser.str_class == StorageClass::STATIC &&
-                (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-                 decl_parser.trailing_function_ref_qualifier != 0)) {
-                error("static member function cannot have cv/ref qualifier");
-            }
-
-            if (gentle_check(TokenType::ASSIGN) &&
-                peek_token().type == TokenType::INTEGER_CONST &&
-                peek_token().value == "0") {
-                SrcLoc pure_loc = current_token().loc;
-                advance(); // '='
-                if (!gentle_check(TokenType::INTEGER_CONST) ||
-                    current_token().value != "0") {
-                    error_custloc(
-                        "pure-specifier must be '= 0' in member declaration",
-                        pure_loc);
-                }
-                method_is_pure = true;
-                advance(); // '0'
-            }
-
-            if (method_is_pure && decl_parser.str_class == StorageClass::STATIC) {
-                error("static member function cannot be pure");
-            }
-            if (current_record_is_union) {
-                if (method_is_virtual) {
-                    error_custloc(
-                        "union member function cannot be declared 'virtual'",
-                        t.loc);
-                    method_is_virtual = false;
-                }
-                if (method_is_override) {
-                    error_custloc(
-                        "union member function cannot be declared 'override'",
-                        t.loc);
-                    method_is_override = false;
-                }
-                if (method_is_final) {
-                    error_custloc(
-                        "union member function cannot be declared 'final'",
-                        t.loc);
-                    method_is_final = false;
-                }
-                if (method_is_pure) {
-                    error_custloc(
-                        "union member function cannot be pure",
-                        t.loc);
-                    method_is_pure = false;
-                }
-            }
-
-            bool has_inline_body = gentle_check(TokenType::LEFT_BRACE) ||
-                gentle_check(TokenType::TRY_KW);
-            if (method_is_pure && has_inline_body) {
-                error("pure virtual function cannot have a function body");
-            }
-            std::unique_ptr<CppMethodDecl> cpp_method;
-            std::string method_qualifier_prefix;
-            TemplateParameterList method_abbreviated_template_parameters;
-
-            if (has_inline_body) {
-                auto method_params =
-                    build_member_param_decls(
-                        decl_parser.func_args,
-                        field_type,
-                        &method_abbreviated_template_parameters,
-                        t.loc);
-                bool method_is_inline =
-                    cpp_in_class_definition_is_inline(
-                        decl_parser.is_inline,
-                        has_inline_body);
-
-                cpp_method = make_ast<CppMethodDecl>(
-                    *ast_ctx,
-                    decl_parser.name,
-                    field_type,
-                    std::move(method_params),
-                    nullptr,
-                    std::unordered_set<std::string>{},
-                    decl_parser.str_class,
-                    method_is_inline,
-                    t.loc);
-                cpp_method->type = field_type;
-                cpp_method->is_constexpr = decl_parser.is_constexpr;
-                cpp_method->is_consteval = decl_parser.is_consteval;
-                cpp_method->is_deleted = false;
-                cpp_method->is_defaulted = false;
-                cpp_method->is_defaulted_on_first_declaration = false;
-                cpp_method->is_conversion_function =
-                    decl_parser.is_conversion_function;
-                cpp_method->is_explicit_conversion = member_explicit;
-                cpp_method->explicit_specifier = member_explicit_specifier;
-                cpp_method->conversion_target_type =
-                    decl_parser.conversion_target_type;
-                cpp_method->is_virtual = method_is_virtual;
-                cpp_method->is_override = method_is_override;
-                cpp_method->is_final = method_is_final;
-                cpp_method->is_pure = method_is_pure;
-                cpp_method->set_language_linkage(current_decl_language_linkage());
-                cpp_method->trailing_requires_clause =
-                    std::move(decl_parser.trailing_requires_clause);
-
-                if (auto* existing_prefix =
-                        get_func_decl_cxx_qualifier_prefix(cpp_method.get())) {
-                    method_qualifier_prefix = *existing_prefix;
-                }
-
-                capture_deferred_inline_body_tokens(
-                    cpp_method.get(),
-                    "expected '}' to close class member function body");
-            } else {
-                auto parsed_method_decl = parse_function(
-                    &decl_parser,
-                    t.loc,
-                    nullptr,
-                    &method_abbreviated_template_parameters);
-                auto parsed_method =
-                    std::unique_ptr<FuncDecl>(dyn_cast<FuncDecl>(parsed_method_decl.release()));
-                if (!parsed_method) {
-                    error("internal error: expected function declaration for class member method");
-                    return {};
-                }
-
-                cpp_method = std::make_unique<CppMethodDecl>(
-                    parsed_method->name,
-                    parsed_method->type,
-                    std::move(parsed_method->parameters),
-                    std::move(parsed_method->body),
-                    std::move(parsed_method->stmt_labels),
-                    parsed_method->storage_class,
-                    cpp_in_class_definition_is_inline(
-                        parsed_method->is_inline != 0,
-                        parsed_method->is_deleted ||
-                            parsed_method->is_defaulted),
-                    parsed_method->location);
-                cpp_method->node_id = parsed_method->node_id;
-                cpp_method->scope = parsed_method->scope;
-                cpp_method->type = parsed_method->type;
-                cpp_method->is_constexpr = parsed_method->is_constexpr;
-                cpp_method->is_consteval = parsed_method->is_consteval;
-                cpp_method->is_deleted = parsed_method->is_deleted;
-                cpp_method->is_defaulted = parsed_method->is_defaulted;
-                cpp_method->is_defaulted_on_first_declaration =
-                    parsed_method->is_defaulted;
-                cpp_method->has_deferred_defaulted_body =
-                    cpp_method->is_defaulted;
-                cpp_method->is_conversion_function =
-                    decl_parser.is_conversion_function;
-                cpp_method->is_explicit_conversion = member_explicit;
-                cpp_method->explicit_specifier = member_explicit_specifier;
-                cpp_method->conversion_target_type =
-                    decl_parser.conversion_target_type;
-                cpp_method->is_virtual = method_is_virtual;
-                cpp_method->is_override = method_is_override;
-                cpp_method->is_final = method_is_final;
-                cpp_method->is_pure = method_is_pure;
-                cpp_method->set_language_linkage(parsed_method->get_language_linkage());
-                cpp_method->trailing_requires_clause =
-                    std::move(parsed_method->trailing_requires_clause);
-                if (parsed_method->asm_label) {
-                    cpp_method->set_asm_label(*parsed_method->asm_label);
-                }
-
-                if (auto* existing_prefix =
-                        get_func_decl_cxx_qualifier_prefix(parsed_method.get())) {
-                    method_qualifier_prefix = *existing_prefix;
-                }
-                set_func_decl_cxx_qualifier_prefix(parsed_method.get(), std::nullopt);
-            }
-
-            QualType defaulted_method_owner_type;
-            if (!cxx_record_parse_stack_.empty()) {
-                const auto& record_frame = cxx_record_parse_stack_.back();
-                defaulted_method_owner_type = record_frame.current_instantiation_type;
-                if (!defaulted_method_owner_type) {
-                    defaulted_method_owner_type =
-                        record_frame.semantic_owner
-                            ? QualType(record_frame.semantic_owner->get_record_type())
-                            : QualType();
-                }
-                if (!defaulted_method_owner_type && !record_frame.name.empty()) {
-                    auto owner_type_raw = collect_->collect_lookup_tag_type(
-                        record_frame.name,
-                        true);
-                    auto owner_object_type =
-                        dyn_cast_shared<ObjectType>(owner_type_raw);
-                    if (owner_object_type) {
-                        defaulted_method_owner_type = QualType(owner_object_type);
-                    }
-                }
-            }
-            if (cpp_method->is_defaulted &&
-                !is_defaultable_method(
-                    cpp_method.get(),
-                    defaulted_method_owner_type,
-                    ast_ctx.get())) {
-                error_custloc(
-                    "only comparison operators and copy/move assignment operators may be defaulted here",
-                    cpp_method->location);
-            }
-
-            std::string record_qualifier_prefix = current_cpp_record_qualifier_prefix();
-            ensure_namespace_qualifier_prefix(method_qualifier_prefix);
-            if (!record_qualifier_prefix.empty()) {
-                if (!method_qualifier_prefix.empty()) {
-                    method_qualifier_prefix += "::";
-                }
-                method_qualifier_prefix += record_qualifier_prefix;
-            }
-            if (!method_qualifier_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(cpp_method.get(),
-                                                   method_qualifier_prefix);
-            }
-
-            // Lower non-static methods with an explicit object parameter.
-            bool is_static_method = cpp_method->storage_class == StorageClass::STATIC;
-            bool is_operator_new_delete =
-                cpp_method->name == "operatornew" ||
-                cpp_method->name == "operatornew[]" ||
-                cpp_method->name == "operatordelete" ||
-                cpp_method->name == "operatordelete[]";
-            if (cpp_method->is_consteval && is_operator_new_delete) {
-                error_custloc(
-                    "allocation/deallocation function cannot be consteval",
-                    cpp_method->location);
-            }
-            bool has_implicit_object_parameter =
-                !is_static_method && !is_operator_new_delete;
-            if (has_implicit_object_parameter &&
-                !cxx_record_parse_stack_.empty() &&
-                !cxx_record_parse_stack_.back().name.empty()) {
-                const auto& record_frame = cxx_record_parse_stack_.back();
-                auto owner_type =
-                    record_frame.semantic_owner
-                        ? record_frame.semantic_owner->get_record_type()
-                        : nullptr;
-                if (!owner_type) {
-                    auto owner_type_raw = collect_->collect_lookup_tag_type(
-                        record_frame.name,
-                        true);
-                    owner_type = dyn_cast_shared<ObjectType>(owner_type_raw);
-                }
-                if (owner_type) {
-                    uint8_t this_object_quals =
-                        static_cast<uint8_t>(
-                            decl_parser.trailing_function_cv_qualifiers &
-                            static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
-                    QualType qualified_owner_type(owner_type, this_object_quals);
-                    QualType this_type(
-                        std::make_shared<PointerType>(qualified_owner_type));
-                    auto this_param = collect_->collect_parameter_declaration(
-                        this_type, "this", nullptr, StorageClass::NONE, t.loc);
-                    cpp_method->parameters.insert(
-                        cpp_method->parameters.begin(), std::move(this_param));
-                    auto fn_type = dyn_cast_shared<FunctionType>(cpp_method->type);
-                    if (fn_type) {
-                        fn_type->insert_parameter(0, this_type);
-                        fn_type->has_prototype = true;
-                    }
-                }
-            }
-
-            ast_ctx->append_attrs(cpp_method->node_id,
-                                  std::move(decl_parser.leading_attrs));
-            ast_ctx->append_attrs(cpp_method->node_id,
-                                  std::move(field_attrs_before_colon));
-            auto* method_for_control_flow = cpp_method.get();
-            std::unique_ptr<Decl> method_member = std::move(cpp_method);
-            method_member = wrap_abbreviated_function_template_if_needed(
-                std::move(method_member),
-                std::move(method_abbreviated_template_parameters),
-                t.loc,
-                false);
-            fields.push_back(std::move(method_member));
-
-            if (method_for_control_flow &&
-                (method_for_control_flow->body != nullptr ||
-                 method_for_control_flow->has_deferred_inline_body())) {
-                // In-class method definitions do not require a trailing semicolon.
-                return fields;
-            }
-
-            if (gentle_check(TokenType::COMMA)) {
-                advance();
-                continue;
-            }
-            if (lang_opts.implicit_int && gentle_check(TokenType::RIGHT_BRACE)) {
-                diag_engine->report_warning(
-                    "missing ';' after class member declaration; assuming ';'",
-                    current_token().loc);
-                break;
-            }
-            check_and_consume(TokenType::SEMICOLON);
-            break;
-        }
-
-        if (declaration_leading_virtual) {
-            error("'virtual' can only be specified for class member functions");
-        }
-
-        if (member_explicit_specifier.is_present) {
-            error("'explicit' is only allowed on constructors and conversion functions");
-        }
-
-        bool in_cpp_record_body =
-            is_cxx_mode_active() &&
-            is_parsing_cpp_record_body() &&
-            !cxx_record_parse_stack_.empty();
-        bool in_cpp_named_class_body =
-            in_cpp_record_body &&
-            cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
-        bool is_typedef_member_decl =
-            in_cpp_record_body &&
-            decl_parser.str_class == StorageClass::TYPEDEF;
-        bool is_static_data_member_decl =
-            in_cpp_named_class_body &&
-            decl_parser.str_class == StorageClass::STATIC;
-        if (decl_parser.is_mutable && is_static_data_member_decl) {
-            error_custloc(
-                "'mutable' cannot be applied to static data members",
-                decl_parser.begin_loc);
-        }
-        if (in_cpp_named_class_body &&
-            decl_parser.str_class != StorageClass::NONE &&
-            decl_parser.str_class != StorageClass::STATIC &&
-            decl_parser.str_class != StorageClass::TYPEDEF) {
-            error("invalid storage class specifier in class member declaration");
-        }
-
-        if (is_typedef_member_decl) {
-            if (decl_parser.is_mutable) {
-                error_custloc(
-                    "'mutable' cannot be applied to typedef declarations",
-                    decl_parser.begin_loc);
-            }
-            handle_typedef_declarator(
-                decl_parser,
-                t,
-                field_type,
-                field_attrs_before_colon,
-                decl_parser.is_constexpr,
-                decl_parser.is_consteval,
-                fields);
-
-            if (gentle_check(TokenType::COMMA)) {
-                advance();
-                continue;
-            }
-            if (lang_opts.implicit_int && gentle_check(TokenType::RIGHT_BRACE)) {
-                diag_engine->report_warning(
-                    "missing ';' after class member declaration; assuming ';'",
-                    current_token().loc);
-                break;
-            }
-            check_and_consume(TokenType::SEMICOLON);
-            break;
-        }
-
-        if (decl_parser.is_consteval) {
-            error("'consteval' can only be applied to function declarations");
-        }
-
-        auto parse_default_member_initializer =
-            [&](QualType member_type,
-                SrcLoc member_loc,
-                CppDefaultMemberInitializerKind& initializer_kind)
-                -> std::unique_ptr<Expr> {
-            initializer_kind = CppDefaultMemberInitializerKind::None;
-            if (!is_cxx_mode_active()) {
-                return nullptr;
-            }
-
-            std::unique_ptr<Expr> initializer;
-            if (gentle_check_and_consume(TokenType::ASSIGN)) {
-                initializer_kind = CppDefaultMemberInitializerKind::Equal;
-                if (gentle_check(TokenType::LEFT_BRACE)) {
-                    initializer = parse_init_list();
-                } else {
-                    initializer = parse_assignment_expression();
-                }
-            } else if (gentle_check(TokenType::LEFT_BRACE)) {
-                initializer_kind = CppDefaultMemberInitializerKind::Brace;
-                initializer = parse_init_list();
-            }
-
-            if (!initializer) {
-                return nullptr;
-            }
-            return collect_->collect_member_initializer_expression(
-                std::move(initializer),
-                member_type,
-                member_loc);
-        };
-
-        // Check for bitfield syntax: field_name : width or just : width (anonymous)
-        if (gentle_check_and_consume(TokenType::COLON)) {
-            if (is_static_data_member_decl) {
-                error("static data member declaration cannot be a bitfield");
-            }
-            validate_mutable_data_member();
-            auto width_expr = parse_conditional_expression();
-            auto width_val = try_evaluate_with_consteval_compat(
-                width_expr.get(), ConstEvalMode::c_ice());
-            if (!width_val.has_value()) {
-                error("Bitfield width must be a constant expression");
-                return {};
-            }
-            int64_t bitfield_width = *width_val;
-            if (bitfield_width < 0) {
-                error("Bitfield width cannot be negative");
-                return {};
-            }
-            // Zero-width bitfield must be anonymous
-            if (bitfield_width == 0 && !field_name.empty()) {
-                error("Zero-width bitfield must be anonymous (no name)");
-                return {};
-            }
-
-            // GCC accepts attributes after the bitfield width.
-            auto field_attrs_after_width = try_parse_attributes();
-            QualType member_type(field_type, decl_parser.qualifiers);
-            CppDefaultMemberInitializerKind default_initializer_kind =
-                CppDefaultMemberInitializerKind::None;
-            auto default_initializer =
-                parse_default_member_initializer(
-                    member_type,
-                    t.loc,
-                    default_initializer_kind);
-
-            auto field_decl = collect_->collect_field_declaration(
-                member_type,
-                field_name,
-                static_cast<uint32_t>(bitfield_width),
-                t.loc);
-            if (auto* parsed_field = dyn_cast<FieldDecl>(field_decl.get())) {
-                parsed_field->is_mutable = decl_parser.is_mutable;
-                parsed_field->default_member_initializer =
-                    std::move(default_initializer);
-                parsed_field->default_member_initializer_kind =
-                    default_initializer_kind;
-            }
-            ast_ctx->append_attrs(field_decl->node_id, std::move(decl_parser.leading_attrs));
-            ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_before_colon));
-            ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_after_width));
-            fields.push_back(std::move(field_decl));
-        } else {
-            if (is_static_data_member_decl) {
-                if (field_name.empty()) {
-                    error("static data member declaration requires an identifier");
-                }
-                if (decl_parser.is_thread_local) {
-                    error("thread-local storage class is not supported on class static data members");
-                }
-                if (decl_parser.asm_label.has_value()) {
-                    error("asm label on class static data member declarations is not supported");
-                }
-
-                QualType static_member_type(field_type, decl_parser.qualifiers);
-                std::unique_ptr<Expr> static_member_init;
-                VariableInitializationKind initialization_kind =
-                    VariableInitializationKind::None;
-                bool is_cxx_object_decl =
-                    is_cxx_mode_active() &&
-                    can_parse_cxx_object_initializer_syntax(static_member_type);
-                if (gentle_check_and_consume(TokenType::ASSIGN)) {
-                    if (gentle_check(TokenType::LEFT_BRACE)) {
-                        initialization_kind = VariableInitializationKind::CopyList;
-                        static_member_init = parse_init_list();
-                    } else {
-                        initialization_kind = VariableInitializationKind::Copy;
-                        static_member_init = parse_assignment_expression();
-                    }
-                } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_PAREN)) {
-                    initialization_kind = VariableInitializationKind::Direct;
-                    static_member_init = parse_paren_init_list();
-                } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
-                    initialization_kind = VariableInitializationKind::DirectList;
-                    static_member_init = parse_init_list();
-                }
-
-                auto static_member_decl_base = collect_->collect_variable_declaration(
-                    static_member_type,
-                    field_name,
-                    std::move(static_member_init),
-                    nullptr,
-                    decl_parser.str_class,
-                    {decl_parser.is_constexpr, decl_parser.is_inline,
-                     collect_->collect_is_file_scope(), true, false,
-                     decl_parser.is_thread_local, decl_parser.is_block_byref,
-                     initialization_kind, false, false},
-                    t.loc,
-                    current_decl_language_linkage());
-                auto* static_member_decl =
-                    dyn_cast<VariableDecl>(static_member_decl_base.get());
-                if (!static_member_decl) {
-                    error("internal error: expected VariableDecl for class static data member");
-                }
-                static_member_decl->is_thread_local = decl_parser.is_thread_local;
-                static_member_decl->set_asm_label(decl_parser.asm_label);
-                ast_ctx->append_attrs(static_member_decl->node_id,
-                                      std::move(decl_parser.leading_attrs));
-                ast_ctx->append_attrs(static_member_decl->node_id,
-                                      std::move(field_attrs_before_colon));
-                fields.push_back(std::move(static_member_decl_base));
-
-                if (gentle_check(TokenType::COMMA)) {
-                    advance();
-                    continue;
-                }
-                if (lang_opts.implicit_int && gentle_check(TokenType::RIGHT_BRACE)) {
-                    diag_engine->report_warning(
-                        "missing ';' after class member declaration; assuming ';'",
-                        current_token().loc);
-                    break;
-                }
-                check_and_consume(TokenType::SEMICOLON);
-                break;
-            }
-            // Not a bitfield - regular field
-            validate_mutable_data_member();
-            // Check if we got a name - allow anonymous struct/union fields
-            if (field_name.empty()) {
-                auto obj_type = dyn_cast_shared<ObjectType>(field_type);
-                if (!obj_type || obj_type->isIncomplete()) {
-                    error("Anonymous struct/union fields must be a complete struct or union type");
-                    return {};
-                }
-            }
-            QualType member_type(field_type, decl_parser.qualifiers);
-            CppDefaultMemberInitializerKind default_initializer_kind =
-                CppDefaultMemberInitializerKind::None;
-            auto default_initializer =
-                parse_default_member_initializer(
-                    member_type,
-                    t.loc,
-                    default_initializer_kind);
-            auto field_decl = collect_->collect_field_declaration(
-                member_type,
-                field_name,
-                t.loc);
-            if (auto* parsed_field = dyn_cast<FieldDecl>(field_decl.get())) {
-                parsed_field->is_mutable = decl_parser.is_mutable;
-                parsed_field->default_member_initializer =
-                    std::move(default_initializer);
-                parsed_field->default_member_initializer_kind =
-                    default_initializer_kind;
-            }
-            ast_ctx->append_attrs(field_decl->node_id, std::move(decl_parser.leading_attrs));
-            ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_before_colon));
-            fields.push_back(std::move(field_decl));
-        }
-
-        if (gentle_check(TokenType::COMMA)) {
-            advance();
-            continue;
-        }
-        if (lang_opts.implicit_int && gentle_check(TokenType::RIGHT_BRACE)) {
-            // GNU permissive recovery: allow missing ';' at end of field decl.
-            diag_engine->report_warning(
-                "missing ';' after struct/union field declaration; assuming ';'",
-                current_token().loc);
-            break;
-        }
-        check_and_consume(TokenType::SEMICOLON);
-        break;
-    }
-    return fields;
-}
-
-// Parse struct specifier: struct tag { fields } or struct tag
-std::unique_ptr<Decl> Parser::parse_struct_specifier() {
-    Token struct_tok = current_token();
-    bool isUnion = false;
-    if (gentle_check(TokenType::UNION)) {
-        isUnion = true;
-        check_and_consume(TokenType::UNION);
-    } else {
-        check_and_consume(TokenType::STRUCT);
-    }
-
-    std::string tag;
-    bool has_tag = false;
-    auto read_record_state = [&](const ObjectDecl* record_decl) -> RecordSemanticState {
-        RecordSemanticState state;
-        if (!record_decl) {
-            return state;
-        }
-        const RecordSemanticState* cached =
-            collect_ ? collect_->query_lookup_record_semantics(record_decl)
-                     : record_semantics_cache_lookup(record_decl);
-        if (cached) {
-            state = *cached;
-        }
-        return state;
-    };
-    auto write_record_state = [&](const ObjectDecl* record_decl, RecordSemanticState state) {
-        if (collect_) {
-            collect_->query_publish_record_semantics(record_decl,
-                                                     std::move(state));
-            return;
-        }
-        record_semantics_cache_set(ast_ctx.get(), record_decl, std::move(state));
-    };
-    auto extract_record_decl = [&](TagDecl* existing_tag_decl,
-                                   const std::string& existing_tag) -> ObjectDecl* {
-        auto* existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
-        if (!existing_obj_decl) {
-            error("tag '" + existing_tag + "' was previously declared with a different kind");
-        }
-        auto existing_obj_type = existing_obj_decl ? existing_obj_decl->get_record_type() : nullptr;
-        if (!existing_obj_type) {
-            error("tag '" + existing_tag + "' was previously declared with a different kind");
-        }
-        return existing_obj_decl;
-    };
-    auto copy_record_decl_state = [&](const ObjectDecl* src, ObjectDecl* dst) {
-        if (!src || !dst) {
-            return;
-        }
-        const RecordSemanticState* src_state =
-            collect_ ? collect_->query_lookup_record_semantics(src)
-                     : record_semantics_cache_lookup(src);
-        if (src_state) {
-            write_record_state(dst, *src_state);
-        }
-    };
-
-    // Parse attributes after struct/union keyword (e.g., struct __attribute__((packed)) S { ... })
-    auto pre_attrs = try_parse_attributes();
-    auto has_packed_attr = [](const std::vector<ParsedAttribute>& attrs) {
-        for (const auto& attr : attrs) {
-            if (attr.canonical_name() == "packed") {
+            bool starts_constructor =
+                !tag.empty() &&
+                peek(structor_name_offset).type == TokenType::IDENTIFIER &&
+                peek(structor_name_offset).value == tag &&
+                structor_suffix_matches(structor_name_offset + 1);
+            bool starts_destructor =
+                !tag.empty() &&
+                peek(structor_name_offset).type == TokenType::BITWISE_NOT &&
+                peek(structor_name_offset + 1).type == TokenType::IDENTIFIER &&
+                peek(structor_name_offset + 1).value == tag &&
+                structor_suffix_matches(structor_name_offset + 2);
+            if (!starts_constructor && !starts_destructor) {
+                return false;
+            }
+
+            ParsedSpecialMemberPrefix prefix =
+                parse_special_member_prefix(leading_attrs);
+            collect::DeclFlags& flags = prefix.flags;
+            ParsedExplicitSpecifier& explicit_specifier =
+                prefix.explicit_specifier;
+
+            for (size_t index = 0; index < structor_parentheses; ++index) {
+                consume();
+            }
+            bool is_destructor = match(TokenType::BITWISE_NOT);
+            if (is_destructor && flags.is_consteval) {
+                diagnose(DiagnosticLevel::Error,
+                         "a destructor cannot be declared 'consteval'",
+                         loc_for_index(member_begin));
+            }
+            if (starts_constructor && leading_virtual) {
+                diagnose(DiagnosticLevel::Error,
+                         "a constructor cannot be declared 'virtual'",
+                         loc_for_index(member_begin));
+            }
+            if (prefix.invalid_static) {
+                diagnose(DiagnosticLevel::Error,
+                         starts_constructor
+                             ? "a constructor cannot be declared 'static'"
+                             : "a destructor cannot be declared 'static'",
+                         loc_for_index(member_begin));
+            }
+            size_t name_begin = current_raw_index();
+            if (!is_identifier_token(current().type)) {
+                diagnose(DiagnosticLevel::Error, "expected special member name", current_loc());
+                skip_until_statement_boundary();
                 return true;
             }
-        }
-        return false;
-    };
-    auto has_transparent_union_attr = [](const std::vector<ParsedAttribute>& attrs) {
-        for (const auto& attr : attrs) {
-            if (attr.canonical_name() == "transparent_union") {
+            std::string member_name = is_destructor ? "~" + std::string(current().value) : std::string(current().value);
+            SrcLoc member_loc = current().loc;
+            consume();
+            LayoutAttrs name_attrs = parse_layout_attributes();
+            if (structor_parentheses != 0) {
+                for (size_t index = 0; index < structor_parentheses;
+                     ++index) {
+                    if (!match(TokenType::RIGHT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected ')' around special member name",
+                                 current_loc());
+                        break;
+                    }
+                }
+            }
+            NodeId name_node = make_node(NodeKind::Name,
+                                         name_begin,
+                                         last_consumed_raw_end(),
+                                         {},
+                                         text_payload(member_name));
+            std::vector<NodeId> member_children = prefix.attrs.syntax;
+            member_children.push_back(name_node);
+            member_children.insert(member_children.end(),
+                                   name_attrs.syntax.begin(),
+                                   name_attrs.syntax.end());
+
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error, "expected parameter list in special member declaration", current_loc());
+                skip_until_statement_boundary();
                 return true;
             }
-        }
-        return false;
-    };
-    auto max_aligned_attr = [](const std::vector<ParsedAttribute>& attrs) -> size_t {
-        size_t best = 0;
-        for (const auto& attr : attrs) {
-            if (attr.canonical_name() != "aligned") {
-                continue;
+            bool is_variadic = false;
+            std::vector<ParsedParam> params = parse_parameter_list(
+                false,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberParameter),
+                &is_variadic);
+            collect::Session::TemplateInfo abbreviated_info;
+            DeclarationParser abbreviated_invention(*this);
+            abbreviated_invention.abbreviated_template_target =
+                &abbreviated_info;
+            for (size_t parameter_index = 0;
+                 parameter_index < params.size();
+                 ++parameter_index) {
+                ParsedParam& param = params[parameter_index];
+                ParsedDeclarator parameter;
+                parameter.type = param.type;
+                parameter.type_ref = param.type_ref;
+                parameter.loc = param.loc;
+                rewrite_abbreviated_function_parameter(
+                    abbreviated_invention,
+                    parameter,
+                    param.is_parameter_pack,
+                    static_cast<uint32_t>(parameter_index),
+                    param.abbreviated_type_constraints,
+                    param.loc);
+                param.type = parameter.type;
+                param.type_ref = parameter.type_ref;
             }
-            if (attr.args.empty()) {
-                continue;
+            bool is_abbreviated_template = !abbreviated_info
+                .invented_function_parameters.empty();
+            if (is_abbreviated_template &&
+                !lang_opts_.is_cxx20_or_later()) {
+                diagnose(DiagnosticLevel::Error,
+                         "abbreviated function templates require C++20",
+                         member_loc);
             }
-            if (attr.args[0].kind != AttributeArg::Kind::INTEGER ||
-                attr.args[0].int_value <= 0) {
-                continue;
+            if (is_destructor && is_abbreviated_template) {
+                diagnose(DiagnosticLevel::Error,
+                         "a destructor cannot be an abbreviated function template",
+                         member_loc);
+                is_abbreviated_template = false;
             }
-            size_t align = static_cast<size_t>(attr.args[0].int_value);
-            if (align > best) {
-                best = align;
-            }
-        }
-        return best;
-    };
-
-    // Check for tag name
-    if (gentle_check(TokenType::IDENTIFIER)) {
-        tag = current_token().value;
-        has_tag = true;
-        advance();
-    }
-
-    // Check for struct body
-    if (gentle_check(TokenType::LEFT_BRACE)) {
-        if (has_tag && collect_) {
-            if (auto* existing_tag_decl = collect_->collect_lookup_tag_decl(tag, false)) {
-                auto* existing_obj_decl = extract_record_decl(existing_tag_decl, tag);
-                auto existing_obj = existing_obj_decl->get_record_type();
-                if (existing_obj->is_union != isUnion) {
-                    error("tag '" + tag + "' was previously declared as a different kind");
+            std::vector<cir::TypeRef> param_types;
+            std::vector<uint8_t> parameter_pack_flags;
+            bool has_parameter_pack = false;
+            param_types.reserve(params.size());
+            parameter_pack_flags.reserve(params.size());
+            for (const ParsedParam& param : params) {
+                if (param.syntax != InvalidNodeId) {
+                    member_children.push_back(param.syntax);
                 }
-            } else {
-                auto placeholder_type =
-                    std::make_shared<ObjectType>(tag, isUnion, true);
-                auto placeholder_decl = collect_->collect_record_declaration(
-                    tag,
-                    placeholder_type,
-                    isUnion,
-                    struct_tok.loc);
-                if (placeholder_decl) {
-                    write_record_state(placeholder_decl.get(), RecordSemanticState{});
-                    collect_->collect_add_tag_decl(tag, placeholder_decl.get());
-                    // Keep parser-time placeholder tags alive for decl-context
-                    // lookups until the completed definition replaces them.
-                    cpp_transient_semantic_decls_.push_back(
-                        std::move(placeholder_decl));
+                if (param.is_parameter_pack_expansion_sentinel) {
+                    continue;
+                }
+                param_types.push_back(param.type_ref);
+                uint8_t pack_flag = param.is_parameter_pack ? 1 : 0;
+                parameter_pack_flags.push_back(pack_flag);
+                has_parameter_pack = has_parameter_pack || pack_flag != 0;
+            }
+            if (!has_parameter_pack) {
+                parameter_pack_flags.clear();
+            }
+            if (is_destructor &&
+                (!param_types.empty() || is_variadic)) {
+                diagnose(DiagnosticLevel::Error,
+                         "destructor declaration cannot have parameters",
+                         member_loc);
+            }
+
+            ParsedRecordExceptionSpec exception_spec =
+                parse_special_member_exception_spec(member_children);
+
+            cir::TypeRef void_type =
+                collect_session_.type_ref(collect_session_.file().builtin_type(cir::BuiltinTypeKind::Void));
+            cir::TypeId function_type =
+                collect_session_.function_type(
+                    void_type,
+                    param_types,
+                    is_variadic,
+                    true,
+                    false,
+                    std::move(exception_spec.spec),
+                    parameter_pack_flags);
+
+            collect::RecordMethodInput method;
+            method.name = member_name;
+            method.type = function_type;
+            method.params = param_inputs_from_parsed_params(
+                params,
+                /*move_runtime_fragments=*/false);
+            method.loc = member_loc;
+            method.declared_access = current_access;
+            method.flags = flags;
+            method.attrs = prefix.attrs.attrs;
+            method.attrs.append(name_attrs.attrs);
+            method.is_virtual = leading_virtual && is_destructor;
+            method.is_constructor = !is_destructor;
+            method.is_destructor = is_destructor;
+            method.is_function_template = is_abbreviated_template;
+            method.has_explicit_exception_spec =
+                exception_spec.has_explicit;
+            method.has_deferred_noexcept_operand = exception_spec.deferred;
+            method.noexcept_operand_begin = exception_spec.operand_begin;
+            method.noexcept_operand_end = exception_spec.operand_end;
+            method.noexcept_operand_loc = exception_spec.operand_loc;
+            method.noexcept_declaration_context =
+                exception_spec.declaration_context;
+            method.noexcept_lookup_generation =
+                exception_spec.lookup_generation;
+            method.is_explicit = prefix.is_explicit();
+            method.explicit_specifier = explicit_specifier.kind;
+            method.explicit_expression_begin =
+                explicit_specifier.expression_begin;
+            method.explicit_expression_end = explicit_specifier.expression_end;
+            method.explicit_value_expression =
+                explicit_specifier.value_expression;
+            method.explicit_declaration_context =
+                explicit_specifier.declaration_context;
+            method.explicit_lookup_generation =
+                explicit_specifier.lookup_generation;
+            if (is_destructor && explicit_specifier.present()) {
+                diagnose(DiagnosticLevel::Error,
+                         "a destructor cannot have an explicit specifier",
+                         explicit_specifier.loc);
+            }
+            size_t method_index = methods.size();
+            size_t trailing_requires_constraint_begin = 0;
+            size_t trailing_requires_constraint_end = 0;
+            std::optional<collect::Session::NormalizedConstraint>
+                trailing_requires_normal_form;
+            if (match(TokenType::REQUIRES_KW)) {
+                SrcLoc requires_loc = last_consumed_loc();
+                std::optional<bool> constraint_value;
+                collect::Session::NormalizedConstraint normal_form;
+                bool valid = parse_and_validate_constraint_expression(
+                    requires_loc,
+                    trailing_requires_constraint_begin,
+                    trailing_requires_constraint_end,
+                    &constraint_value,
+                    &normal_form);
+                if (method.is_virtual) {
+                    diagnose(DiagnosticLevel::Error,
+                             "a virtual function cannot have an associated requires-clause",
+                             requires_loc);
+                }
+                if (valid) {
+                    retain_method_constraint(method_index,
+                                             method,
+                                             trailing_requires_constraint_begin,
+                                             trailing_requires_constraint_end,
+                                             normal_form,
+                                             constraint_value);
+                    trailing_requires_normal_form = std::move(normal_form);
+                } else {
+                    method.constraint_satisfaction =
+                        cir::ConstraintSatisfactionKind::Invalid;
                 }
             }
-        }
-        advance(); // consume '{'
+            bool parsed_body = parse_member_function_tail(method,
+                                                          member_children,
+                                                          method.is_constructor,
+                                                          std::move(params),
+                                                          false);
+            method.has_deferred_definition = parsed_body;
+            collect_session_.declare_record_method_shell(record.entity,
+                                                         method);
+            methods.push_back(std::move(method));
 
-        // Parse field declarations
-        std::vector<std::unique_ptr<Decl>> field_decls;
-        size_t last_recovery_idx = std::numeric_limits<size_t>::max();
-        while (!gentle_check(TokenType::RIGHT_BRACE) && !gentle_check(TokenType::Eof)) {
-            try {
-                auto fields = parse_struct_declaration();
-                diag_engine->sync_point_reached();
-                last_recovery_idx = std::numeric_limits<size_t>::max();
-                for (auto &field : fields) {
-                    field_decls.push_back(std::move(field));
+            if (is_abbreviated_template) {
+                abbreviated_info.name = member_name;
+                abbreviated_info.pattern_type = function_type;
+                abbreviated_info.explicit_specifier =
+                    explicit_specifier.kind;
+                abbreviated_info.explicit_expression_begin =
+                    explicit_specifier.expression_begin;
+                abbreviated_info.explicit_expression_end =
+                    explicit_specifier.expression_end;
+                abbreviated_info.explicit_value_expression =
+                    explicit_specifier.value_expression;
+                if (trailing_requires_normal_form.has_value()) {
+                    record_trailing_function_requires_clause(
+                        abbreviated_info,
+                        trailing_requires_constraint_begin,
+                        trailing_requires_constraint_end,
+                        std::move(trailing_requires_normal_form));
                 }
-            } catch (ParseError& e) {
-                if (is_in_tentative_context()) {
-                    throw;
+                std::optional<PendingMemberBody> template_body;
+                if (parsed_body && !pending_bodies.empty() &&
+                    pending_bodies.back().method_index == method_index) {
+                    template_body = std::move(pending_bodies.back());
+                    pending_bodies.pop_back();
                 }
-                size_t recover_start_idx = get_token_idx();
-                skip_to_field_sync_point();
-                if (get_token_idx() == recover_start_idx &&
-                    recover_start_idx == last_recovery_idx &&
-                    !gentle_check(TokenType::Eof)) {
-                    advance();
-                }
-                last_recovery_idx = get_token_idx();
-                diag_engine->sync_point_reached();
-                field_decls.push_back(collect_->collect_error_declaration(e.message, e.location));
+                abbreviated_info.has_definition = template_body.has_value();
+                PendingMemberTemplate pending;
+                pending.method_index = method_index;
+                pending.info = std::move(abbreviated_info);
+                pending.body = std::move(template_body);
+                pending.loc = member_loc;
+                pending_member_templates.push_back(std::move(pending));
             }
-        }
 
-        check_and_consume(TokenType::RIGHT_BRACE);
+            children.push_back(make_node(NodeKind::FunctionDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         member_children,
+                                         text_payload(member_name),
+                                         parsed_body ? NodeFlagHasError : NodeFlagNone));
 
-        // Parse attributes after closing brace
-        auto post_attrs = try_parse_attributes();
-        bool packed_attr = has_packed_attr(pre_attrs) || has_packed_attr(post_attrs);
-        bool transparent_union_attr = has_transparent_union_attr(pre_attrs) || has_transparent_union_attr(post_attrs);
-        size_t aligned_attr = std::max(max_aligned_attr(pre_attrs), max_aligned_attr(post_attrs));
-        size_t pragma_pack = tok_mgnt.sm ? tok_mgnt.sm->getPackAlignment(struct_tok.loc) : 0;
+            if (!parsed_body && !match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after class member declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+            }
+            return true;
+        };
 
-        // Build RecordType::Field vector from FieldDecl nodes
-        std::vector<ObjectType::Field> fields;
-        for (const auto& decl : field_decls) {
-            if (auto *field_decl = dyn_cast<FieldDecl>(decl.get())) {
-                size_t forced_alignment = 0;
-                const auto& attrs = ast_ctx->get_attrs(field_decl->node_id);
-                for (const auto& attr : attrs.attrs) {
-                    if (attr.resolved_kind != AttributeKind::ALIGNED ||
-                        attr.args.empty() ||
-                        attr.args[0].kind != AttributeArg::Kind::INTEGER ||
-                        attr.args[0].int_value <= 0) {
+        auto template_head_end_offset_from =
+            [&](size_t start) -> std::optional<size_t> {
+            if (peek(start).type != TokenType::TEMPLATE ||
+                peek(start + 1).type != TokenType::LESS_THAN) {
+                return std::nullopt;
+            }
+            size_t offset = start + 1;
+            int depth = 0;
+            int paren_depth = 0;
+            int bracket_depth = 0;
+            int brace_depth = 0;
+            while (true) {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof) {
+                    return std::nullopt;
+                }
+                bool inside_group =
+                    paren_depth > 0 || bracket_depth > 0 || brace_depth > 0;
+                if (type == TokenType::LEFT_PAREN) {
+                    ++paren_depth;
+                } else if (type == TokenType::RIGHT_PAREN &&
+                           paren_depth > 0) {
+                    --paren_depth;
+                } else if (type == TokenType::LEFT_BRACKET) {
+                    ++bracket_depth;
+                } else if (type == TokenType::RIGHT_BRACKET &&
+                           bracket_depth > 0) {
+                    --bracket_depth;
+                } else if (type == TokenType::LEFT_BRACE) {
+                    ++brace_depth;
+                } else if (type == TokenType::RIGHT_BRACE &&
+                           brace_depth > 0) {
+                    --brace_depth;
+                } else if (!inside_group && type == TokenType::LESS_THAN) {
+                    ++depth;
+                } else if (!inside_group &&
+                           type == TokenType::GREATER_THAN) {
+                    --depth;
+                    ++offset;
+                    if (depth == 0) {
+                        return offset;
+                    }
+                    continue;
+                } else if (!inside_group &&
+                           type == TokenType::RIGHT_SHIFT) {
+                    depth -= 2;
+                    ++offset;
+                    if (depth <= 0) {
+                        return offset;
+                    }
+                    continue;
+                }
+                ++offset;
+            }
+        };
+        auto template_head_end_offset = [&]() -> std::optional<size_t> {
+            return template_head_end_offset_from(0);
+        };
+        enum class FriendTemplateStart {
+            None,
+            Class,
+            Function,
+        };
+        auto friend_template_start_after_head =
+            [&](std::optional<size_t> after_head) {
+                if (!after_head.has_value()) {
+                    return FriendTemplateStart::None;
+                }
+                if (peek(*after_head).type == TokenType::FRIEND_KW) {
+                    TokenType target = peek(*after_head + 1).type;
+                    return target == TokenType::CLASS ||
+                                   target == TokenType::STRUCT
+                        ? FriendTemplateStart::Class
+                        : FriendTemplateStart::Function;
+                }
+                if (peek(*after_head).type != TokenType::REQUIRES_KW) {
+                    return FriendTemplateStart::None;
+                }
+
+                RevertingTentativeParsingAction tentative(
+                    *this, TentativeMode::CollectBacked);
+                Token template_token = current();
+                consume();
+                collect::Session::TemplateInfo probe;
+                if (!parse_cxx_template_head(probe,
+                                             template_token.loc) ||
+                    !check(TokenType::FRIEND_KW)) {
+                    return FriendTemplateStart::None;
+                }
+                TokenType target = peek(1).type;
+                return target == TokenType::CLASS ||
+                               target == TokenType::STRUCT
+                    ? FriendTemplateStart::Class
+                    : FriendTemplateStart::Function;
+            };
+
+        auto template_member_decl_has_static_specifier =
+            [&](size_t offset) -> bool {
+            enum class RequiresExpressionPrefix {
+                None,
+                AfterRequires,
+                InParameterList,
+                AwaitingBody,
+            };
+            int paren_depth = 0;
+            int bracket_depth = 0;
+            int brace_depth = 0;
+            int angle_depth = 0;
+            int requires_parameter_outer_paren_depth = 0;
+            std::vector<int> paren_angle_depths;
+            std::vector<int> bracket_angle_depths;
+            bool saw_requires_clause = false;
+            RequiresExpressionPrefix requires_expression_prefix =
+                RequiresExpressionPrefix::None;
+            while (true) {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof) {
+                    return false;
+                }
+                if (brace_depth > 0) {
+                    if (type == TokenType::LEFT_BRACE) {
+                        ++brace_depth;
+                    } else if (type == TokenType::RIGHT_BRACE) {
+                        --brace_depth;
+                    }
+                    ++offset;
+                    continue;
+                }
+                bool at_top_level =
+                    paren_depth == 0 &&
+                    bracket_depth == 0 &&
+                    brace_depth == 0 &&
+                    angle_depth == 0;
+                if (at_top_level && type == TokenType::SEMICOLON) {
+                    return false;
+                }
+                if (at_top_level &&
+                    type == TokenType::STATIC) {
+                    return true;
+                }
+
+                if (brace_depth == 0 &&
+                    requires_expression_prefix ==
+                        RequiresExpressionPrefix::None &&
+                    type == TokenType::REQUIRES_KW) {
+                    if (!saw_requires_clause && at_top_level) {
+                        saw_requires_clause = true;
+                    } else if (saw_requires_clause) {
+                        requires_expression_prefix =
+                            RequiresExpressionPrefix::AfterRequires;
+                    }
+                    ++offset;
+                    continue;
+                }
+
+                if (requires_expression_prefix ==
+                    RequiresExpressionPrefix::AfterRequires) {
+                    if (type == TokenType::LEFT_PAREN) {
+                        requires_parameter_outer_paren_depth = paren_depth;
+                        requires_expression_prefix =
+                            RequiresExpressionPrefix::InParameterList;
+                    } else if (type == TokenType::LEFT_BRACE) {
+                        ++brace_depth;
+                        requires_expression_prefix =
+                            RequiresExpressionPrefix::None;
+                        ++offset;
+                        continue;
+                    } else {
+                        requires_expression_prefix =
+                            RequiresExpressionPrefix::None;
+                    }
+                } else if (requires_expression_prefix ==
+                           RequiresExpressionPrefix::AwaitingBody) {
+                    if (type == TokenType::LEFT_BRACE) {
+                        ++brace_depth;
+                        requires_expression_prefix =
+                            RequiresExpressionPrefix::None;
+                        ++offset;
                         continue;
                     }
-                    size_t candidate = static_cast<size_t>(attr.args[0].int_value);
-                    if (candidate > forced_alignment) {
-                        forced_alignment = candidate;
+                    requires_expression_prefix =
+                        RequiresExpressionPrefix::None;
+                }
+
+                if (type == TokenType::LEFT_BRACE) {
+                    if (at_top_level) {
+                        return false;
                     }
+                    ++brace_depth;
                 }
-                if (field_decl->is_bitfield()) {
-                    // Bitfield: use the bitfield constructor
-                    // offset, bit_offset, storage_size will be computed later in computeLayout
-                    fields.emplace_back(field_decl->name, field_decl->type, 0,
-                        0, field_decl->bitfield_width, 0);
-                    fields.back().forced_alignment = forced_alignment;
-                } else {
-                    // Regular field
-                    fields.emplace_back(field_decl->name, field_decl->type, 0);
-                    fields.back().forced_alignment = forced_alignment;
-                }
-            }
-        }
-
-        // If there's already an incomplete record declaration for this tag in
-        // the current scope, complete its ObjectType in-place so existing uses
-        // (e.g. self-referential pointer fields) observe the completed type.
-        std::shared_ptr<ObjectType> record_type;
-        if (has_tag) {
-            // A tagged definition in an inner scope may legally shadow an
-            // outer tag with the same spelling but different kind.
-            if (auto* existing_tag_decl = collect_->collect_lookup_tag_decl(tag, false)) {
-                auto* existing_obj_decl = extract_record_decl(existing_tag_decl, tag);
-                auto existing_obj = existing_obj_decl->get_record_type();
-                if (existing_obj->is_union != isUnion) {
-                    error("tag '" + tag + "' was previously declared as a different kind");
-                }
-                auto existing_state = read_record_state(existing_obj_decl);
-                if (existing_state.is_incomplete) {
-                    existing_obj->is_packed = packed_attr;
-                    existing_obj->is_transparent_union = transparent_union_attr && isUnion;
-                    if (aligned_attr > existing_obj->requested_alignment) {
-                        existing_obj->requested_alignment = aligned_attr;
+                if (type == TokenType::LEFT_PAREN) {
+                    paren_angle_depths.push_back(angle_depth);
+                    ++paren_depth;
+                } else if (type == TokenType::RIGHT_PAREN) {
+                    if (paren_depth > 0) {
+                        --paren_depth;
+                        angle_depth = paren_angle_depths.back();
+                        paren_angle_depths.pop_back();
                     }
-                    existing_obj->pack_alignment = pragma_pack;
-                    record_type = existing_obj;
+                    if (requires_expression_prefix ==
+                            RequiresExpressionPrefix::InParameterList &&
+                        paren_depth ==
+                            requires_parameter_outer_paren_depth) {
+                        requires_expression_prefix =
+                            RequiresExpressionPrefix::AwaitingBody;
+                    }
+                } else if (type == TokenType::LEFT_BRACKET) {
+                    bracket_angle_depths.push_back(angle_depth);
+                    ++bracket_depth;
+                } else if (type == TokenType::RIGHT_BRACKET) {
+                    if (bracket_depth > 0) {
+                        --bracket_depth;
+                        angle_depth = bracket_angle_depths.back();
+                        bracket_angle_depths.pop_back();
+                    }
+                } else if (type == TokenType::LESS_THAN) {
+                    ++angle_depth;
+                } else if (type == TokenType::GREATER_THAN) {
+                    if (angle_depth > 0) {
+                        --angle_depth;
+                    }
+                } else if (type == TokenType::RIGHT_SHIFT) {
+                    angle_depth = angle_depth > 1 ? angle_depth - 2 : 0;
                 }
+                ++offset;
             }
-        }
-        if (!record_type) {
-            record_type = std::make_shared<ObjectType>(tag, isUnion);
-            record_type->is_packed = packed_attr;
-            record_type->is_transparent_union = transparent_union_attr && isUnion;
-            record_type->requested_alignment = aligned_attr;
-            record_type->pack_alignment = pragma_pack;
-        }
-        RecordSemanticState record_state = compute_record_semantics(
-            std::move(fields),
-            record_type->is_union,
-            record_type->is_packed,
-            record_type->requested_alignment,
-            record_type->pack_alignment,
-            false,
-            ast_ctx && ast_ctx->abi_policy ? ast_ctx->abi_policy.get() : nullptr);
-        auto ret_obj = collect_->collect_record_declaration(
-            tag,
-            std::move(field_decls),
-            record_type,
-            isUnion,
-            struct_tok.loc);
-        write_record_state(ret_obj.get(), std::move(record_state));
-        record_type->set_decl(ret_obj.get());
-        if (has_tag) {
-            collect_->collect_add_tag_decl(tag, ret_obj.get());
-        }
-        ast_ctx->append_attrs(ret_obj->node_id, std::move(pre_attrs));
-        ast_ctx->append_attrs(ret_obj->node_id, std::move(post_attrs));
-        return ret_obj;
-    } else {
-        // Just a tag reference: struct tag (forward declaration or use)
-        if (!has_tag) {
-            error("Expected struct tag or body");
-            return nullptr;
-        }
-        // Reuse an existing ObjectType if the tag was already declared.
-        // Prefer current scope; then fall back to parent scopes only for
-        // same-kind tags. A different-kind parent tag can be shadowed here.
-        if (auto* existing_decl = collect_->collect_lookup_tag_decl(tag, false)) {
-            auto* existing_obj_decl = extract_record_decl(existing_decl, tag);
-            auto existing_obj = existing_obj_decl->get_record_type();
-            if (existing_obj->is_union != isUnion) {
-                error("tag '" + tag + "' was previously declared as a different kind");
-            }
-            auto ret_obj = collect_->collect_record_declaration(
-                tag, existing_obj, isUnion, struct_tok.loc);
-            copy_record_decl_state(existing_obj_decl, ret_obj.get());
-            return ret_obj;
-        } else if (auto* inherited_decl = collect_->collect_lookup_tag_decl(tag)) {
-            auto* inherited_obj_decl = extract_record_decl(inherited_decl, tag);
-            auto inherited_obj = inherited_obj_decl->get_record_type();
-            if (inherited_obj && inherited_obj->is_union == isUnion) {
-                // C tag namespace rule: a block-scope forward declaration
-                // "struct T;" introduces a new incomplete tag that can shadow
-                // an outer tag with the same spelling.
-                if (gentle_check(TokenType::SEMICOLON)) {
-                    auto shadow = std::make_shared<ObjectType>(tag, isUnion, true);
-                    auto ret_obj = collect_->collect_record_declaration(
-                        tag, shadow, isUnion, struct_tok.loc);
-                    write_record_state(ret_obj.get(), RecordSemanticState{});
-                    shadow->set_decl(ret_obj.get());
-                    collect_->collect_add_tag_decl(tag, ret_obj.get());
-                    return ret_obj;
-                }
-                auto ret_obj = collect_->collect_record_declaration(
-                    tag, inherited_obj, isUnion, struct_tok.loc);
-                copy_record_decl_state(inherited_obj_decl, ret_obj.get());
-                return ret_obj;
-            }
-        }
-        // No existing tag found — create a new incomplete type and register it
-        auto type = std::make_shared<ObjectType>(tag, isUnion, true);
-        auto ret_obj = collect_->collect_record_declaration(tag, type, isUnion, struct_tok.loc);
-        write_record_state(ret_obj.get(), RecordSemanticState{});
-        type->set_decl(ret_obj.get());
-        collect_->collect_add_tag_decl(tag, ret_obj.get());
-        return ret_obj;
-
-    }
-}
-
-std::unique_ptr<Decl> Parser::parse_enum_specifier() {
-    Token enum_tok = current_token();
-    check_and_consume(TokenType::ENUM);
-
-    bool is_scoped = false;
-    if (is_cxx_mode_active() &&
-        (gentle_check(TokenType::CLASS) || gentle_check(TokenType::STRUCT))) {
-        is_scoped = true;
-        advance();
-    }
-
-    auto pre_attrs = try_parse_attributes();
-    std::string tag;
-    bool has_tag = false;
-
-    if (gentle_check(TokenType::IDENTIFIER)) {
-        tag = current_token().value;
-        has_tag = true;
-        advance();
-    }
-
-    auto post_tag_attrs = try_parse_attributes();
-    bool packed_attr = has_packed_attr(pre_attrs) || has_packed_attr(post_tag_attrs);
-
-    bool has_fixed_underlying = false;
-    std::shared_ptr<CType> fixed_underlying = nullptr;
-    std::shared_ptr<CType> fixed_underlying_validation = nullptr;
-    auto realize_enum_underlying_for_validation =
-        [&](const std::shared_ptr<CType>& underlying) -> std::shared_ptr<CType> {
-        if (!underlying) {
-            return nullptr;
-        }
-        QualType realized(underlying);
-        if (collect_) {
-            if (auto collect_realized =
-                    collect_->try_realize_deferred_semantic_type(realized)) {
-                realized = collect_realized;
-            }
-        }
-        return realized.get_shared();
-    };
-    if (gentle_check(TokenType::COLON)) {
-        if (!is_cxx_mode_active() &&
-            !lang_opts.standard.empty() &&
-            !is_c23_family_standard(lang_opts.standard)) {
-            diag_engine->report_error(
-                "fixed underlying enum type requires C23 or GNU2x mode", current_token().loc);
-        }
-        advance(); // consume ':'
-        DeclarationParser underlying_parser(this);
-        fixed_underlying = underlying_parser.parse_declaration(false);
-        fixed_underlying_validation =
-            realize_enum_underlying_for_validation(fixed_underlying);
-        if (!fixed_underlying ||
-            !is_valid_fixed_enum_underlying_type(
-                fixed_underlying_validation,
-                ast_ctx.get())) {
-            diag_engine->report_error(
-                "invalid fixed underlying type for enum", current_token().loc);
-            fixed_underlying = type_ctx->get_builtin(BuiltinTypes::Int);
-            fixed_underlying_validation = fixed_underlying;
-        }
-        has_fixed_underlying = true;
-    }
-
-    auto read_enum_state = [&](const EnumDecl* enum_decl) -> EnumSemanticState {
-        EnumSemanticState state;
-        if (!enum_decl) {
-            return state;
-        }
-        if (collect_) {
-            collect_->query_lookup_enum_semantics(enum_decl, state);
-        } else {
-            enum_semantics_cache_lookup(enum_decl, state, ast_ctx.get());
-        }
-        return state;
-    };
-    auto write_enum_state = [&](const EnumDecl* enum_decl, const EnumSemanticState& state) {
-        if (collect_) {
-            collect_->query_publish_enum_semantics(enum_decl, state);
-            return;
-        }
-        enum_semantics_cache_set(ast_ctx.get(), enum_decl, state);
-    };
-    auto expected_underlying_type =
-        [&]() -> std::shared_ptr<CType> {
-        if (has_fixed_underlying) {
-            return fixed_underlying;
-        }
-        if (is_cxx_mode_active() && is_scoped) {
-            return type_ctx->get_builtin(BuiltinTypes::Int);
-        }
-        return nullptr;
-    };
-    auto expected_underlying_validation_type =
-        [&]() -> std::shared_ptr<CType> {
-        if (has_fixed_underlying) {
-            return fixed_underlying_validation;
-        }
-        if (is_cxx_mode_active() && is_scoped) {
-            return type_ctx->get_builtin(BuiltinTypes::Int);
-        }
-        return nullptr;
-    };
-
-    auto reconcile_tag_decl = [&](EnumDecl* enum_decl, SrcLoc loc) {
-        if (!enum_decl) {
-            return;
-        }
-        auto state = read_enum_state(enum_decl);
-        if (state.is_scoped != is_scoped) {
-            diag_engine->report_error(
-                "enum declaration scopedness mismatch with previous declaration",
-                loc);
-            return;
-        }
-        auto expected_underlying = expected_underlying_type();
-        if (!expected_underlying) {
-            return;
-        }
-        if (state.underlying_type &&
-            !state.underlying_type->equals(*expected_underlying)) {
-            diag_engine->report_error(
-                "enum underlying type mismatch with previous declaration", loc);
-            return;
-        }
-        state.underlying_type = expected_underlying;
-        write_enum_state(enum_decl, state);
-    };
-    auto extract_enum_decl = [&](TagDecl* existing_tag_decl,
-                                 const std::string& existing_tag) -> EnumDecl* {
-        auto* existing_enum_decl = dyn_cast<EnumDecl>(existing_tag_decl);
-        if (!existing_enum_decl) {
-            error("tag '" + existing_tag + "' was previously declared with a different kind");
-        }
-        auto existing_enum_type = existing_enum_decl ? existing_enum_decl->get_enum_type() : nullptr;
-        if (!existing_enum_type) {
-            error("tag '" + existing_tag + "' was previously declared with a different kind");
-        }
-        return existing_enum_decl;
-    };
-    auto copy_enum_decl_state = [&](const EnumDecl* src, EnumDecl* dst) {
-        if (!src || !dst) {
-            return;
-        }
-        write_enum_state(dst, read_enum_state(src));
-    };
-    auto build_enumerator_state =
-        [](const EnumDecl* enum_decl) {
-            std::vector<EnumSemanticState::Enumerator> enumerators;
-            if (!enum_decl) {
-                return enumerators;
-            }
-            enumerators.reserve(enum_decl->constants.size());
-            for (const auto& constant : enum_decl->constants) {
-                if (!constant) {
-                    continue;
-                }
-                EnumSemanticState::Enumerator enumerator;
-                enumerator.name = constant->name;
-                enumerator.decl = constant.get();
-                enumerator.symbol = constant->sym;
-                enumerator.value = constant->value;
-                enumerators.push_back(std::move(enumerator));
-            }
-            return enumerators;
         };
 
-    bool has_braced_definition = gentle_check(TokenType::LEFT_BRACE);
-    if (is_cxx_mode_active() &&
-        !has_braced_definition &&
-        !is_scoped &&
-        !has_fixed_underlying) {
-        diag_engine->report_error(
-            "opaque enum declaration requires an explicit underlying type in C++",
-            enum_tok.loc);
-    }
-
-    if (has_braced_definition) {
-        advance(); // consume '{'
-
-        EnumDecl* existing_enum_decl = nullptr;
-        std::shared_ptr<EnumType> enum_type = nullptr;
-        if (has_tag) {
-            if (auto* existing_tag_decl = collect_->collect_lookup_tag_decl(tag, false)) {
-                existing_enum_decl = extract_enum_decl(existing_tag_decl, tag);
-                enum_type = existing_enum_decl->get_enum_type();
-            }
-        }
-        if (!enum_type) {
-            enum_type = std::make_shared<EnumType>(tag);
-        }
-
-        std::shared_ptr<CType> enum_underlying = expected_underlying_type();
-        bool enum_has_negative_values = false;
-        if (existing_enum_decl) {
-            auto existing_state = read_enum_state(existing_enum_decl);
-            if (existing_state.is_scoped != is_scoped) {
-                diag_engine->report_error(
-                    "enum declaration scopedness mismatch with previous declaration",
-                    enum_tok.loc);
-            }
-            if (!existing_state.underlying_type) {
-                existing_state.underlying_type = enum_underlying;
-                existing_state.is_scoped = is_scoped;
-                write_enum_state(existing_enum_decl, existing_state);
-            }
-            reconcile_tag_decl(existing_enum_decl, enum_tok.loc);
-            existing_state = read_enum_state(existing_enum_decl);
-            is_scoped = existing_state.is_scoped;
-            if (existing_state.underlying_type) {
-                enum_underlying = existing_state.underlying_type;
-            }
-            enum_has_negative_values = existing_state.has_negative_values;
-        }
-        std::shared_ptr<CType> enum_underlying_validation =
-            existing_enum_decl
-                ? realize_enum_underlying_for_validation(enum_underlying)
-                : expected_underlying_validation_type();
-        bool validate_against_fixed_underlying =
-            has_fixed_underlying || (is_cxx_mode_active() && is_scoped);
-        auto enum_underlying_builtin = fixed_enum_integer_underlying_type(
-            enum_underlying_validation,
-            ast_ctx.get());
-        if (enum_underlying_builtin && enum_underlying_builtin->isUnsigned()) {
-            enum_has_negative_values = false;
-        }
-
-        std::vector<std::unique_ptr<EnumConstantDecl>> constants;
-        std::unordered_set<std::string> seen_enumerator_names;
-        int64_t next_enum_value = 0;
-        bool saw_any_enumerator = false;
-        int64_t min_enum_value = 0;
-        int64_t max_enum_value = 0;
-        size_t last_recovery_idx = std::numeric_limits<size_t>::max();
-        while (!gentle_check(TokenType::RIGHT_BRACE) && !gentle_check(TokenType::Eof)) {
-            try {
-                if (!gentle_check(TokenType::IDENTIFIER)) {
-                    error("Expected identifier in enum list");
-                    return nullptr;
+        auto template_member_decl_may_have_function_declarator =
+            [&](size_t offset) -> bool {
+            int angle_depth = 0;
+            while (true) {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof ||
+                    (angle_depth == 0 &&
+                     (type == TokenType::SEMICOLON ||
+                      type == TokenType::LEFT_BRACE ||
+                      (type == TokenType::ASSIGN &&
+                       (offset == 0 ||
+                        peek(offset - 1).type !=
+                            TokenType::OPERATOR_KW))))) {
+                    return false;
                 }
-                std::string name = current_token().value;
-                SrcLoc loc = current_token().loc;
-                advance();
-
-                // Skip attributes on enum constants (e.g. __attribute__((availability(...))))
-                while (is_gnu_attribute_token(current_token())) {
-                    try_parse_attributes();
-                }
-
-                std::unique_ptr<Expr> init = nullptr;
-                if (gentle_check_and_consume(TokenType::ASSIGN)) {
-                    init = parse_conditional_expression();
-                }
-
-                if (!seen_enumerator_names.insert(name).second) {
-                    diag_engine->report_error(
-                        "redefinition of enum constant '" + name + "'", loc);
-                }
-                bool inject_enumerator_into_scope =
-                    !is_cxx_mode_active() ||
-                    (!is_scoped && !is_parsing_cpp_record_body());
-                if (inject_enumerator_into_scope) {
-                    auto existing = collect_->collect_lookup_variable_symbol(name, false);
-                    if (existing) {
-                        diag_engine->report_error(
-                            "redefinition of enum constant '" + name + "'", loc);
-                    }
-                }
-
-                int64_t enum_value = next_enum_value;
-                if (init) {
-                    auto eval = try_evaluate_with_consteval_compat(
-                        init.get(), ConstEvalMode::c_ice());
-                    if (!eval.has_value() &&
-                        !collect_->expression_depends_on_template_parameters(
-                            init.get())) {
-                        diag_engine->report_error(
-                            "enumerator value is not an integer constant expression", loc);
-                    } else if (eval.has_value()) {
-                        enum_value = *eval;
-                    }
-                }
-
-                if (validate_against_fixed_underlying &&
-                    !fixed_enum_value_fits_underlying(
-                        enum_value,
-                        enum_underlying_validation,
-                        ast_ctx.get())) {
-                    diag_engine->report_error(
-                        "enumerator value is not representable in fixed underlying enum type", loc);
-                }
-                if (enum_value < 0) {
-                    enum_has_negative_values = true;
-                }
-                if (!saw_any_enumerator) {
-                    min_enum_value = enum_value;
-                    max_enum_value = enum_value;
-                    saw_any_enumerator = true;
-                } else {
-                    min_enum_value = std::min(min_enum_value, enum_value);
-                    max_enum_value = std::max(max_enum_value, enum_value);
-                }
-
-                auto enum_const = collect_->collect_enum_constant_declaration(name, std::move(init), loc);
-                enum_const->value = enum_value;
-
-                // Enumerator constants have type int in C.
-                auto enum_sym = std::make_shared<Symbol>(
-                    name,
-                    SymbolKind::ENUM_CONSTANT,
-                    QualType(type_ctx->get_builtin(BuiltinTypes::Int)),
-                    StorageClass::NONE);
-                enum_sym->enum_val = enum_value;
-                enum_const->sym = enum_sym;
-                if (inject_enumerator_into_scope) {
-                    collect_->collect_bind_symbol_in_current_scope(name, enum_sym);
-                    collect_->collect_add_global_symbol(enum_sym);
-                }
-
-                constants.push_back(std::move(enum_const));
-                if (__builtin_add_overflow(enum_value, int64_t{1}, &next_enum_value)) {
-                    diag_engine->report_error(
-                        "incremented enumerator value is not representable in int64", loc);
-                    next_enum_value = enum_value;
-                }
-                diag_engine->sync_point_reached();
-                last_recovery_idx = std::numeric_limits<size_t>::max();
-
-                if (!gentle_check(TokenType::RIGHT_BRACE)) {
-                    check_and_consume(TokenType::COMMA);
-                }
-            } catch (ParseError& e) {
-                if (is_in_tentative_context()) {
-                    throw;
-                }
-                size_t recover_start_idx = get_token_idx();
-                skip_to_enum_sync_point();
-                if (get_token_idx() == recover_start_idx &&
-                    recover_start_idx == last_recovery_idx &&
-                    !gentle_check(TokenType::Eof)) {
-                    advance();
-                }
-                last_recovery_idx = get_token_idx();
-                diag_engine->sync_point_reached();
-            }
-        }
-        check_and_consume(TokenType::RIGHT_BRACE);
-        auto post_attrs = try_parse_attributes();
-        packed_attr = packed_attr || has_packed_attr(post_attrs);
-        if (!validate_against_fixed_underlying && saw_any_enumerator) {
-            if (auto inferred = choose_default_enum_underlying(
-                    type_ctx.get(), min_enum_value, max_enum_value, packed_attr)) {
-                enum_underlying = inferred;
-            }
-        }
-        if (is_cxx_mode_active() || enum_underlying) {
-            for (auto& c : constants) {
-                if (c && c->sym) {
-                    if (is_cxx_mode_active()) {
-                        c->sym->type = QualType(enum_type);
-                    } else if (!enum_constant_fits_int(type_ctx.get(), c->value)) {
-                        c->sym->type = QualType(enum_underlying);
-                    }
-                }
-            }
-        }
-        auto ret_enum = collect_->collect_enum_declaration(
-            tag, std::move(constants), enum_type, enum_tok.loc);
-        EnumSemanticState final_state;
-        final_state.is_incomplete = false;
-        final_state.is_scoped = is_scoped;
-        final_state.has_negative_values = enum_has_negative_values;
-        final_state.underlying_type = enum_underlying;
-        final_state.enumerators = build_enumerator_state(ret_enum.get());
-        write_enum_state(ret_enum.get(), final_state);
-        enum_type->set_decl(ret_enum.get());
-        if (has_tag) {
-            collect_->collect_add_tag_decl(tag, ret_enum.get());
-        }
-        return ret_enum;
-    } else {
-        if (!has_tag) {
-            error("Expected enum tag or body");
-            return nullptr;
-        }
-        // Reuse an existing enum type if the tag was already declared.
-        // Prefer current scope; then fall back to parent scopes. A block-scope
-        // forward declaration "enum T;" shadows an outer tag with same name.
-        if (auto* existing_tag_decl = collect_->collect_lookup_tag_decl(tag, false)) {
-            auto* existing_enum_decl = extract_enum_decl(existing_tag_decl, tag);
-            reconcile_tag_decl(existing_enum_decl, enum_tok.loc);
-            auto ret_enum = collect_->collect_enum_declaration(
-                tag, existing_enum_decl->get_enum_type(), enum_tok.loc);
-            copy_enum_decl_state(existing_enum_decl, ret_enum.get());
-            return ret_enum;
-        } else if (auto* inherited_tag_decl = collect_->collect_lookup_tag_decl(tag)) {
-            auto* inherited_enum_decl = extract_enum_decl(inherited_tag_decl, tag);
-            if (gentle_check(TokenType::SEMICOLON)) {
-                auto shadow = std::make_shared<EnumType>(tag, true);
-                auto shadow_underlying = expected_underlying_type();
-                auto ret_enum = collect_->collect_enum_declaration(tag, shadow, enum_tok.loc);
-                EnumSemanticState shadow_state;
-                shadow_state.is_incomplete = true;
-                shadow_state.is_scoped = is_scoped;
-                shadow_state.has_negative_values = false;
-                shadow_state.underlying_type = shadow_underlying;
-                write_enum_state(ret_enum.get(), shadow_state);
-                shadow->set_decl(ret_enum.get());
-                collect_->collect_add_tag_decl(tag, ret_enum.get());
-                return ret_enum;
-            }
-            auto inherited_state = read_enum_state(inherited_enum_decl);
-            if (inherited_state.is_scoped != is_scoped) {
-                diag_engine->report_error(
-                    "enum declaration scopedness mismatch with previous declaration",
-                    enum_tok.loc);
-            }
-            reconcile_tag_decl(inherited_enum_decl, enum_tok.loc);
-            auto ret_enum = collect_->collect_enum_declaration(
-                tag, inherited_enum_decl->get_enum_type(), enum_tok.loc);
-            copy_enum_decl_state(inherited_enum_decl, ret_enum.get());
-            return ret_enum;
-        }
-        auto enum_type = std::make_shared<EnumType>(tag, true);
-        auto enum_underlying = expected_underlying_type();
-        auto ret_enum = collect_->collect_enum_declaration(tag, enum_type, enum_tok.loc);
-        EnumSemanticState opaque_state;
-        opaque_state.is_incomplete = true;
-        opaque_state.is_scoped = is_scoped;
-        opaque_state.has_negative_values = false;
-        opaque_state.underlying_type = enum_underlying;
-        write_enum_state(ret_enum.get(), opaque_state);
-        enum_type->set_decl(ret_enum.get());
-        collect_->collect_add_tag_decl(tag, ret_enum.get());
-        return ret_enum;
-    }
-}
-bool Parser::isTokenDeclarationSpec(Token s) {
-    if (is_gnu_attribute_token(s)) {
-        return true;
-    }
-    if (s.type == TokenType::USING) {
-        return is_cxx_mode_active();
-    }
-    if (s.type == TokenType::TEMPLATE) {
-        return is_cxx_mode_active();
-    }
-    if (s.type == TokenType::CLASS) {
-        return is_cxx_mode_active();
-    }
-    if (s.type == TokenType::TYPENAME) {
-        return is_cxx_mode_active();
-    }
-    if (s.type == TokenType::FRIEND_KW) {
-        return is_cxx_mode_active();
-    }
-    if (s.type == TokenType::EXPLICIT_KW) {
-        return is_cxx_mode_active();
-    }
-    if (s.type == TokenType::MUTABLE_KW) {
-        return is_cxx_mode_active();
-    }
-    if ((s.type == TokenType::CONSTEXPR_KW) ||
-        (s.type == TokenType::IDENTIFIER &&
-         s.value == "constexpr" &&
-         is_c23_constexpr_enabled())) {
-        return true;
-    }
-    if (s.type == TokenType::CONSTEVAL_KW) {
-        return is_cxx_mode_active();
-    }
-    switch (s.type) {
-        case TokenType::VOID:
-        case TokenType::CHAR:
-        case TokenType::SHORT:
-        case TokenType::INT:
-        case TokenType::LONG:
-        case TokenType::FLOAT:
-        case TokenType::DOUBLE:
-        case TokenType::SIGNED:
-        case TokenType::UNSIGNED:
-        case TokenType::BOOL:
-        case TokenType::WCHAR_T:
-        case TokenType::CHAR16_T:
-        case TokenType::CHAR32_T:
-        case TokenType::STRUCT:
-        case TokenType::UNION:
-        case TokenType::ENUM:
-        case TokenType::CONST:
-        case TokenType::VOLATILE:
-        case TokenType::RESTRICT:
-        case TokenType::ATOMIC:
-        case TokenType::INLINE:
-        case TokenType::STATIC:
-        case TokenType::EXTERN:
-        case TokenType::AUTO:
-        case TokenType::REGISTER:
-        case TokenType::TYPEDEF:
-        case TokenType::NORETURN_KW:
-        case TokenType::STATIC_ASSERT:
-        case TokenType::ALIGNAS:
-        case TokenType::THREAD_LOCAL:
-        case TokenType::EXTENSION_KW:
-        case TokenType::TYPEOF_KW:
-        case TokenType::DECLTYPE_KW:
-        case TokenType::INT128:
-        case TokenType::UINT128_T:
-        case TokenType::AUTO_TYPE:
-        case TokenType::COMPLEX:
-        case TokenType::FLOAT16:
-            return true;
-        default:
-            // Check if identifier names a type in declaration-specifier position.
-            // In C mode this is typedef-only; in C++ mode we also allow class
-            // names via tag lookup.
-            if (s.type == TokenType::IDENTIFIER) {
-                if (type_ctx && type_ctx->target &&
-                    darwin_blocks::blocks_enabled_for_langopts(
-                        lang_opts, *type_ctx->target) &&
-                    s.value == "__block") {
+                if (angle_depth == 0 && type == TokenType::LEFT_PAREN) {
                     return true;
                 }
-                if (collect_->collect_lookup_type_name(
-                        s.value,
-                        true,
-                        is_cxx_mode_active())) {
-                    return true;
-                }
-                if (is_cxx_mode_active()) {
-                    if (can_start_cpp_constrained_placeholder_type_specifier_for_lookahead()) {
-                        return true;
+                if (type == TokenType::LESS_THAN) {
+                    ++angle_depth;
+                } else if (type == TokenType::GREATER_THAN) {
+                    if (angle_depth > 0) {
+                        --angle_depth;
                     }
-                    QualType current_record_lookup_type =
-                        collect_->collect_current_cpp_record_lookup_type();
-                    if (current_record_lookup_type &&
-                        collect_->collect_lookup_record_nested_type(
-                            current_record_lookup_type,
-                            s.value)) {
-                        return true;
-                    }
+                } else if (type == TokenType::RIGHT_SHIFT) {
+                    angle_depth = angle_depth > 1 ? angle_depth - 2 : 0;
                 }
-                if (is_cxx_mode_active() &&
-                    (is_cpp_qualified_id_start() ||
-                     peek_token().type == TokenType::LESS_THAN)) {
-                    auto type_scope = classify_cpp_type_scope_for_lookahead(
-                        ParserAnnotationStore::CppTypeScopeContext::
-                            DeclSpecifier);
-                    switch (type_scope.kind) {
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            TypeName:
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            TypeTemplateId:
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            DependentType:
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            PlaceholderConstraint:
-                            bump_type_scope_fast_type_accept();
-                            return true;
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            ScopeOnly:
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            DependentScope:
-                            bump_type_scope_scope_only_accept();
-                            return true;
-                        case ParserAnnotationStore::CppTypeScopeKind::NonType:
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            NoMatch:
-                            bump_type_scope_fast_non_type_reject();
+                ++offset;
+            }
+        };
+
+        auto template_member_decl_is_deduction_guide =
+            [&](size_t offset) -> bool {
+            if (peek(offset).type == TokenType::EXPLICIT_KW) {
+                ++offset;
+                if (peek(offset).type == TokenType::LEFT_PAREN) {
+                    int depth = 0;
+                    do {
+                        TokenType type = peek(offset).type;
+                        if (type == TokenType::Eof) {
                             return false;
-                        case ParserAnnotationStore::CppTypeScopeKind::
-                            Inconclusive:
-                        case ParserAnnotationStore::CppTypeScopeKind::Error:
-                            bump_type_scope_inconclusive_fallback();
-                            return can_start_cpp_named_type_specifier_for_lookahead();
+                        }
+                        if (type == TokenType::LEFT_PAREN) {
+                            ++depth;
+                        } else if (type == TokenType::RIGHT_PAREN) {
+                            --depth;
+                        }
+                        ++offset;
+                    } while (depth > 0);
+                }
+            }
+            if (!is_identifier_token(peek(offset).type) ||
+                peek(offset + 1).type != TokenType::LEFT_PAREN) {
+                return false;
+            }
+            ++offset;
+            int depth = 0;
+            do {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof) {
+                    return false;
+                }
+                if (type == TokenType::LEFT_PAREN) {
+                    ++depth;
+                } else if (type == TokenType::RIGHT_PAREN) {
+                    --depth;
+                }
+                ++offset;
+            } while (depth > 0);
+            return peek(offset).type == TokenType::ARROW;
+        };
+
+        enum class TemplatedSpecialMemberKind {
+            None,
+            Constructor,
+            Destructor,
+            Conversion,
+        };
+
+        auto templated_special_member_kind_after_head =
+            [&](size_t offset) -> TemplatedSpecialMemberKind {
+            auto classify_at =
+                [&](size_t candidate,
+                    bool scanning_constraint) -> TemplatedSpecialMemberKind {
+                auto starts_conversion_operator = [&](size_t operator_offset) {
+                    if (peek(operator_offset).type !=
+                        TokenType::OPERATOR_KW) {
+                        return false;
+                    }
+                    TokenType conversion_type =
+                        peek(operator_offset + 1).type;
+                    return is_type_start(conversion_type) ||
+                        conversion_type == TokenType::IDENTIFIER ||
+                        conversion_type == TokenType::SCOPE_RESOLUTION ||
+                        conversion_type == TokenType::TYPENAME ||
+                        conversion_type == TokenType::DECLTYPE_KW;
+                };
+                candidate = skip_cxx_special_member_prefix(candidate);
+                if (!tag.empty() &&
+                    peek(candidate).type == TokenType::IDENTIFIER &&
+                    peek(candidate).value == tag &&
+                    peek(candidate + 1).type == TokenType::LEFT_PAREN) {
+                    return TemplatedSpecialMemberKind::Constructor;
+                }
+                if (!tag.empty() &&
+                    peek(candidate).type == TokenType::BITWISE_NOT &&
+                    peek(candidate + 1).type == TokenType::IDENTIFIER &&
+                    peek(candidate + 1).value == tag) {
+                    return TemplatedSpecialMemberKind::Destructor;
+                }
+                if (peek(candidate).type == TokenType::OPERATOR_KW &&
+                    (!scanning_constraint ||
+                     starts_conversion_operator(candidate))) {
+                    return TemplatedSpecialMemberKind::Conversion;
+                }
+                while (peek(candidate).type == TokenType::LEFT_PAREN) {
+                    ++candidate;
+                }
+                return peek(candidate).type == TokenType::OPERATOR_KW &&
+                        (!scanning_constraint ||
+                         starts_conversion_operator(candidate))
+                    ? TemplatedSpecialMemberKind::Conversion
+                    : TemplatedSpecialMemberKind::None;
+            };
+
+            TemplatedSpecialMemberKind direct =
+                classify_at(offset, /*scanning_constraint=*/false);
+            if (direct != TemplatedSpecialMemberKind::None ||
+                peek(offset).type != TokenType::REQUIRES_KW) {
+                return direct;
+            }
+
+            auto constructor_suffix_follows = [&](size_t candidate) {
+                candidate = skip_cxx_special_member_prefix(candidate);
+                if (peek(candidate).type != TokenType::IDENTIFIER ||
+                    peek(candidate).value != tag ||
+                    peek(candidate + 1).type != TokenType::LEFT_PAREN) {
+                    return false;
+                }
+                size_t tail = candidate + 1;
+                int depth = 0;
+                do {
+                    TokenType type = peek(tail).type;
+                    if (type == TokenType::Eof) {
+                        return false;
+                    }
+                    if (type == TokenType::LEFT_PAREN) {
+                        ++depth;
+                    } else if (type == TokenType::RIGHT_PAREN) {
+                        --depth;
+                    }
+                    ++tail;
+                } while (depth > 0);
+                tail = skip_member_prefix_attributes(tail);
+                TokenType suffix = peek(tail).type;
+                return suffix == TokenType::NOEXCEPT_KW ||
+                    suffix == TokenType::THROW_KW ||
+                    suffix == TokenType::REQUIRES_KW ||
+                    suffix == TokenType::COLON ||
+                    suffix == TokenType::LEFT_BRACE ||
+                    suffix == TokenType::TRY_KW ||
+                    suffix == TokenType::SEMICOLON ||
+                    suffix == TokenType::ASSIGN;
+            };
+
+            int paren_depth = 0;
+            int bracket_depth = 0;
+            int brace_depth = 0;
+            bool requires_expression_pending = false;
+            for (++offset; ; ++offset) {
+                TokenType type = peek(offset).type;
+                if (type == TokenType::Eof ||
+                    (paren_depth == 0 && bracket_depth == 0 &&
+                     brace_depth == 0 && type == TokenType::SEMICOLON)) {
+                    return TemplatedSpecialMemberKind::None;
+                }
+                bool at_top_level =
+                    paren_depth == 0 && bracket_depth == 0 &&
+                    brace_depth == 0;
+                if (at_top_level) {
+                    TemplatedSpecialMemberKind candidate =
+                        classify_at(offset, /*scanning_constraint=*/true);
+                    if (candidate == TemplatedSpecialMemberKind::Constructor) {
+                        if (constructor_suffix_follows(offset)) {
+                            return candidate;
+                        }
+                    } else if (candidate !=
+                               TemplatedSpecialMemberKind::None) {
+                        return candidate;
+                    }
+                    if (type == TokenType::REQUIRES_KW) {
+                        requires_expression_pending = true;
+                    } else if (type == TokenType::LEFT_BRACE) {
+                        if (!requires_expression_pending) {
+                            return TemplatedSpecialMemberKind::None;
+                        }
+                        requires_expression_pending = false;
+                    }
+                }
+                if (type == TokenType::LEFT_PAREN) {
+                    ++paren_depth;
+                } else if (type == TokenType::RIGHT_PAREN &&
+                           paren_depth > 0) {
+                    --paren_depth;
+                } else if (type == TokenType::LEFT_BRACKET) {
+                    ++bracket_depth;
+                } else if (type == TokenType::RIGHT_BRACKET &&
+                           bracket_depth > 0) {
+                    --bracket_depth;
+                } else if (type == TokenType::LEFT_BRACE) {
+                    ++brace_depth;
+                } else if (type == TokenType::RIGHT_BRACE &&
+                           brace_depth > 0) {
+                    --brace_depth;
+                }
+            }
+        };
+
+        auto parse_member_function_template_tail =
+            [&](collect::RecordMethodInput& method,
+                std::vector<NodeId>& member_children,
+                size_t member_begin,
+                bool allow_pure_specifier,
+                bool allow_inline_body,
+                size_t method_index,
+                std::vector<ParsedParam> body_params,
+                std::optional<PendingMemberBody>* captured_body) -> bool {
+            bool has_error = false;
+            bool parsed_body = false;
+            size_t init_begin = 0;
+            size_t init_end = 0;
+            if (method.is_constructor && check(TokenType::TRY_KW) &&
+                allow_inline_body) {
+                size_t body_begin = current_raw_index();
+                size_t body_end = skip_function_try_block_tokens();
+                member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                    body_begin,
+                                                    body_end,
+                                                    {},
+                                                    text_payload("member body")));
+                if (captured_body) {
+                    PendingMemberBody pending;
+                    pending.method_index = method_index;
+                    pending.body_begin = body_begin;
+                    pending.body_end = body_end;
+                    pending.is_constructor_function_try = true;
+                    pending.params = std::move(body_params);
+                    *captured_body = std::move(pending);
+                }
+                parsed_body = true;
+            } else if (method.is_constructor && match(TokenType::COLON)) {
+
+                init_begin = current_raw_index();
+                int depth = 0;
+                TokenType previous = TokenType::COLON;
+                while (!at_end()) {
+                    TokenType type = current().type;
+                    if (depth == 0 &&
+                        (type == TokenType::SEMICOLON ||
+                         type == TokenType::RIGHT_BRACE)) {
+                        break;
+                    }
+                    if (depth == 0 && type == TokenType::LEFT_BRACE &&
+                        !is_identifier_token(previous) &&
+                        previous != TokenType::GREATER_THAN) {
+                        break;
+                    }
+                    if (type == TokenType::LEFT_PAREN ||
+                        type == TokenType::LEFT_BRACE) {
+                        ++depth;
+                    }
+                    if (type == TokenType::RIGHT_PAREN ||
+                        type == TokenType::RIGHT_BRACE) {
+                        --depth;
+                    }
+                    previous = type;
+                    consume();
+                }
+                init_end = current_raw_index();
+                if (check(TokenType::LEFT_BRACE) && allow_inline_body) {
+                    size_t body_begin = current_raw_index();
+                    size_t body_end = skip_balanced_until_semicolon_or_brace();
+                    member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                        init_begin,
+                                                        body_end,
+                                                        {},
+                                                        text_payload("member body")));
+                    if (captured_body) {
+                        PendingMemberBody pending;
+                        pending.method_index = method_index;
+                        pending.body_begin = body_begin;
+                        pending.body_end = body_end;
+                        pending.init_begin = init_begin;
+                        pending.init_end = init_end;
+                        pending.params = std::move(body_params);
+                        *captured_body = std::move(pending);
+                    }
+                    parsed_body = true;
+                } else if (check(TokenType::LEFT_BRACE)) {
+                    size_t body_begin = current_raw_index();
+                    size_t body_end = skip_balanced_until_semicolon_or_brace();
+                    member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                        init_begin,
+                                                        body_end,
+                                                        {},
+                                                        text_payload("member body"),
+                                                        NodeFlagHasError));
+                    diagnose(DiagnosticLevel::Error,
+                             "inline constructor and conversion member template bodies are not supported yet",
+                             loc_for_index(body_begin));
+                    has_error = true;
+                } else {
+                    diagnose(DiagnosticLevel::Error,
+                             "constructor member initializers require a body",
+                             loc_for_index(init_begin));
+                    has_error = true;
+                }
+            } else if (check(TokenType::LEFT_BRACE) && allow_inline_body) {
+                size_t body_begin = current_raw_index();
+                size_t body_end = skip_balanced_until_semicolon_or_brace();
+                member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                    body_begin,
+                                                    body_end,
+                                                    {},
+                                                    text_payload("member body")));
+                if (captured_body) {
+                    PendingMemberBody pending;
+                    pending.method_index = method_index;
+                    pending.body_begin = body_begin;
+                    pending.body_end = body_end;
+                    pending.params = std::move(body_params);
+                    *captured_body = std::move(pending);
+                }
+                parsed_body = true;
+            } else if (check(TokenType::LEFT_BRACE) || check(TokenType::TRY_KW)) {
+                size_t body_begin = current_raw_index();
+                size_t body_end = check(TokenType::TRY_KW)
+                    ? skip_function_try_block_tokens()
+                    : skip_balanced_until_semicolon_or_brace();
+                member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                    body_begin,
+                                                    body_end,
+                                                    {},
+                                                    text_payload("member body"),
+                                                    NodeFlagHasError));
+                diagnose(DiagnosticLevel::Error,
+                         "inline constructor and conversion member template bodies are not supported yet",
+                         loc_for_index(body_begin));
+                has_error = true;
+            } else if (check(TokenType::ASSIGN)) {
+                SrcLoc suffix_loc = current_loc();
+                consume();
+                if (match(TokenType::DELETE)) {
+                    method.is_deleted = true;
+                } else if (match(TokenType::DEFAULT)) {
+                    method.is_defaulted = true;
+                } else if (allow_pure_specifier &&
+                           check(TokenType::INTEGER_CONST) &&
+                           current().value == "0") {
+                    consume();
+                    method.is_pure = true;
+                } else {
+                    diagnose(DiagnosticLevel::Error,
+                             "unsupported member function template declaration suffix",
+                             suffix_loc);
+                    skip_until_statement_boundary();
+                    has_error = true;
+                }
+            }
+
+            if (method.is_pure &&
+                (check(TokenType::LEFT_BRACE) || check(TokenType::TRY_KW))) {
+                size_t body_begin = current_raw_index();
+                size_t body_end = skip_balanced_until_semicolon_or_brace();
+                member_children.push_back(make_node(NodeKind::DeferredBody,
+                                                    body_begin,
+                                                    body_end,
+                                                    {},
+                                                    text_payload("member body"),
+                                                    NodeFlagHasError));
+                diagnose(DiagnosticLevel::Error,
+                         "a pure-specifier cannot be combined with a function definition",
+                         loc_for_index(body_begin));
+                parsed_body = true;
+                has_error = true;
+            }
+
+            if (!has_error && !parsed_body && !match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after member function template declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+                has_error = true;
+            }
+            (void)member_begin;
+            return has_error;
+        };
+
+        auto parse_record_conversion_type_id = [&]() {
+            return parse_conversion_type_id();
+        };
+
+        auto parse_templated_special_member =
+            [&](size_t member_begin,
+                TemplatedSpecialMemberKind kind) -> bool {
+            Token template_token = current();
+            consume();
+            collect::Session::TemplateInfo info;
+            if (!parse_cxx_template_head(info, template_token.loc)) {
+                skip_balanced_until_semicolon_or_brace();
+                children.push_back(make_node(NodeKind::UnknownDecl,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {},
+                                             text_payload("template"),
+                                             NodeFlagHasError));
+                return true;
+            }
+
+            LayoutAttrs leading_member_attrs = parse_layout_attributes();
+            size_t function_definition_begin = current_raw_index();
+            collect::Session::InstantiationScope header_scope =
+                collect_session_.begin_template_header(info, template_token.loc);
+
+            ParsedSpecialMemberPrefix prefix =
+                parse_special_member_prefix(std::move(leading_member_attrs));
+            collect::DeclFlags& flags = prefix.flags;
+            ParsedExplicitSpecifier& explicit_specifier =
+                prefix.explicit_specifier;
+            bool declaration_has_error = prefix.has_error;
+
+            if (kind == TemplatedSpecialMemberKind::Destructor) {
+                diagnose(DiagnosticLevel::Error,
+                         "destructor shall not be a member template",
+                         current_loc());
+                collect_session_.finish_template_header(std::move(header_scope));
+                skip_until_statement_boundary();
+                children.push_back(make_node(NodeKind::UnknownDecl,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {},
+                                             text_payload("template"),
+                                             NodeFlagHasError));
+                return true;
+            }
+
+            std::vector<NodeId> member_children = prefix.attrs.syntax;
+            std::string member_name;
+            SrcLoc member_loc = current_loc();
+            std::vector<ParsedParam> params;
+            bool member_is_const = false;
+            bool member_is_volatile = false;
+            cir::FunctionRefQualifierKind member_ref_qualifier =
+                cir::FunctionRefQualifierKind::None;
+            bool has_trailing_requires_clause = false;
+            bool trailing_requires_has_error = false;
+            size_t trailing_requires_constraint_begin = 0;
+            size_t trailing_requires_constraint_end = 0;
+            std::optional<collect::Session::NormalizedConstraint>
+                trailing_requires_normal_form;
+            std::optional<bool> trailing_requires_value;
+            cir::TypeRef return_type =
+                collect_session_.type_ref(collect_session_.file().builtin_type(
+                    cir::BuiltinTypeKind::Void));
+
+            if (kind == TemplatedSpecialMemberKind::Constructor) {
+                size_t name_begin = current_raw_index();
+                if (!check(TokenType::IDENTIFIER) || current().value != tag) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected constructor template declaration",
+                             current_loc());
+                    collect_session_.finish_template_header(std::move(header_scope));
+                    skip_until_statement_boundary();
+                    children.push_back(make_node(NodeKind::UnknownDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 {},
+                                                 text_payload("template"),
+                                                 NodeFlagHasError));
+                    return true;
+                }
+                member_name = current().value;
+                member_loc = current().loc;
+                consume();
+                member_children.push_back(make_node(NodeKind::Name,
+                                                    name_begin,
+                                                    last_consumed_raw_end(),
+                                                    {},
+                                                    text_payload(member_name)));
+            } else {
+                size_t conversion_parentheses = 0;
+                while (match(TokenType::LEFT_PAREN)) {
+                    ++conversion_parentheses;
+                }
+                size_t name_begin = current_raw_index();
+                Token operator_token = current();
+                consume();
+                auto [conversion_type, conversion_syntax] =
+                    parse_record_conversion_type_id();
+                return_type = conversion_type;
+                cir::TypeId resolved_conversion_type =
+                    collect_session_.file().resolved_type(return_type.type);
+                if (collect_session_.file().valid(resolved_conversion_type)) {
+                    cir::TypeKind conversion_kind =
+                        collect_session_.file().type(resolved_conversion_type).kind;
+                    declaration_has_error = declaration_has_error ||
+                        conversion_kind == cir::TypeKind::Function ||
+                        conversion_kind == cir::TypeKind::Array;
+                }
+                if (collect_session_.contains_auto_type(return_type.type)) {
+                    diagnose(
+                        DiagnosticLevel::Error,
+                        "conversion function template cannot have a deduced return type",
+                        operator_token.loc);
+                    declaration_has_error = true;
+                }
+                member_name = "operator " +
+                    collect_session_.file().format_type(conversion_type);
+                member_loc = operator_token.loc;
+                if (conversion_syntax != InvalidNodeId) {
+                    member_children.push_back(conversion_syntax);
+                }
+                member_children.push_back(make_node(NodeKind::Name,
+                                                    name_begin,
+                                                    last_consumed_raw_end(),
+                                                    {},
+                                                    text_payload(member_name)));
+                for (size_t index = 0; index < conversion_parentheses;
+                     ++index) {
+                    if (!match(TokenType::RIGHT_PAREN)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected ')' around conversion-function-id",
+                                 current_loc());
+                        declaration_has_error = true;
+                        break;
+                    }
+                }
+            }
+
+            if (prefix.invalid_static) {
+                diagnose(DiagnosticLevel::Error,
+                         kind == TemplatedSpecialMemberKind::Conversion
+                             ? "conversion function must be a non-static member function"
+                             : "a constructor cannot be declared 'static'",
+                         member_loc);
+                declaration_has_error = true;
+            }
+
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected parameter list in member function template declaration",
+                         current_loc());
+                collect_session_.finish_template_header(std::move(header_scope));
+                skip_until_statement_boundary();
+                children.push_back(make_node(NodeKind::UnknownDecl,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {},
+                                             text_payload("template"),
+                                             NodeFlagHasError));
+                return true;
+            }
+            bool is_variadic = false;
+            params = parse_parameter_list(
+                false,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberParameter),
+                &is_variadic);
+            DeclarationParser abbreviated_invention(*this);
+            abbreviated_invention.abbreviated_template_target = &info;
+            for (size_t parameter_index = 0;
+                 parameter_index < params.size();
+                 ++parameter_index) {
+                ParsedParam& param = params[parameter_index];
+                ParsedDeclarator parameter;
+                parameter.type = param.type;
+                parameter.type_ref = param.type_ref;
+                parameter.loc = param.loc;
+                rewrite_abbreviated_function_parameter(
+                    abbreviated_invention,
+                    parameter,
+                    param.is_parameter_pack,
+                    static_cast<uint32_t>(parameter_index),
+                    param.abbreviated_type_constraints,
+                    param.loc);
+                param.type = parameter.type;
+                param.type_ref = parameter.type_ref;
+            }
+            std::vector<cir::TypeRef> param_types;
+            std::vector<uint8_t> parameter_pack_flags;
+            bool has_parameter_pack = false;
+            param_types.reserve(params.size());
+            parameter_pack_flags.reserve(params.size());
+            for (const ParsedParam& param : params) {
+                if (param.syntax != InvalidNodeId) {
+                    member_children.push_back(param.syntax);
+                }
+                if (param.is_parameter_pack_expansion_sentinel) {
+                    continue;
+                }
+                param_types.push_back(param.type_ref);
+                uint8_t pack_flag = param.is_parameter_pack ? 1 : 0;
+                parameter_pack_flags.push_back(pack_flag);
+                has_parameter_pack = has_parameter_pack || pack_flag != 0;
+            }
+            if (!has_parameter_pack) {
+                parameter_pack_flags.clear();
+            }
+            if (kind == TemplatedSpecialMemberKind::Conversion &&
+                (!param_types.empty() || is_variadic)) {
+                diagnose(DiagnosticLevel::Error,
+                         "conversion function template cannot have parameters",
+                         member_loc);
+                declaration_has_error = true;
+            }
+
+            if (kind == TemplatedSpecialMemberKind::Conversion) {
+                while (true) {
+                    if (match(TokenType::CONST)) {
+                        member_is_const = true;
+                    } else if (match(TokenType::VOLATILE)) {
+                        member_is_volatile = true;
+                    } else if (match(TokenType::BITWISE_AND)) {
+                        member_ref_qualifier =
+                            cir::FunctionRefQualifierKind::LValue;
+                    } else if (match(TokenType::LOGICAL_AND)) {
+                        member_ref_qualifier =
+                            cir::FunctionRefQualifierKind::RValue;
+                    } else {
+                        break;
+                    }
+                }
+                if (match(TokenType::ARROW)) {
+                    SrcLoc arrow_loc = last_consumed_loc();
+                    DeclarationParser trailing_type_parser(
+                        *this,
+                        TypeParseContext::type_only(
+                            TypeParseContext::Origin::TrailingReturnType));
+                    (void)trailing_type_parser.parse_declaration(false, true);
+                    if (trailing_type_parser.type_syntax != InvalidNodeId) {
+                        member_children.push_back(
+                            trailing_type_parser.type_syntax);
+                    }
+                    diagnose(DiagnosticLevel::Error,
+                             "conversion function cannot use a trailing return type",
+                             arrow_loc);
+                    declaration_has_error = true;
+                }
+            }
+
+            ParsedRecordExceptionSpec exception_spec =
+                parse_special_member_exception_spec(member_children);
+
+            if (match(TokenType::REQUIRES_KW)) {
+                SrcLoc requires_loc = last_consumed_loc();
+                has_trailing_requires_clause = true;
+                collect::Session::NormalizedConstraint normal_form;
+                trailing_requires_has_error =
+                    !parse_and_validate_constraint_expression(
+                        requires_loc,
+                        trailing_requires_constraint_begin,
+                        trailing_requires_constraint_end,
+                        &trailing_requires_value,
+                        &normal_form);
+                if (!trailing_requires_has_error) {
+                    trailing_requires_normal_form = std::move(normal_form);
+                }
+            }
+
+            cir::TypeId function_type =
+                collect_session_.function_type(return_type,
+                                               param_types,
+                                               is_variadic,
+                                               true,
+                                               member_is_const,
+                                               std::move(exception_spec.spec),
+                                               parameter_pack_flags,
+                                               member_ref_qualifier,
+                                               member_is_volatile);
+            collect_session_.finish_template_header(std::move(header_scope));
+
+            collect::RecordMethodInput method;
+            method.name = member_name;
+            method.type = function_type;
+            if (kind == TemplatedSpecialMemberKind::Conversion) {
+                method.operator_function.kind =
+                    cir::OperatorFunctionKind::Conversion;
+                method.operator_function.conversion_type = return_type;
+            }
+            method.params = param_inputs_from_parsed_params(
+                params,
+                /*move_runtime_fragments=*/false);
+            method.loc = member_loc;
+            method.declared_access = current_access;
+            method.flags = flags;
+            method.attrs = prefix.attrs.attrs;
+            method.is_function_template = true;
+            method.is_conversion_function =
+                kind == TemplatedSpecialMemberKind::Conversion;
+            method.is_constructor =
+                kind == TemplatedSpecialMemberKind::Constructor;
+            method.is_explicit = prefix.is_explicit();
+            method.has_explicit_exception_spec =
+                exception_spec.has_explicit;
+            method.has_deferred_noexcept_operand = exception_spec.deferred;
+            method.noexcept_operand_begin = exception_spec.operand_begin;
+            method.noexcept_operand_end = exception_spec.operand_end;
+            method.noexcept_operand_loc = exception_spec.operand_loc;
+            method.noexcept_declaration_context =
+                exception_spec.declaration_context;
+            method.noexcept_lookup_generation =
+                exception_spec.lookup_generation;
+            method.explicit_specifier = explicit_specifier.kind;
+            method.explicit_expression_begin =
+                explicit_specifier.expression_begin;
+            method.explicit_expression_end = explicit_specifier.expression_end;
+            method.explicit_value_expression =
+                explicit_specifier.value_expression;
+            method.explicit_declaration_context =
+                explicit_specifier.declaration_context;
+            method.explicit_lookup_generation =
+                explicit_specifier.lookup_generation;
+            size_t method_index = methods.size();
+            if (has_trailing_requires_clause &&
+                !trailing_requires_has_error) {
+                retain_method_constraint(
+                    method_index,
+                    method,
+                    trailing_requires_constraint_begin,
+                    trailing_requires_constraint_end,
+                    trailing_requires_normal_form,
+                    trailing_requires_value);
+            }
+            std::optional<PendingMemberBody> pending_body;
+            bool tail_has_error = parse_member_function_template_tail(
+                method,
+                member_children,
+                member_begin,
+                /*allow_pure_specifier=*/false,
+                /*allow_inline_body=*/
+                    kind == TemplatedSpecialMemberKind::Constructor ||
+                    kind == TemplatedSpecialMemberKind::Conversion,
+                method_index,
+                std::move(params),
+                &pending_body);
+            bool has_error = declaration_has_error ||
+                             trailing_requires_has_error || tail_has_error;
+
+            collect_session_.declare_record_method_shell(record.entity,
+                                                         method);
+            cir::OperatorFunctionIdentity operator_function =
+                method.operator_function;
+            methods.push_back(std::move(method));
+            if (!has_error) {
+                info.name = member_name;
+                info.operator_function = operator_function;
+                info.pattern_type = function_type;
+                info.definition_begin = function_definition_begin;
+                info.explicit_specifier = explicit_specifier.kind;
+                info.explicit_expression_begin =
+                    explicit_specifier.expression_begin;
+                info.explicit_expression_end =
+                    explicit_specifier.expression_end;
+                info.explicit_value_expression =
+                    explicit_specifier.value_expression;
+                if (has_trailing_requires_clause) {
+                    record_trailing_function_requires_clause(
+                        info,
+                        trailing_requires_constraint_begin,
+                        trailing_requires_constraint_end,
+                        std::move(trailing_requires_normal_form));
+                }
+                info.has_definition = pending_body.has_value();
+                PendingMemberTemplate pending;
+                pending.method_index = method_index;
+                pending.info = std::move(info);
+                pending.body = std::move(pending_body);
+                pending.loc = template_token.loc;
+                pending_member_templates.push_back(std::move(pending));
+            }
+
+            children.push_back(make_node(NodeKind::FunctionDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         member_children,
+                                         text_payload(member_name),
+                                         has_error ? NodeFlagHasError
+                                                   : NodeFlagNone));
+            return true;
+        };
+
+        auto parse_nonstatic_member_function_template =
+            [&](size_t member_begin) -> bool {
+            Token template_token = current();
+            consume();
+            collect::Session::TemplateInfo info;
+            if (!parse_cxx_template_head(info, template_token.loc)) {
+                skip_balanced_until_semicolon_or_brace();
+                children.push_back(make_node(NodeKind::UnknownDecl,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {},
+                                             text_payload("template"),
+                                             NodeFlagHasError));
+                return true;
+            }
+
+            LayoutAttrs leading_member_attrs = parse_layout_attributes();
+            size_t function_definition_begin = current_raw_index();
+
+            collect::Session::InstantiationScope header_scope =
+                collect_session_.begin_template_header(info, template_token.loc);
+            DeclarationParser member_parser(
+                *this,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberDeclSpecifier));
+            member_parser.abbreviated_template_target = &info;
+            member_parser.allow_cxx_member_declarator_ids = true;
+            cir::TypeRef member_base_type =
+                member_parser.parse_declaration(false, true);
+            NodeId member_type = member_parser.type_syntax;
+            collect::DeclFlags flags = declaration_flags_from_parser(member_parser);
+            member_parser.reset_declarator_parsing_state();
+            member_parser.allow_cxx_member_declarator_ids = true;
+            ParsedDeclarator declarator =
+                member_parser.parse_declarator(member_base_type, true);
+            LayoutAttrs declarator_attrs = parse_layout_attributes();
+            collect_session_.finish_template_header(std::move(header_scope));
+
+            std::vector<NodeId> member_children = leading_member_attrs.syntax;
+            if (member_type != InvalidNodeId) {
+                member_children.push_back(member_type);
+            }
+            if (declarator.syntax != InvalidNodeId) {
+                member_children.push_back(declarator.syntax);
+            }
+            member_children.insert(member_children.end(),
+                                   declarator_attrs.syntax.begin(),
+                                   declarator_attrs.syntax.end());
+
+            bool has_error = false;
+            if (!declarator.is_function || declarator.name.empty()) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected member function template declaration",
+                         declarator.loc.isInvalid()
+                             ? loc_for_index(member_begin)
+                             : declarator.loc);
+                has_error = true;
+            }
+            has_error =
+                validate_symbolic_operator_membership(declarator, flags) ||
+                has_error;
+            collect::RecordMethodInput method;
+            method.name = declarator.name;
+            method.type = declarator.type;
+            method.operator_function = declarator.operator_function;
+            method.params = param_inputs_from_parsed_params(
+                declarator.params,
+                /*move_runtime_fragments=*/false);
+            method.loc = declarator.loc.isInvalid()
+                ? loc_for_index(member_begin)
+                : declarator.loc;
+            method.declared_access = current_access;
+            method.flags = flags;
+            method.is_static = flags.is_static;
+            method.attrs = leading_member_attrs.attrs;
+            method.is_function_template = true;
+            method.has_explicit_exception_spec =
+                declarator.has_noexcept_specifier;
+            method.has_deferred_noexcept_operand =
+                declarator.has_deferred_noexcept_operand;
+            method.noexcept_operand_begin = declarator.noexcept_operand_begin;
+            method.noexcept_operand_end = declarator.noexcept_operand_end;
+            method.noexcept_operand_loc = declarator.noexcept_operand_loc;
+            method.noexcept_declaration_context =
+                declarator.noexcept_declaration_context;
+            method.noexcept_lookup_generation =
+                declarator.noexcept_lookup_generation;
+            method.attrs.append(member_parser.leading_attrs);
+            method.attrs.append(declarator.attrs);
+            method.attrs.append(declarator_attrs.attrs);
+
+            size_t method_index = methods.size();
+            if (declarator.has_trailing_requires_clause) {
+                retain_method_constraint(
+                    method_index,
+                    method,
+                    declarator.trailing_requires_constraint_begin,
+                    declarator.trailing_requires_constraint_end,
+                    declarator.trailing_requires_normal_form,
+                    declarator.trailing_requires_value);
+            }
+            std::optional<PendingMemberBody> pending_body;
+            has_error = parse_member_function_template_tail(
+                method,
+                member_children,
+                member_begin,
+                /*allow_pure_specifier=*/true,
+                /*allow_inline_body=*/true,
+                method_index,
+                std::move(declarator.params),
+                &pending_body) || has_error;
+            if (pending_body.has_value() &&
+                declarator.has_placeholder_type_constraint) {
+                pending_body->has_placeholder_return_type_constraint = true;
+                pending_body->placeholder_return_type_constraint_begin =
+                    declarator.placeholder_type_constraint_begin;
+                pending_body->placeholder_return_type_constraint_end =
+                    declarator.placeholder_type_constraint_end;
+                pending_body->placeholder_return_type_constraint_loc =
+                    declarator.placeholder_type_constraint_loc;
+            }
+
+            collect_session_.declare_record_method_shell(record.entity,
+                                                         method);
+            methods.push_back(std::move(method));
+            if (!has_error) {
+                info.name = declarator.name;
+                info.operator_function = declarator.operator_function;
+                info.pattern_type = declarator.type;
+                info.definition_begin = function_definition_begin;
+                record_trailing_function_requires_clause(info, declarator);
+                info.has_definition = pending_body.has_value();
+                PendingMemberTemplate pending;
+                pending.method_index = method_index;
+                pending.info = std::move(info);
+                pending.body = std::move(pending_body);
+                pending.loc = template_token.loc;
+                pending_member_templates.push_back(std::move(pending));
+            }
+
+            children.push_back(make_node(NodeKind::FunctionDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         member_children,
+                                         text_payload(declarator.name),
+                                         has_error ? NodeFlagHasError : NodeFlagNone));
+            return true;
+        };
+
+        auto parse_friend_class_template_declaration =
+            [&](size_t member_begin) -> bool {
+            Token template_token = current();
+            consume();
+            collect::Session::TemplateInfo friend_info;
+            bool has_error =
+                !parse_cxx_template_head(friend_info, template_token.loc);
+            auto has_default_template_argument =
+                [&](auto& self,
+                    const std::vector<
+                        collect::Session::TemplateParameter>& parameters)
+                    -> bool {
+                for (const collect::Session::TemplateParameter& parameter :
+                     parameters) {
+                    if (parameter.default_argument.has_value()) {
+                        return true;
+                    }
+                    if (parameter.kind ==
+                            collect::Session::TemplateParameterKind::
+                                Template &&
+                        self(self, parameter.nested_parameters())) {
+                        return true;
                     }
                 }
                 return false;
+            };
+            if (has_default_template_argument(
+                    has_default_template_argument,
+                    friend_info.parameters)) {
+                diagnose(
+                    DiagnosticLevel::Error,
+                    "default template arguments are not allowed in friend class template declarations",
+                    template_token.loc);
+                has_error = true;
             }
-            if (is_cxx_mode_active() &&
-                (s.type == TokenType::SCOPE_RESOLUTION ||
-                 (s.type == TokenType::COLON &&
-                  peek_token().type == TokenType::COLON))) {
-                auto type_scope = classify_cpp_type_scope_for_lookahead(
-                    ParserAnnotationStore::CppTypeScopeContext::
-                        DeclSpecifier);
-                switch (type_scope.kind) {
-                    case ParserAnnotationStore::CppTypeScopeKind::TypeName:
-                    case ParserAnnotationStore::CppTypeScopeKind::
-                        TypeTemplateId:
-                    case ParserAnnotationStore::CppTypeScopeKind::
-                        DependentType:
-                    case ParserAnnotationStore::CppTypeScopeKind::
-                        PlaceholderConstraint:
-                        bump_type_scope_fast_type_accept();
-                        return true;
-                    case ParserAnnotationStore::CppTypeScopeKind::ScopeOnly:
-                    case ParserAnnotationStore::CppTypeScopeKind::
-                        DependentScope:
-                        bump_type_scope_scope_only_accept();
-                        return true;
-                    case ParserAnnotationStore::CppTypeScopeKind::NonType:
-                    case ParserAnnotationStore::CppTypeScopeKind::NoMatch:
-                        bump_type_scope_fast_non_type_reject();
-                        return false;
-                    case ParserAnnotationStore::CppTypeScopeKind::Inconclusive:
-                    case ParserAnnotationStore::CppTypeScopeKind::Error:
-                        bump_type_scope_inconclusive_fallback();
-                        return can_start_cpp_named_type_specifier_for_lookahead();
+            if (!match(TokenType::FRIEND_KW)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected friend class template declaration",
+                         current_loc());
+                has_error = true;
+            }
+            cir::RecordKind friend_record_kind = cir::RecordKind::Struct;
+            if (match(TokenType::CLASS)) {
+                friend_record_kind = cir::RecordKind::Class;
+            } else if (match(TokenType::STRUCT)) {
+                friend_record_kind = cir::RecordKind::Struct;
+            } else {
+                diagnose(DiagnosticLevel::Error,
+                         "expected class template friend type",
+                         current_loc());
+                has_error = true;
+            }
+            SrcLoc friend_loc = current_loc();
+            std::string friend_name;
+            cir::DeclContextId nominated_friend_context{};
+            auto starts_qualified_primary_friend_template = [&]() {
+                if (!check(TokenType::SCOPE_RESOLUTION) &&
+                    (!is_identifier_token(current().type) ||
+                     peek(1).type != TokenType::SCOPE_RESOLUTION)) {
+                    return false;
+                }
+                RevertingTentativeParsingAction tentative(
+                    *this, TentativeMode::CollectBacked);
+                ParsedNestedName nested = parse_nested_name_specifier();
+                if (nested.has_error ||
+                    nested.depends_on_template_parameter ||
+                    !nested.scope.context.valid() ||
+                    !is_identifier_token(current().type) ||
+                    peek(1).type == TokenType::LESS_THAN) {
+                    return false;
+                }
+                const cir::File& file = collect_session_.file();
+                cir::DeclContextKind kind =
+                    file.decl_context(nested.scope.context).kind;
+                return kind == cir::DeclContextKind::Record ||
+                       kind == cir::DeclContextKind::Namespace ||
+                       kind == cir::DeclContextKind::TranslationUnit;
+            };
+            if (!has_error &&
+                starts_qualified_primary_friend_template()) {
+                ParsedNestedName nested = parse_nested_name_specifier();
+                if (nested.has_error || !nested.scope.context.valid() ||
+                    !is_identifier_token(current().type)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected qualified friend class template name",
+                             current_loc());
+                    has_error = true;
+                } else {
+                    nominated_friend_context = nested.scope.context;
+                    friend_name = current().value;
+                    consume();
                 }
             }
-            // Check for C23 [[...]] attribute syntax
-            if (s.type == TokenType::LEFT_BRACKET && peek_token().type == TokenType::LEFT_BRACKET) {
+            auto starts_dependent_member_friend_type = [&]() {
+                if (check(TokenType::SCOPE_RESOLUTION)) {
+                    return true;
+                }
+                if (!is_identifier_token(current().type)) {
+                    return false;
+                }
+                return peek(1).type == TokenType::SCOPE_RESOLUTION ||
+                       (peek(1).type == TokenType::LESS_THAN &&
+                        template_id_precedes_scope(0));
+            };
+            if (friend_name.empty() && !has_error &&
+                starts_dependent_member_friend_type()) {
+                collect::Session::InstantiationScope header_scope =
+                    collect_session_.begin_template_header(friend_info,
+                                                           template_token.loc);
+                std::optional<cir::TypeRef> friend_type =
+                    parse_cxx_qualified_type_name(
+                        TypeParseContext::type_only(
+                            TypeParseContext::Origin::FriendTypeSpecifier));
+                collect_session_.finish_template_header(
+                    std::move(header_scope));
+                if (!friend_type.has_value() || !friend_type->valid()) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected dependent member friend type",
+                             current_loc());
+                    has_error = true;
+                } else {
+                    collect_session_.add_pending_dependent_member_friend_type(
+                        record.entity,
+                        *friend_type,
+                        friend_info.parameters,
+                        friend_loc);
+                }
+                if (!match(TokenType::SEMICOLON)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ';' after dependent member friend declaration",
+                             current_loc());
+                    skip_until_statement_boundary();
+                    has_error = true;
+                }
+                children.push_back(make_node(NodeKind::RecordDecl,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {},
+                                             text_payload("friend"),
+                                             has_error ? NodeFlagHasError
+                                                       : NodeFlagNone));
                 return true;
             }
-            return false;
+            if (friend_name.empty() &&
+                is_identifier_token(current().type)) {
+                friend_name = current().value;
+                consume();
+            } else if (friend_name.empty()) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected friend class template name",
+                         current_loc());
+                has_error = true;
+            }
+            if (check(TokenType::LESS_THAN)) {
+                diagnose(
+                    DiagnosticLevel::Error,
+                    "friend declarations shall not declare partial specializations",
+                    current_loc());
+                has_error = true;
+                skip_balanced_until_semicolon_or_brace();
+            } else if (check(TokenType::LEFT_BRACE)) {
+                diagnose(
+                    DiagnosticLevel::Error,
+                    "a friend class template shall not be defined in a class",
+                    current_loc());
+                has_error = true;
+                skip_balanced_until_semicolon_or_brace();
+                match(TokenType::SEMICOLON);
+            } else if (!match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after friend class template declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+                has_error = true;
+            }
+            if (!friend_name.empty() && !has_error) {
+                const cir::File& file = collect_session_.file();
+                cir::DeclContextId friend_context =
+                    nominated_friend_context;
+                if (!friend_context.valid()) {
+                    for (cir::DeclContextId context =
+                             collect_session_.current_decl_context();
+                         context.valid();
+                         context = file.decl_context(context).parent) {
+                        cir::DeclContextKind kind =
+                            file.decl_context(context).kind;
+                        if (kind == cir::DeclContextKind::Namespace ||
+                            kind == cir::DeclContextKind::TranslationUnit) {
+                            friend_context = context;
+                            break;
+                        }
+                    }
+                }
+                const collect::Session::TemplateInfo* target =
+                    friend_context.valid()
+                        ? collect_session_.template_info_in_context(
+                              friend_context,
+                              friend_name,
+                              /*include_parents=*/
+                                  !nominated_friend_context.valid())
+                        : collect_session_.template_info_for_name(friend_name);
+                cir::EntityId target_entity{};
+                if (!target) {
+                    collect::Session::TemplateInfo hidden_info =
+                        friend_info;
+                    hidden_info.name = friend_name;
+                    hidden_info.is_class_template = true;
+                    hidden_info.record_kind = friend_record_kind;
+                    target_entity =
+                        collect_session_.declare_hidden_friend_class_template(
+                            std::move(hidden_info),
+                            friend_context,
+                            friend_loc);
+                } else if (!target->is_class_template ||
+                           target->is_partial_specialization) {
+                    diagnose(DiagnosticLevel::Error,
+                             "friend class template target is not a primary class template",
+                             friend_loc);
+                    has_error = true;
+                } else if (!collect_session_.template_heads_equivalent(
+                               friend_info,
+                               *target)) {
+                    diagnose(
+                        DiagnosticLevel::Error,
+                        "friend class template parameter list does not match target template",
+                        template_token.loc);
+                    has_error = true;
+                } else {
+                    target_entity = target->entity;
+                }
+                if (target_entity.valid() && !has_error) {
+                    collect_session_.add_pending_friend_class_template(
+                        record.entity,
+                        target_entity);
+                }
+            }
+            children.push_back(make_node(NodeKind::RecordDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         {},
+                                         text_payload(friend_name),
+                                         has_error ? NodeFlagHasError
+                                                   : NodeFlagNone));
+            return true;
+        };
+
+        auto parse_dependent_member_friend_function_declaration =
+            [&](size_t member_begin) -> bool {
+            Token template_token = current();
+            consume();
+            collect::Session::TemplateInfo friend_info;
+            bool has_error =
+                !parse_cxx_template_head(friend_info, template_token.loc);
+            if (!match(TokenType::FRIEND_KW)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected friend function template declaration",
+                         current_loc());
+                has_error = true;
+            }
+
+            size_t function_definition_begin = current_raw_index();
+            collect::Session::InstantiationScope header_scope =
+                collect_session_.begin_template_header(friend_info,
+                                                       template_token.loc);
+            DeclarationParser friend_parser(
+                *this,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberDeclSpecifier));
+            friend_parser.allow_cxx_member_declarator_ids = true;
+            cir::TypeRef return_type =
+                friend_parser.parse_declaration(false, true);
+            NodeId return_type_syntax = friend_parser.type_syntax;
+            ParsedDeclarator declarator =
+                friend_parser.parse_declarator(return_type, true);
+            collect_session_.finish_template_header(std::move(header_scope));
+
+            std::vector<NodeId> member_children;
+            if (return_type_syntax != InvalidNodeId) {
+                member_children.push_back(return_type_syntax);
+            }
+            if (declarator.syntax != InvalidNodeId) {
+                member_children.push_back(declarator.syntax);
+            }
+
+            bool friend_definition = check(TokenType::LEFT_BRACE);
+            bool handled_friend_definition = false;
+            if (!declarator.is_function || !declarator.has_name ||
+                (!declarator.dependent_qualifier_type.type.valid() &&
+                 !declarator.type.valid())) {
+                diagnose(
+                    DiagnosticLevel::Error,
+                    "unsupported friend function template declaration",
+                    declarator.loc.isInvalid() ? current_loc()
+                                               : declarator.loc);
+                has_error = true;
+            } else if (!declarator.dependent_qualifier_type.type.valid()) {
+                if (friend_definition &&
+                    declarator.qualified_context.valid()) {
+                    diagnose(
+                        DiagnosticLevel::Error,
+                        "a friend function definition must have an unqualified name",
+                        declarator.loc);
+                    has_error = true;
+                    skip_balanced_until_semicolon_or_brace();
+                    handled_friend_definition = true;
+                } else if (friend_definition) {
+                    const cir::File& file = collect_session_.file();
+                    cir::DeclContextId friend_context =
+                        declarator.qualified_context;
+                    if (!friend_context.valid()) {
+                        for (cir::DeclContextId context =
+                                 collect_session_.current_decl_context();
+                             context.valid();
+                             context = file.decl_context(context).parent) {
+                            cir::DeclContextKind kind =
+                                file.decl_context(context).kind;
+                            if (kind == cir::DeclContextKind::Namespace ||
+                                kind ==
+                                    cir::DeclContextKind::TranslationUnit) {
+                                friend_context = context;
+                                break;
+                            }
+                        }
+                    }
+                    size_t definition_end =
+                        skip_balanced_until_semicolon_or_brace();
+                    collect::Session::TemplateInfo hidden_info =
+                        friend_info;
+                    hidden_info.name = declarator.name;
+                    hidden_info.operator_function = declarator.operator_function;
+                    hidden_info.pattern_type = declarator.type;
+                    record_trailing_function_requires_clause(hidden_info,
+                                                             declarator);
+                    bool references_enclosing_parameter =
+                        constraint_references_parameter_outside_head(
+                            hidden_info);
+                    hidden_info.has_definition = true;
+                    hidden_info.definition_begin = function_definition_begin;
+                    hidden_info.definition_end = definition_end;
+                    hidden_info.lexical_context = friend_context;
+                    cir::EntityId owner_template{};
+                    std::vector<collect::Session::TemplateArgument>
+                        owner_arguments;
+                    if (collect_session_.template_arguments_for_record(
+                            record.entity,
+                            &owner_template,
+                            &owner_arguments)) {
+                        const collect::Session::TemplateInfo* owner_info =
+                            collect_session_.template_info(owner_template);
+                        if (owner_info && owner_info->is_class_template &&
+                            !owner_arguments.empty()) {
+                            collect::Session::TemplateArgumentBindings
+                                owner_bindings;
+                            if (collect_session_
+                                    .bind_template_arguments_to_parameters(
+                                        owner_info->parameters,
+                                        owner_arguments,
+                                        owner_bindings)) {
+                                hidden_info.enclosing_instantiation_bindings
+                                    .push_back(
+                                        {owner_info->parameters,
+                                         std::move(owner_bindings)});
+                            }
+                        }
+                    }
+                    std::vector<collect::ParamInput> hidden_params =
+                        param_inputs_from_parsed_params(
+                            declarator.params,
+                            /*move_runtime_fragments=*/false);
+                    cir::EntityId hidden =
+                        collect_session_
+                            .declare_hidden_friend_function_template(
+                                std::move(hidden_info),
+                                friend_context,
+                                declarator.loc,
+                                &hidden_params,
+                                record.entity,
+                                references_enclosing_parameter
+                                    ? record.entity
+                                    : cir::EntityId{});
+                    if (hidden.valid()) {
+                        collect_session_
+                            .add_pending_friend_function_template(
+                                record.entity,
+                                hidden);
+                        handled_friend_definition = true;
+                    } else {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "unsupported friend function template definition",
+                            declarator.loc);
+                        has_error = true;
+                    }
+                } else {
+                    const cir::File& file = collect_session_.file();
+                    cir::DeclContextId friend_context =
+                        declarator.qualified_context;
+                    if (!friend_context.valid()) {
+                        for (cir::DeclContextId context =
+                                 collect_session_.current_decl_context();
+                             context.valid();
+                             context = file.decl_context(context).parent) {
+                            cir::DeclContextKind kind =
+                                file.decl_context(context).kind;
+                            if (kind == cir::DeclContextKind::Namespace ||
+                                kind ==
+                                    cir::DeclContextKind::TranslationUnit) {
+                                friend_context = context;
+                                break;
+                            }
+                        }
+                    }
+
+                    std::vector<const collect::Session::TemplateInfo*>
+                        candidates =
+                            collect_session_
+                                .function_template_infos_for_name(
+                                    friend_context,
+                                    declarator.name,
+                                    /*include_parents=*/true);
+                    const collect::Session::TemplateInfo* selected = nullptr;
+                    bool ambiguous = false;
+                    collect::Session::TemplateInfo friend_candidate =
+                        friend_info;
+                    friend_candidate.name = declarator.name;
+                    friend_candidate.operator_function =
+                        declarator.operator_function;
+                    friend_candidate.pattern_type = declarator.type;
+                    record_trailing_function_requires_clause(friend_candidate,
+                                                             declarator);
+                    bool references_enclosing_parameter =
+                        constraint_references_parameter_outside_head(
+                            friend_candidate);
+                    if (references_enclosing_parameter) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "a friend function template declaration whose constraint depends on an enclosing template parameter shall be a definition",
+                            declarator.trailing_requires_loc.isInvalid()
+                                ? declarator.loc
+                                : declarator.trailing_requires_loc);
+                        has_error = true;
+                    } else {
+                        for (const collect::Session::TemplateInfo* candidate :
+                             candidates) {
+                            if (!candidate ||
+                                !collect_session_
+                                     .function_template_declarations_correspond(
+                                         friend_candidate,
+                                         *candidate)) {
+                                continue;
+                            }
+                            if (selected) {
+                                ambiguous = true;
+                                break;
+                            }
+                            selected = candidate;
+                        }
+                    }
+                    if (references_enclosing_parameter) {
+
+                    } else if (ambiguous) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "ambiguous friend function template target",
+                                 declarator.loc);
+                        has_error = true;
+                    } else if (!selected) {
+                        collect::Session::TemplateInfo hidden_info =
+                            friend_info;
+                        hidden_info.name = declarator.name;
+                        hidden_info.operator_function = declarator.operator_function;
+                        hidden_info.pattern_type = declarator.type;
+                        record_trailing_function_requires_clause(hidden_info,
+                                                                 declarator);
+                        hidden_info.has_definition = false;
+                        cir::EntityId hidden =
+                            collect_session_
+                                .declare_hidden_friend_function_template(
+                                    std::move(hidden_info),
+                                    friend_context,
+                                    declarator.loc,
+                                    nullptr,
+                                    record.entity);
+                        if (hidden.valid()) {
+                            collect_session_
+                                .add_pending_friend_function_template(
+                                    record.entity,
+                                    hidden);
+                        } else {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "unsupported friend function template declaration",
+                                declarator.loc);
+                            has_error = true;
+                        }
+                    } else {
+                        collect_session_.add_pending_friend_function_template(
+                            record.entity,
+                            selected->entity);
+                    }
+                }
+            } else if (!friend_definition) {
+                collect_session_
+                    .add_pending_dependent_member_friend_function(
+                        record.entity,
+                        declarator.dependent_qualifier_type,
+                        declarator.name,
+                        declarator.type_ref,
+                        friend_info.parameters,
+                        declarator.loc);
+            }
+            if (friend_definition) {
+                if (!handled_friend_definition) {
+                    diagnose(DiagnosticLevel::Error,
+                             "friend definitions inside the class are not supported yet",
+                             current_loc());
+                    skip_balanced_until_semicolon_or_brace();
+                    has_error = true;
+                }
+            } else if (!match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after friend declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+                has_error = true;
+            }
+            children.push_back(make_node(NodeKind::FunctionDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         std::move(member_children),
+                                         text_payload(declarator.name),
+                                         has_error ? NodeFlagHasError
+                                                   : NodeFlagNone));
+            return true;
+        };
+
+        auto parse_dependent_member_friend_function_template_declaration =
+            [&](size_t member_begin) -> bool {
+            Token outer_template_token = current();
+            consume();
+            collect::Session::TemplateInfo friend_info;
+            bool has_error =
+                !parse_cxx_template_head(friend_info, outer_template_token.loc);
+
+            collect::Session::InstantiationScope outer_scope =
+                collect_session_.begin_template_header(friend_info,
+                                                       outer_template_token.loc);
+            Token member_template_token = current();
+            if (!match(TokenType::TEMPLATE)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected member template friend declaration",
+                         current_loc());
+                has_error = true;
+            }
+            collect::Session::TemplateInfo member_info;
+            if (!parse_cxx_template_head(member_info,
+                                         member_template_token.loc)) {
+                has_error = true;
+            }
+            if (!match(TokenType::FRIEND_KW)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected friend member template declaration",
+                         current_loc());
+                has_error = true;
+            }
+
+            collect::Session::InstantiationScope member_scope =
+                collect_session_.begin_template_header(member_info,
+                                                       member_template_token.loc);
+            DeclarationParser friend_parser(
+                *this,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberDeclSpecifier));
+            friend_parser.allow_cxx_member_declarator_ids = true;
+            cir::TypeRef return_type =
+                friend_parser.parse_declaration(false, true);
+            NodeId return_type_syntax = friend_parser.type_syntax;
+            ParsedDeclarator declarator =
+                friend_parser.parse_declarator(return_type, true);
+            collect_session_.finish_template_header(std::move(member_scope));
+            collect_session_.finish_template_header(std::move(outer_scope));
+
+            std::vector<NodeId> member_children;
+            if (return_type_syntax != InvalidNodeId) {
+                member_children.push_back(return_type_syntax);
+            }
+            if (declarator.syntax != InvalidNodeId) {
+                member_children.push_back(declarator.syntax);
+            }
+
+            bool friend_definition = check(TokenType::LEFT_BRACE);
+            if (!declarator.is_function || !declarator.has_name ||
+                !declarator.dependent_qualifier_type.type.valid()) {
+                diagnose(
+                    DiagnosticLevel::Error,
+                    "unsupported friend member template declaration",
+                    declarator.loc.isInvalid() ? current_loc()
+                                               : declarator.loc);
+                has_error = true;
+            } else if (!friend_definition) {
+                collect_session_
+                    .add_pending_dependent_member_friend_function_template(
+                        record.entity,
+                        declarator.dependent_qualifier_type,
+                        declarator.name,
+                        declarator.type_ref,
+                        friend_info.parameters,
+                        member_info.parameters,
+                        declarator.loc);
+            }
+            if (friend_definition) {
+                diagnose(DiagnosticLevel::Error,
+                         "friend definitions inside the class are not supported yet",
+                         current_loc());
+                skip_balanced_until_semicolon_or_brace();
+                has_error = true;
+            } else if (!match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after friend declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+                has_error = true;
+            }
+            children.push_back(make_node(NodeKind::FunctionDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         std::move(member_children),
+                                         text_payload(declarator.name),
+                                         has_error ? NodeFlagHasError
+                                                   : NodeFlagNone));
+            return true;
+        };
+
+        auto parse_conversion_member = [&](size_t member_begin,
+                                           bool leading_virtual,
+                                           const LayoutAttrs& leading_attrs) -> bool {
+            size_t lookahead = skip_cxx_special_member_prefix(0);
+            size_t conversion_parentheses = 0;
+            while (peek(lookahead).type == TokenType::LEFT_PAREN) {
+                ++conversion_parentheses;
+                ++lookahead;
+            }
+            if (peek(lookahead).type != TokenType::OPERATOR_KW) {
+                return false;
+            }
+
+            ParsedSpecialMemberPrefix prefix =
+                parse_special_member_prefix(leading_attrs);
+            collect::DeclFlags& flags = prefix.flags;
+            ParsedExplicitSpecifier& explicit_specifier =
+                prefix.explicit_specifier;
+            bool declaration_has_error = prefix.has_error;
+
+            for (size_t index = 0; index < conversion_parentheses; ++index) {
+                consume();
+            }
+            size_t name_begin = current_raw_index();
+            Token operator_token = current();
+            consume();
+            auto [conversion_type, conversion_syntax] =
+                parse_record_conversion_type_id();
+            cir::TypeId resolved_conversion_type =
+                collect_session_.file().resolved_type(conversion_type.type);
+            if (collect_session_.file().valid(resolved_conversion_type)) {
+                cir::TypeKind conversion_kind =
+                    collect_session_.file().type(resolved_conversion_type).kind;
+                declaration_has_error = declaration_has_error ||
+                    conversion_kind == cir::TypeKind::Function ||
+                    conversion_kind == cir::TypeKind::Array;
+            }
+            std::string member_name = "operator " +
+                collect_session_.file().format_type(conversion_type);
+            std::vector<NodeId> member_children = prefix.attrs.syntax;
+            if (conversion_syntax != InvalidNodeId) {
+                member_children.push_back(conversion_syntax);
+            }
+            member_children.push_back(make_node(NodeKind::Name,
+                                                name_begin,
+                                                last_consumed_raw_end(),
+                                                {},
+                                                text_payload(member_name)));
+
+            for (size_t index = 0; index < conversion_parentheses; ++index) {
+                if (!match(TokenType::RIGHT_PAREN)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ')' around conversion-function-id",
+                             current_loc());
+                    declaration_has_error = true;
+                    break;
+                }
+            }
+
+            if (prefix.invalid_static) {
+                diagnose(DiagnosticLevel::Error,
+                         "conversion function must be a non-static member function",
+                         operator_token.loc);
+                declaration_has_error = true;
+            }
+
+            if (!match(TokenType::LEFT_PAREN)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected parameter list in conversion function declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+                return true;
+            }
+            bool is_variadic = false;
+            std::vector<ParsedParam> params = parse_parameter_list(
+                false,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberParameter),
+                &is_variadic);
+            std::vector<cir::TypeRef> param_types;
+            param_types.reserve(params.size());
+            for (const ParsedParam& param : params) {
+                if (param.syntax != InvalidNodeId) {
+                    member_children.push_back(param.syntax);
+                }
+                if (param.is_parameter_pack_expansion_sentinel) {
+                    continue;
+                }
+                param_types.push_back(param.type_ref);
+            }
+            if (!param_types.empty() || is_variadic) {
+                diagnose(DiagnosticLevel::Error,
+                         "conversion function cannot have parameters",
+                         operator_token.loc);
+                declaration_has_error = true;
+            }
+
+            bool member_is_const = false;
+            bool member_is_volatile = false;
+            cir::FunctionRefQualifierKind member_ref_qualifier =
+                cir::FunctionRefQualifierKind::None;
+            while (true) {
+                if (match(TokenType::CONST)) {
+                    member_is_const = true;
+                } else if (match(TokenType::VOLATILE)) {
+                    member_is_volatile = true;
+                } else if (match(TokenType::BITWISE_AND)) {
+                    member_ref_qualifier =
+                        cir::FunctionRefQualifierKind::LValue;
+                } else if (match(TokenType::LOGICAL_AND)) {
+                    member_ref_qualifier =
+                        cir::FunctionRefQualifierKind::RValue;
+                } else {
+                    break;
+                }
+            }
+
+            ParsedRecordExceptionSpec exception_spec =
+                parse_special_member_exception_spec(member_children);
+            if (match(TokenType::ARROW)) {
+                SrcLoc arrow_loc = last_consumed_loc();
+                DeclarationParser trailing_type_parser(
+                    *this,
+                    TypeParseContext::type_only(
+                        TypeParseContext::Origin::TrailingReturnType));
+                (void)trailing_type_parser.parse_declaration(false, true);
+                if (trailing_type_parser.type_syntax != InvalidNodeId) {
+                    member_children.push_back(trailing_type_parser.type_syntax);
+                }
+                diagnose(DiagnosticLevel::Error,
+                         "conversion function cannot use a trailing return type",
+                         arrow_loc);
+                declaration_has_error = true;
+            }
+
+            cir::TypeId function_type =
+                collect_session_.function_type(conversion_type,
+                                               param_types,
+                                               false,
+                                               true,
+                                               member_is_const,
+                                               std::move(exception_spec.spec),
+                                               {},
+                                               member_ref_qualifier,
+                                               member_is_volatile);
+            collect::RecordMethodInput method;
+            method.name = member_name;
+            method.type = function_type;
+            method.operator_function.kind =
+                cir::OperatorFunctionKind::Conversion;
+            method.operator_function.conversion_type = conversion_type;
+            method.params = param_inputs_from_parsed_params(
+                params,
+                /*move_runtime_fragments=*/false);
+            method.loc = operator_token.loc;
+            method.declared_access = current_access;
+            method.flags = flags;
+            method.attrs = prefix.attrs.attrs;
+            method.is_virtual = leading_virtual;
+            method.has_explicit_exception_spec =
+                exception_spec.has_explicit;
+            method.has_deferred_noexcept_operand = exception_spec.deferred;
+            method.noexcept_operand_begin = exception_spec.operand_begin;
+            method.noexcept_operand_end = exception_spec.operand_end;
+            method.noexcept_operand_loc = exception_spec.operand_loc;
+            method.noexcept_declaration_context =
+                exception_spec.declaration_context;
+            method.noexcept_lookup_generation =
+                exception_spec.lookup_generation;
+            method.is_explicit = prefix.is_explicit();
+            method.is_conversion_function = true;
+            method.explicit_specifier = explicit_specifier.kind;
+            method.explicit_expression_begin =
+                explicit_specifier.expression_begin;
+            method.explicit_expression_end = explicit_specifier.expression_end;
+            method.explicit_value_expression =
+                explicit_specifier.value_expression;
+            method.explicit_declaration_context =
+                explicit_specifier.declaration_context;
+            method.explicit_lookup_generation =
+                explicit_specifier.lookup_generation;
+            size_t method_index = methods.size();
+            if (match(TokenType::REQUIRES_KW)) {
+                SrcLoc requires_loc = last_consumed_loc();
+                size_t constraint_begin = 0;
+                size_t constraint_end = 0;
+                std::optional<bool> constraint_value;
+                collect::Session::NormalizedConstraint normal_form;
+                bool valid = parse_and_validate_constraint_expression(
+                    requires_loc,
+                    constraint_begin,
+                    constraint_end,
+                    &constraint_value,
+                    &normal_form);
+                if (leading_virtual) {
+                    diagnose(DiagnosticLevel::Error,
+                             "a virtual function cannot have an associated requires-clause",
+                             requires_loc);
+                }
+                if (valid) {
+                    retain_method_constraint(method_index,
+                                             method,
+                                             constraint_begin,
+                                             constraint_end,
+                                             std::move(normal_form),
+                                             constraint_value);
+                } else {
+                    method.constraint_satisfaction =
+                        cir::ConstraintSatisfactionKind::Invalid;
+                }
+            }
+            bool parsed_body = parse_member_function_tail(method,
+                                                          member_children,
+                                                          false,
+                                                          std::move(params),
+                                                          false);
+            method.has_deferred_definition = parsed_body;
+            collect_session_.declare_record_method_shell(record.entity,
+                                                         method);
+            methods.push_back(std::move(method));
+
+            children.push_back(make_node(NodeKind::FunctionDecl,
+                                         member_begin,
+                                         last_consumed_raw_end(),
+                                         member_children,
+                                         text_payload(member_name),
+                                         declaration_has_error
+                                             ? NodeFlagHasError
+                                             : NodeFlagNone));
+
+            if (!parsed_body && !match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after conversion function declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+            }
+            return true;
+        };
+
+        while (!at_end() && !check(TokenType::RIGHT_BRACE)) {
+            collect_session_.set_current_record_member_access(current_access);
+            size_t member_begin = current_raw_index();
+            if (match(TokenType::SEMICOLON)) {
+                continue;
+            }
+
+            if (check(TokenType::STATIC_ASSERT)) {
+                ParsedDecl assert_decl = parse_static_assert_declaration();
+                if (assert_decl.syntax != InvalidNodeId) {
+                    children.push_back(assert_decl.syntax);
+                }
+                continue;
+            }
+
+            if (std::optional<ParsedDecl> deduction_guide =
+                    try_parse_cxx_deduction_guide_declaration(
+                        nullptr, SrcLoc{}, member_begin)) {
+                if (deduction_guide->syntax != InvalidNodeId) {
+                    children.push_back(deduction_guide->syntax);
+                }
+                continue;
+            }
+
+            bool leading_virtual = match(TokenType::VIRTUAL_KW);
+            if (is_cxx_access_specifier(current().type) &&
+                peek(1).type == TokenType::COLON) {
+                if (leading_virtual) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected member declaration after 'virtual'",
+                             current_loc());
+                }
+                Token access_token = current();
+                current_access = access_from_token(access_token.type);
+                collect_session_.set_current_record_member_access(
+                    current_access);
+                consume();
+                consume();
+                children.push_back(make_node(NodeKind::AmbiguousSyntax,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {},
+                                             text_payload(std::string(access_token.value) + ":")));
+                continue;
+            }
+
+            if (check(TokenType::USING)) {
+                if (leading_virtual) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected member declaration after 'virtual'",
+                             current_loc());
+                }
+                ParsedDecl using_decl = parse_cxx_using_declaration();
+                if (using_decl.syntax != InvalidNodeId) {
+                    children.push_back(using_decl.syntax);
+                }
+                continue;
+            }
+
+            if (check(TokenType::TEMPLATE)) {
+                if (leading_virtual) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected member declaration after 'virtual'",
+                             current_loc());
+                }
+                std::optional<size_t> after_head = template_head_end_offset();
+                TokenType after_head_type =
+                    after_head.has_value() ? peek(*after_head).type
+                                           : TokenType::UNKNOWN;
+                FriendTemplateStart friend_template_start =
+                    friend_template_start_after_head(after_head);
+                TemplatedSpecialMemberKind special_member_kind =
+                    after_head.has_value()
+                        ? templated_special_member_kind_after_head(*after_head)
+                        : TemplatedSpecialMemberKind::None;
+                bool starts_special_member_template =
+                    special_member_kind != TemplatedSpecialMemberKind::None;
+                bool starts_existing_template_declaration =
+                    after_head_type == TokenType::STATIC ||
+                    after_head_type == TokenType::TEMPLATE ||
+                    after_head_type == TokenType::USING ||
+                    after_head_type == TokenType::STRUCT ||
+                    after_head_type == TokenType::UNION ||
+                    after_head_type == TokenType::CLASS ||
+                    after_head_type == TokenType::ENUM;
+                bool starts_friend_class_template =
+                    friend_template_start == FriendTemplateStart::Class;
+                std::optional<size_t> after_member_template_head =
+                    after_head_type == TokenType::TEMPLATE
+                        ? template_head_end_offset_from(*after_head)
+                        : std::nullopt;
+                bool starts_friend_member_function_template =
+                    after_member_template_head.has_value() &&
+                    peek(*after_member_template_head).type ==
+                        TokenType::FRIEND_KW;
+                bool starts_friend_function_template =
+                    friend_template_start != FriendTemplateStart::None;
+                bool starts_deduction_guide =
+                    after_head.has_value() &&
+                    template_member_decl_is_deduction_guide(*after_head);
+                bool starts_virtual_member_template =
+                    after_head.has_value() &&
+                    after_head_type == TokenType::VIRTUAL_KW;
+                bool starts_friend_template =
+                    starts_friend_class_template ||
+                    starts_friend_member_function_template ||
+                    starts_friend_function_template;
+                bool may_have_function_declarator =
+                    after_head.has_value() &&
+                    template_member_decl_may_have_function_declarator(
+                        *after_head);
+                bool starts_static_function_template =
+                    may_have_function_declarator &&
+                    template_member_decl_has_static_specifier(*after_head);
+                if (current_record_is_local(collect_session_)) {
+                    diagnose(
+                        DiagnosticLevel::Error,
+                        starts_friend_template
+                            ? "a friend template shall not be declared in a local class"
+                            : "a local class shall not have member templates",
+                        current_loc());
+                    skip_balanced_until_semicolon_or_brace();
+                    match(TokenType::SEMICOLON);
+                    continue;
+                }
+                if (starts_virtual_member_template) {
+                    diagnose(DiagnosticLevel::Error,
+                             "a member function template shall not be declared virtual",
+                             current_loc());
+                    skip_balanced_until_semicolon_or_brace();
+                    match(TokenType::SEMICOLON);
+                    continue;
+                }
+                bool use_existing_template_path =
+                    !after_head.has_value() ||
+                    starts_deduction_guide ||
+                    (!starts_special_member_template &&
+                     (!may_have_function_declarator ||
+                      (starts_existing_template_declaration &&
+                       !starts_static_function_template)));
+                if (starts_friend_class_template) {
+                    parse_friend_class_template_declaration(member_begin);
+                } else if (starts_friend_member_function_template) {
+                    parse_dependent_member_friend_function_template_declaration(
+                        member_begin);
+                } else if (starts_friend_function_template) {
+                    parse_dependent_member_friend_function_declaration(
+                        member_begin);
+                } else if (use_existing_template_path) {
+                    ParsedDecl templated_decl = parse_cxx_template_declaration();
+                    if (templated_decl.syntax != InvalidNodeId) {
+                        children.push_back(templated_decl.syntax);
+                    }
+                } else if (starts_special_member_template) {
+                    parse_templated_special_member(member_begin,
+                                                   special_member_kind);
+                } else {
+                    parse_nonstatic_member_function_template(member_begin);
+                }
+                continue;
+            }
+
+            LayoutAttrs leading_member_attrs = parse_layout_attributes();
+            if (match(TokenType::VIRTUAL_KW)) {
+                if (leading_virtual) {
+                    diagnose(DiagnosticLevel::Error,
+                             "duplicate 'virtual' specifier",
+                             last_consumed_loc());
+                }
+                leading_virtual = true;
+
+                merge_attrs(leading_member_attrs,
+                            parse_layout_attributes());
+            }
+
+            if (parse_special_member(member_begin,
+                                     leading_virtual,
+                                     leading_member_attrs)) {
+                continue;
+            }
+
+            if (parse_conversion_member(member_begin,
+                                        leading_virtual,
+                                        leading_member_attrs)) {
+                continue;
+            }
+
+            if (!is_type_start(current().type) &&
+                !(lang_opts_.enable_cpp_reflection &&
+                  check(TokenType::SPLICE_OPEN)) &&
+                !starts_cxx_qualified_name()) {
+                diagnose(DiagnosticLevel::Error, "expected class member declaration", current_loc());
+                skip_until_statement_boundary();
+                continue;
+            }
+
+            bool member_starts_friend = check(TokenType::FRIEND_KW);
+            size_t friend_type_replay_cursor = cursor_;
+            size_t friend_type_replay_last_consumed_raw_end =
+                last_consumed_raw_end_;
+            collect::Session::ParameterPackPatternCaptureScope
+                friend_type_pack_capture;
+            if (member_starts_friend) {
+                friend_type_pack_capture =
+                    collect_session_
+                        .begin_parameter_pack_pattern_capture();
+            }
+            DeclarationParser member_parser(
+                *this,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberDeclSpecifier));
+            member_parser.allow_cxx_member_declarator_ids = true;
+            member_parser.allow_friend_type_specifier = member_starts_friend;
+            cir::TypeRef member_base_type = member_parser.parse_declaration(false, true);
+            NodeId member_type = member_parser.type_syntax;
+            std::vector<collect::Session::ParameterPackIdentity>
+                friend_type_packs;
+            if (member_starts_friend) {
+                friend_type_packs =
+                    collect_session_
+                        .finish_parameter_pack_pattern_capture(
+                            friend_type_pack_capture);
+            }
+            collect::DeclFlags flags = declaration_flags_from_parser(member_parser);
+            bool friend_has_storage_class =
+                flags.is_friend &&
+                (member_parser.storage_class != StorageClass::None ||
+                 flags.is_thread_local || flags.is_mutable);
+            if (friend_has_storage_class) {
+                diagnose(DiagnosticLevel::Error,
+                         "a storage-class specifier is not allowed in a friend declaration",
+                         loc_for_index(member_begin));
+            } else if (flags.is_extern) {
+                diagnose(DiagnosticLevel::Error,
+                         "a class member cannot be declared 'extern'",
+                         loc_for_index(member_begin));
+            }
+            if (flags.is_thread_local && !flags.is_static) {
+                diagnose(DiagnosticLevel::Error,
+                         "a thread_local class member must also be static",
+                         loc_for_index(member_begin));
+            }
+            if (leading_virtual && flags.is_static) {
+                diagnose(DiagnosticLevel::Error,
+                         "'virtual' is not allowed on static member declarations",
+                         loc_for_index(member_begin));
+            }
+            if (flags.is_friend) {
+                auto add_class_friend_type = [&](cir::TypeRef type_ref,
+                                                 bool pack_expansion = false) {
+                    collect_session_.add_pending_class_friend_type(
+                        record.entity,
+                        type_ref,
+                        pack_expansion,
+                        loc_for_index(member_begin));
+                };
+                auto diagnose_unexpanded_friend_type_pack =
+                    [&](const std::vector<
+                            collect::Session::ParameterPackIdentity>& packs,
+                        SrcLoc loc) {
+                    if (!packs.empty()) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "unexpanded template parameter pack '" +
+                                     packs.front().name +
+                                     "' is not supported yet",
+                                 loc);
+                    }
+                };
+
+                auto process_friend_type_specifier =
+                    [&](cir::TypeRef type_ref,
+                        const std::vector<
+                            collect::Session::ParameterPackIdentity>& packs,
+                        size_t replay_cursor,
+                        size_t replay_last_consumed_raw_end,
+                        size_t replay_end_cursor,
+                        bool has_ellipsis,
+                        SrcLoc ellipsis_loc,
+                        size_t continuation_cursor,
+                        size_t continuation_last_consumed_raw_end) {
+                    if (!has_ellipsis) {
+                        if (!packs.empty()) {
+                            diagnose_unexpanded_friend_type_pack(
+                                packs,
+                                current_loc());
+                        } else {
+                            add_class_friend_type(type_ref);
+                        }
+                        return;
+                    }
+                    std::optional<
+                        std::vector<collect::Session::TemplateArgument>>
+                        elements =
+                            collect_session_.template_type_pack_arguments(
+                                type_ref.type);
+                    if (!elements.has_value()) {
+                        if (!collect_session_.type_contains_type_parameter_pack(
+                                type_ref.type)) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "pack expansion pattern does not contain a template parameter pack",
+                                ellipsis_loc);
+                        } else if (!packs.empty()) {
+                            std::optional<size_t> element_count;
+                            bool dependent = false;
+                            for (const collect::Session::
+                                     ParameterPackIdentity& pack : packs) {
+                                std::optional<size_t> pack_count =
+                                    collect_session_
+                                        .parameter_pack_element_count(pack);
+                                if (!pack_count.has_value()) {
+                                    dependent = true;
+                                    break;
+                                }
+                                if (element_count.has_value() &&
+                                    *element_count != *pack_count) {
+                                    diagnose(
+                                        DiagnosticLevel::Error,
+                                        "pack expansion contains packs with different lengths",
+                                        ellipsis_loc);
+                                    *element_count = std::min(
+                                        *element_count,
+                                        *pack_count);
+                                } else if (!element_count.has_value()) {
+                                    element_count = *pack_count;
+                                }
+                            }
+                            if (!dependent) {
+                                size_t count = element_count.value_or(0);
+                                for (size_t i = 0; i < count; ++i) {
+                                    cursor_ = replay_cursor;
+                                    last_consumed_raw_end_ =
+                                        replay_last_consumed_raw_end;
+                                    auto replay_scope =
+                                        collect_session_
+                                            .begin_parameter_pack_element_replay(
+                                                packs,
+                                                i);
+                                    DeclarationParser replay_parser(
+                                        *this,
+                                        TypeParseContext::type_only(
+                                            TypeParseContext::Origin::FriendTypeSpecifier));
+                                    replay_parser
+                                        .allow_cxx_member_declarator_ids =
+                                        true;
+                                    replay_parser
+                                        .allow_friend_type_specifier = true;
+                                    cir::TypeRef replay_type =
+                                        replay_parser.parse_declaration(false,
+                                                                        true);
+                                    collect_session_
+                                        .finish_parameter_pack_element_replay(
+                                            replay_scope);
+                                    if (cursor_ != replay_end_cursor) {
+                                        diagnose(
+                                            DiagnosticLevel::Error,
+                                            "could not replay friend type pack expansion pattern",
+                                            ellipsis_loc);
+                                        cursor_ = replay_end_cursor;
+                                    }
+                                    add_class_friend_type(replay_type);
+                                }
+                            } else {
+                                add_class_friend_type(type_ref, true);
+                            }
+                        }
+                    } else {
+                        for (const collect::Session::TemplateArgument& element :
+                             *elements) {
+                            if (element.kind ==
+                                cir::TemplateArgumentKind::Type) {
+                                add_class_friend_type(element.type);
+                            }
+                        }
+                    }
+                    cursor_ = continuation_cursor;
+                    last_consumed_raw_end_ =
+                        continuation_last_consumed_raw_end;
+                };
+                if (check(TokenType::ELLIPSIS) ||
+                    check(TokenType::COMMA) ||
+                    check(TokenType::SEMICOLON)) {
+                    std::vector<NodeId> friend_type_nodes;
+                    friend_type_nodes.push_back(member_type);
+                    size_t friend_type_replay_end_cursor = cursor_;
+                    bool first_has_ellipsis = false;
+                    SrcLoc first_ellipsis_loc{};
+                    if (check(TokenType::ELLIPSIS)) {
+                        first_has_ellipsis = true;
+                        first_ellipsis_loc = current_loc();
+                        consume();
+                    }
+                    process_friend_type_specifier(
+                        member_base_type,
+                        friend_type_packs,
+                        friend_type_replay_cursor,
+                        friend_type_replay_last_consumed_raw_end,
+                        friend_type_replay_end_cursor,
+                        first_has_ellipsis,
+                        first_ellipsis_loc,
+                        cursor_,
+                        last_consumed_raw_end_);
+                    while (match(TokenType::COMMA)) {
+                        size_t list_item_replay_cursor = cursor_;
+                        size_t list_item_replay_last_consumed_raw_end =
+                            last_consumed_raw_end_;
+                        auto list_item_capture =
+                            collect_session_
+                                .begin_parameter_pack_pattern_capture();
+                        DeclarationParser list_item_parser(
+                            *this,
+                            TypeParseContext::type_only(
+                                TypeParseContext::Origin::FriendTypeSpecifier));
+                        list_item_parser.allow_cxx_member_declarator_ids =
+                            true;
+                        list_item_parser.allow_friend_type_specifier = true;
+                        cir::TypeRef list_item_type =
+                            list_item_parser.parse_declaration(false, true);
+                        if (list_item_parser.type_syntax != InvalidNodeId) {
+                            friend_type_nodes.push_back(
+                                list_item_parser.type_syntax);
+                        }
+                        std::vector<
+                            collect::Session::ParameterPackIdentity>
+                            list_item_packs =
+                            collect_session_
+                                .finish_parameter_pack_pattern_capture(
+                                    list_item_capture);
+                        size_t list_item_replay_end_cursor = cursor_;
+                        bool list_item_has_ellipsis = false;
+                        SrcLoc list_item_ellipsis_loc{};
+                        if (check(TokenType::ELLIPSIS)) {
+                            list_item_has_ellipsis = true;
+                            list_item_ellipsis_loc = current_loc();
+                            consume();
+                        }
+                        process_friend_type_specifier(
+                            list_item_type,
+                            list_item_packs,
+                            list_item_replay_cursor,
+                            list_item_replay_last_consumed_raw_end,
+                            list_item_replay_end_cursor,
+                            list_item_has_ellipsis,
+                            list_item_ellipsis_loc,
+                            cursor_,
+                            last_consumed_raw_end_);
+                    }
+                    if (!match(TokenType::SEMICOLON)) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "expected ';' after friend declaration",
+                                 current_loc());
+                    }
+                    children.push_back(make_node(NodeKind::RecordDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 std::move(friend_type_nodes)));
+                    continue;
+                }
+
+                member_parser.reset_declarator_parsing_state();
+                member_parser.allow_cxx_member_declarator_ids = true;
+                ParsedDeclarator friend_declarator =
+                    member_parser.parse_declarator(member_base_type, true);
+                auto friend_context_for =
+                    [&](const ParsedDeclarator& declarator) {
+                    cir::DeclContextId friend_context =
+                        declarator.qualified_context;
+                    if (friend_context.valid()) {
+                        return friend_context;
+                    }
+                    const cir::File& file = collect_session_.file();
+                    if (current_record_is_local(collect_session_)) {
+                        for (cir::DeclContextId context =
+                                 collect_session_.current_decl_context();
+                             context.valid();
+                             context = file.decl_context(context).parent) {
+                            cir::DeclContextKind kind =
+                                file.decl_context(context).kind;
+                            if (kind == cir::DeclContextKind::Block ||
+                                kind == cir::DeclContextKind::Function) {
+                                return context;
+                            }
+                        }
+                        return cir::DeclContextId{};
+                    }
+                    for (cir::DeclContextId context =
+                             collect_session_.current_decl_context();
+                         context.valid();
+                         context = file.decl_context(context).parent) {
+                        cir::DeclContextKind kind =
+                            file.decl_context(context).kind;
+                        if (kind == cir::DeclContextKind::Namespace ||
+                            kind == cir::DeclContextKind::TranslationUnit) {
+                            return context;
+                        }
+                    }
+                    return cir::DeclContextId{};
+                };
+                auto explicit_template_id_is_followed_by_parameter_list =
+                    [&]() {
+                    if (!check(TokenType::LESS_THAN)) {
+                        return false;
+                    }
+                    int angle_depth = 0;
+                    size_t offset = 0;
+                    while (true) {
+                        TokenType type = peek(offset).type;
+                        if (type == TokenType::Eof ||
+                            type == TokenType::SEMICOLON ||
+                            type == TokenType::LEFT_BRACE) {
+                            return false;
+                        }
+                        if (type == TokenType::LESS_THAN) {
+                            ++angle_depth;
+                        } else if (type == TokenType::GREATER_THAN) {
+                            --angle_depth;
+                            if (angle_depth == 0) {
+                                return peek(offset + 1).type ==
+                                    TokenType::LEFT_PAREN;
+                            }
+                        } else if (type == TokenType::RIGHT_SHIFT) {
+                            if (angle_depth <= 2) {
+                                return peek(offset + 1).type ==
+                                    TokenType::LEFT_PAREN;
+                            }
+                            angle_depth -= 2;
+                        }
+                        ++offset;
+                    }
+                };
+                bool has_explicit_template_arguments = false;
+                bool explicit_template_id_has_written_arguments = false;
+                bool explicit_template_id_error = false;
+                std::vector<collect::Session::TemplateArgument>
+                    explicit_template_arguments;
+                std::vector<collect::CandidateExplicitTemplateArguments>
+                    candidate_explicit_template_arguments;
+                std::vector<const collect::Session::TemplateInfo*>
+                    explicit_template_candidates;
+                cir::DeclContextId friend_context =
+                    friend_context_for(friend_declarator);
+                if (friend_declarator.has_name &&
+                    check(TokenType::LESS_THAN)) {
+                    has_explicit_template_arguments = true;
+                    explicit_template_id_has_written_arguments =
+                        peek(1).type != TokenType::GREATER_THAN;
+                    explicit_template_candidates =
+                        collect_session_.function_template_infos_for_name(
+                            friend_context,
+                            friend_declarator.name,
+                            !friend_declarator.qualified_context.valid());
+                    if (!explicit_template_id_is_followed_by_parameter_list()) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "function template friend specialization must have a function parameter list",
+                            current_loc());
+                        explicit_template_id_error = true;
+                    } else {
+                        bool parsed_arguments = false;
+                        if (!explicit_template_candidates.empty()) {
+                            parsed_arguments =
+                                parse_function_template_argument_list_for_candidates(
+                                    *explicit_template_candidates.front(),
+                                    explicit_template_candidates,
+                                    explicit_template_arguments,
+                                    candidate_explicit_template_arguments,
+                                    friend_declarator.loc);
+                        } else {
+                            parsed_arguments =
+                                parse_dependent_expression_template_argument_list(
+                                    friend_declarator.loc);
+                        }
+                        if (!parsed_arguments) {
+                            explicit_template_id_error = true;
+                        } else {
+                            ParsedDeclarator suffix =
+                                member_parser.parse_declarator(
+                                    friend_declarator.type_ref,
+                                    true,
+                                    &friend_declarator);
+                            friend_declarator.type = suffix.type;
+                            friend_declarator.type_ref = suffix.type_ref;
+                            friend_declarator.is_function =
+                                suffix.is_function;
+                            friend_declarator.is_variadic =
+                                suffix.is_variadic;
+                            friend_declarator.has_prototype =
+                                suffix.has_prototype;
+                            friend_declarator.is_kr_style =
+                                suffix.is_kr_style;
+                            friend_declarator.has_trailing_return_type =
+                                suffix.has_trailing_return_type;
+                            friend_declarator.has_unsupported_semantics =
+                                friend_declarator
+                                    .has_unsupported_semantics ||
+                                suffix.has_unsupported_semantics;
+                            friend_declarator.kr_param_names =
+                                std::move(suffix.kr_param_names);
+                            friend_declarator.params =
+                                std::move(suffix.params);
+                            friend_declarator.vla_bounds =
+                                collect_session_.chain(
+                                    std::move(friend_declarator.vla_bounds),
+                                    std::move(suffix.vla_bounds),
+                                    friend_declarator.loc);
+                            friend_declarator.attrs.append(
+                                std::move(suffix.attrs));
+                        }
+                    }
+                }
+                if (friend_declarator.is_function &&
+                    friend_declarator.has_name &&
+                    friend_declarator.name == "operator==") {
+                    has_friend_equality_declaration = true;
+                }
+                bool friend_defaulted =
+                    check(TokenType::ASSIGN) &&
+                    peek(1).type == TokenType::DEFAULT;
+                bool friend_definition =
+                    check(TokenType::LEFT_BRACE) || friend_defaulted;
+                bool invalid_constrained_friend_declaration =
+                    friend_declarator.is_function &&
+                    friend_declarator.has_name &&
+                    friend_declarator.has_trailing_requires_clause &&
+                    !friend_declarator.abbreviated_template_info.has_value() &&
+                    !has_explicit_template_arguments &&
+                    !friend_definition;
+                bool invalid_enclosing_constrained_friend_template_declaration =
+                    false;
+                if (!friend_definition &&
+                    friend_declarator.abbreviated_template_info.has_value()) {
+                    collect::Session::TemplateInfo constraint_probe =
+                        *friend_declarator.abbreviated_template_info;
+                    constraint_probe.name = friend_declarator.name;
+                    constraint_probe.operator_function =
+                        friend_declarator.operator_function;
+                    constraint_probe.pattern_type = friend_declarator.type;
+                    record_trailing_function_requires_clause(
+                        constraint_probe, friend_declarator);
+                    invalid_enclosing_constrained_friend_template_declaration =
+                        constraint_references_parameter_outside_head(
+                            constraint_probe);
+                    if (invalid_enclosing_constrained_friend_template_declaration) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "a friend function template declaration whose constraint depends on an enclosing template parameter shall be a definition",
+                            friend_declarator.trailing_requires_loc.isInvalid()
+                                ? friend_declarator.loc
+                                : friend_declarator.trailing_requires_loc);
+                    }
+                }
+                if (invalid_constrained_friend_declaration) {
+                    diagnose(
+                        DiagnosticLevel::Error,
+                        "a non-template friend declaration with a requires-clause shall be a definition",
+                        friend_declarator.trailing_requires_loc);
+                }
+                if (friend_declarator.is_function &&
+                    friend_declarator.has_name) {
+                    if (!friend_definition) {
+                        const cir::File& file = collect_session_.file();
+                        bool defer_template_pattern_grant =
+                            file.valid(record.entity) &&
+                            file.entity(record.entity).is_template_pattern;
+                        if (has_explicit_template_arguments) {
+                            bool has_error = explicit_template_id_error;
+                            for (const ParsedParam& param :
+                                 friend_declarator.params) {
+                                if (param.has_default_argument) {
+                                    diagnose(
+                                        DiagnosticLevel::Error,
+                                        "default arguments are not allowed in friend declarations naming function template specializations",
+                                        param.default_argument_loc);
+                                    has_error = true;
+                                }
+                            }
+
+                            if (explicit_template_id_has_written_arguments &&
+                                (flags.is_inline || flags.is_constexpr ||
+                                 flags.is_consteval)) {
+                                diagnose(
+                                    DiagnosticLevel::Error,
+                                    "inline, constexpr, and consteval are not allowed in friend declarations naming function template specializations",
+                                    friend_declarator.loc);
+                                has_error = true;
+                            }
+
+                            struct Match {
+                                const collect::Session::TemplateInfo* info =
+                                    nullptr;
+                                std::vector<
+                                    collect::Session::TemplateArgument>
+                                    arguments;
+                            };
+                            std::vector<Match> matches;
+                            if (!has_error && !defer_template_pattern_grant) {
+                                std::vector<std::string> seen_match_keys;
+                                for (const collect::Session::TemplateInfo*
+                                         candidate :
+                                     explicit_template_candidates) {
+                                    const std::vector<
+                                        collect::Session::TemplateArgument>*
+                                        candidate_arguments =
+                                            &explicit_template_arguments;
+                                    auto replayed = std::find_if(
+                                        candidate_explicit_template_arguments
+                                            .begin(),
+                                        candidate_explicit_template_arguments
+                                            .end(),
+                                        [&](const collect::
+                                                CandidateExplicitTemplateArguments&
+                                                entry) {
+                                            return entry.template_entity ==
+                                                candidate->entity;
+                                        });
+                                    if (replayed !=
+                                        candidate_explicit_template_arguments
+                                            .end()) {
+                                        if (!replayed->viable) {
+                                            continue;
+                                        }
+                                        candidate_arguments =
+                                            &replayed->arguments;
+                                    }
+                                    std::vector<
+                                        collect::Session::TemplateArgument>
+                                        deduced;
+                                    collect::Session::
+                                        PatternInstantiationCallbacks
+                                            callbacks;
+                                    configure_pattern_instantiation_callbacks(
+                                        callbacks,
+                                        friend_declarator.loc);
+                                    if (deduce_function_template_declaration_match(
+                                            *candidate,
+                                            friend_declarator.type,
+                                            deduced,
+                                            candidate_arguments,
+                                            callbacks,
+                                            friend_declarator.loc)) {
+                                        std::string match_key =
+                                            collect_session_.template_memo_key(
+                                                candidate->entity,
+                                                deduced);
+                                        if (std::find(
+                                                seen_match_keys.begin(),
+                                                seen_match_keys.end(),
+                                                match_key) !=
+                                            seen_match_keys.end()) {
+                                            continue;
+                                        }
+                                        seen_match_keys.push_back(
+                                            std::move(match_key));
+                                        matches.push_back(
+                                            Match{candidate,
+                                                  std::move(deduced)});
+                                    }
+                                }
+                                if (matches.empty()) {
+                                    diagnose(
+                                        DiagnosticLevel::Error,
+                                        "no matching function template specialization for friend declaration",
+                                        friend_declarator.loc);
+                                    has_error = true;
+                                }
+                            }
+                            auto more_specialized =
+                                [&](const Match& lhs, const Match& rhs) {
+                                if (!lhs.info || !rhs.info) {
+                                    return false;
+                                }
+                                return collect_session_
+                                    .function_template_more_specialized(
+                                        *lhs.info,
+                                        *rhs.info,
+                                        collect::Session::
+                                            FunctionTemplateOrderingContext::
+                                                declaration());
+                            };
+                            auto diagnose_ambiguous_match_notes =
+                                [&](const Match& lhs, const Match& rhs) {
+                                auto note_candidate = [&](const Match& match) {
+                                    if (match.info &&
+                                        match.info->entity.valid() &&
+                                        collect_session_.file().valid(
+                                            match.info->entity)) {
+                                        diagnose(
+                                            DiagnosticLevel::Note,
+                                            "candidate function template declared here",
+                                            collect_session_.file()
+                                                .entity(match.info->entity)
+                                                .loc);
+                                    }
+                                };
+                                note_candidate(lhs);
+                                note_candidate(rhs);
+                                if (lhs.info && rhs.info &&
+                                    collect_session_
+                                        .function_template_unordered_constraints_tie(
+                                            *lhs.info,
+                                            *rhs.info,
+                                            collect::Session::
+                                                FunctionTemplateOrderingContext::
+                                                    declaration())) {
+                                    diagnose(
+                                        DiagnosticLevel::Note,
+                                        "candidate associated constraints are not ordered by subsumption",
+                                        friend_declarator.loc);
+                                }
+                            };
+                            if (!has_error && !defer_template_pattern_grant) {
+                                size_t best = 0;
+                                for (size_t i = 1; i < matches.size(); ++i) {
+                                    if (more_specialized(matches[i],
+                                                         matches[best])) {
+                                        best = i;
+                                    }
+                                }
+                                size_t ambiguous_index = matches.size();
+                                for (size_t i = 0; i < matches.size(); ++i) {
+                                    if (i != best &&
+                                        !more_specialized(matches[best],
+                                                          matches[i])) {
+                                        ambiguous_index = i;
+                                        break;
+                                    }
+                                }
+                                if (ambiguous_index != matches.size()) {
+                                    diagnose(
+                                        DiagnosticLevel::Error,
+                                        "ambiguous function template specialization friend declaration",
+                                        friend_declarator.loc);
+                                    diagnose_ambiguous_match_notes(
+                                        matches[best],
+                                        matches[ambiguous_index]);
+                                    has_error = true;
+                                } else if (!defer_template_pattern_grant) {
+                                    const Match& selected = matches[best];
+                                    collect_session_
+                                        .add_pending_friend_function_template_specialization(
+                                            record.entity,
+                                            selected.info->entity,
+                                            selected.arguments,
+                                            friend_declarator.type);
+                                }
+                            }
+                        } else if (!defer_template_pattern_grant &&
+                                   !invalid_constrained_friend_declaration &&
+                                   !invalid_enclosing_constrained_friend_template_declaration) {
+                            if (friend_declarator
+                                    .abbreviated_template_info.has_value()) {
+                                collect::Session::TemplateInfo hidden_info =
+                                    std::move(*friend_declarator
+                                                   .abbreviated_template_info);
+                                hidden_info.name = friend_declarator.name;
+                                hidden_info.operator_function =
+                                    friend_declarator.operator_function;
+                                hidden_info.pattern_type =
+                                    friend_declarator.type;
+                                record_trailing_function_requires_clause(
+                                    hidden_info, friend_declarator);
+                                hidden_info.lexical_context = friend_context;
+                                std::vector<collect::ParamInput> hidden_params =
+                                    param_inputs_from_parsed_params(
+                                        friend_declarator.params,
+                                        /*move_runtime_fragments=*/false);
+                                cir::EntityId hidden = collect_session_
+                                    .declare_hidden_friend_function_template(
+                                        std::move(hidden_info),
+                                        friend_context,
+                                        friend_declarator.loc,
+                                        &hidden_params,
+                                        record.entity);
+                                if (hidden.valid()) {
+                                    collect_session_
+                                        .add_pending_friend_function_template(
+                                            record.entity, hidden);
+                                }
+                            } else {
+                                collect_session_.add_pending_friend_function(
+                                    record.entity,
+                                    friend_declarator.name,
+                                    friend_declarator.type,
+                                    friend_context,
+                                    friend_declarator.loc,
+                                    {},
+                                    current_record_is_local(
+                                        collect_session_),
+                                    friend_declarator.operator_function);
+                            }
+                        }
+                    }
+                } else {
+                    diagnose(DiagnosticLevel::Error,
+                             "unsupported friend declaration",
+                             loc_for_index(member_begin));
+                }
+                if (friend_definition) {
+                    if (friend_defaulted) {
+                        bool valid_comparison =
+                            friend_declarator.name == "operator==" ||
+                            friend_declarator.name == "operator!=" ||
+                            friend_declarator.name == "operator<" ||
+                            friend_declarator.name == "operator<=" ||
+                            friend_declarator.name == "operator>" ||
+                            friend_declarator.name == "operator>=" ||
+                            friend_declarator.name == "operator<=>";
+                        if (!friend_declarator.is_function ||
+                            !friend_declarator.has_name ||
+                            friend_declarator.qualified_context.valid() ||
+                            has_explicit_template_arguments ||
+                            !valid_comparison) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "only an unqualified comparison operator may be explicitly defaulted as a friend",
+                                friend_declarator.loc);
+                        } else {
+                            cir::EntityId hidden = collect_session_
+                                .add_pending_friend_function(
+                                    record.entity,
+                                    friend_declarator.name,
+                                    friend_declarator.type,
+                                    friend_context,
+                                    friend_declarator.loc,
+                                    {},
+                                    /*require_existing=*/false,
+                                    friend_declarator.operator_function);
+                            if (hidden.valid()) {
+                                const auto* payload = std::get_if<
+                                    cir::FunctionTypePayload>(
+                                    &collect_session_.file().type_payload(
+                                        collect_session_.file().resolved_type(
+                                            friend_declarator.type)));
+                                PendingHiddenFriendBody pending;
+                                pending.entity = hidden;
+                                pending.granting_record = record.entity;
+                                pending.lexical_context =
+                                    collect_session_.current_decl_context();
+                                pending.name = friend_declarator.name;
+                                pending.function_type =
+                                    friend_declarator.type;
+                                pending.result_type = payload
+                                    ? payload->return_type
+                                    : collect_session_.type_ref(
+                                          collect_session_.file()
+                                              .unknown_type());
+                                pending.params =
+                                    param_inputs_from_parsed_params(
+                                        friend_declarator.params,
+                                        /*move_runtime_fragments=*/false);
+                                pending.flags = flags;
+                                pending.loc = friend_declarator.loc;
+                                pending.is_defaulted_comparison = true;
+                                pending.has_explicit_exception_spec =
+                                    friend_declarator.has_noexcept_specifier;
+                                uint64_t key = static_cast<uint64_t>(
+                                    record.entity.index);
+                                pending_hidden_friend_bodies_[key].push_back(
+                                    std::move(pending));
+                                collect_session_.track_speculative_rollback(
+                                    [this, key] {
+                                        auto found =
+                                            pending_hidden_friend_bodies_.find(
+                                                key);
+                                        if (found ==
+                                            pending_hidden_friend_bodies_.end()) {
+                                            return;
+                                        }
+                                        if (!found->second.empty()) {
+                                            found->second.pop_back();
+                                        }
+                                        if (found->second.empty()) {
+                                            pending_hidden_friend_bodies_.erase(
+                                                found);
+                                        }
+                                    });
+                            }
+                        }
+                        consume();
+                        consume();
+                        if (!match(TokenType::SEMICOLON)) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "expected ';' after defaulted friend comparison",
+                                current_loc());
+                        }
+                        children.push_back(make_node(
+                            NodeKind::FunctionDecl, member_begin,
+                            last_consumed_raw_end(), {member_type},
+                            text_payload(friend_declarator.name)));
+                        continue;
+                    }
+
+                    if (current_record_is_local(collect_session_)) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "a friend function cannot be defined in a local class",
+                            friend_declarator.loc);
+                        skip_balanced_until_semicolon_or_brace();
+                        continue;
+                    }
+                    if (!friend_declarator.is_function ||
+                        !friend_declarator.has_name ||
+                        has_explicit_template_arguments ||
+                        friend_declarator.qualified_context.valid()) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            friend_declarator.qualified_context.valid()
+                                ? "a friend function definition must have an unqualified name"
+                                : "invalid friend function definition",
+                            current_loc());
+                        skip_until_statement_boundary();
+                        continue;
+                    }
+                    bool record_is_template_pattern =
+                        collect_session_.file().valid(record.entity) &&
+                        collect_session_.file().entity(record.entity)
+                            .is_template_pattern;
+                    size_t definition_begin = cursor_;
+                    size_t definition_end =
+                        skip_balanced_until_semicolon_or_brace();
+                    if (record_is_template_pattern &&
+                        !friend_declarator.abbreviated_template_info
+                             .has_value()) {
+                        children.push_back(make_node(
+                            NodeKind::FunctionDecl,
+                            member_begin,
+                            last_consumed_raw_end(),
+                            {member_type},
+                            text_payload(friend_declarator.name)));
+                        continue;
+                    }
+                    if (!friend_declarator.abbreviated_template_info
+                             .has_value()) {
+                        cir::EntityId hidden =
+                            collect_session_.add_pending_friend_function(
+                                record.entity,
+                                friend_declarator.name,
+                                friend_declarator.type,
+                                friend_context,
+                                friend_declarator.loc,
+                                friend_declarator
+                                        .has_trailing_requires_clause
+                                    ? record.entity
+                                    : cir::EntityId{},
+                                /*require_existing=*/false,
+                                friend_declarator.operator_function);
+                        if (hidden.valid()) {
+                            const auto* payload = std::get_if<
+                                cir::FunctionTypePayload>(
+                                &collect_session_.file().type_payload(
+                                    collect_session_.file().resolved_type(
+                                        friend_declarator.type)));
+                            PendingHiddenFriendBody pending;
+                            pending.entity = hidden;
+                            pending.granting_record = record.entity;
+                            pending.lexical_context =
+                                collect_session_.current_decl_context();
+                            pending.body_begin = definition_begin;
+                            pending.body_end = definition_end;
+                            pending.name = friend_declarator.name;
+                            pending.function_type = friend_declarator.type;
+                            pending.result_type = payload
+                                ? payload->return_type
+                                : collect_session_.type_ref(
+                                      collect_session_.file().unknown_type());
+                            pending.params = param_inputs_from_parsed_params(
+                                friend_declarator.params,
+                                /*move_runtime_fragments=*/false);
+                            collect_session_
+                                .register_hidden_friend_default_arguments(
+                                    hidden,
+                                    pending.params,
+                                    friend_declarator.loc);
+
+                            for (collect::ParamInput& parameter :
+                                 pending.params) {
+                                parameter.default_argument.reset();
+                            }
+                            pending.flags = flags;
+                            pending.loc = friend_declarator.loc;
+                            uint64_t key =
+                                static_cast<uint64_t>(record.entity.index);
+                            pending_hidden_friend_bodies_[key].push_back(
+                                std::move(pending));
+                            collect_session_.track_speculative_rollback(
+                                [this, key] {
+                                    auto found =
+                                        pending_hidden_friend_bodies_.find(key);
+                                    if (found ==
+                                        pending_hidden_friend_bodies_.end()) {
+                                        return;
+                                    }
+                                    if (!found->second.empty()) {
+                                        found->second.pop_back();
+                                    }
+                                    if (found->second.empty()) {
+                                        pending_hidden_friend_bodies_.erase(
+                                            found);
+                                    }
+                                });
+                        }
+                        children.push_back(make_node(
+                            NodeKind::FunctionDecl,
+                            member_begin,
+                            last_consumed_raw_end(),
+                            {member_type},
+                            text_payload(friend_declarator.name)));
+                        continue;
+                    }
+                    collect::Session::TemplateInfo hidden_info =
+                        friend_declarator.abbreviated_template_info.has_value()
+                            ? std::move(
+                                  *friend_declarator.abbreviated_template_info)
+                            : collect::Session::TemplateInfo{};
+                    hidden_info.name = friend_declarator.name;
+                    hidden_info.operator_function =
+                        friend_declarator.operator_function;
+                    hidden_info.pattern_type = friend_declarator.type;
+                    record_trailing_function_requires_clause(
+                        hidden_info, friend_declarator);
+                    bool references_enclosing_parameter =
+                        constraint_references_parameter_outside_head(
+                            hidden_info);
+                    hidden_info.has_definition = true;
+                    hidden_info.definition_begin = member_begin + 1;
+                    hidden_info.definition_end = definition_end;
+                    hidden_info.lexical_context = friend_context;
+                    cir::EntityId owner_template{};
+                    std::vector<collect::Session::TemplateArgument>
+                        owner_arguments;
+                    if (collect_session_.template_arguments_for_record(
+                            record.entity,
+                            &owner_template,
+                            &owner_arguments)) {
+                        const collect::Session::TemplateInfo* owner_info =
+                            collect_session_.template_info(owner_template);
+                        if (owner_info && owner_info->is_class_template &&
+                            !owner_arguments.empty()) {
+                            collect::Session::TemplateArgumentBindings
+                                owner_bindings;
+                            if (collect_session_
+                                    .bind_template_arguments_to_parameters(
+                                        owner_info->parameters,
+                                        owner_arguments,
+                                        owner_bindings)) {
+                                hidden_info.enclosing_instantiation_bindings
+                                    .push_back(
+                                        {owner_info->parameters,
+                                         std::move(owner_bindings)});
+                            }
+                        }
+                    }
+                    std::vector<collect::ParamInput> hidden_params =
+                        param_inputs_from_parsed_params(
+                            friend_declarator.params,
+                            /*move_runtime_fragments=*/false);
+                    cir::EntityId hidden =
+                        collect_session_
+                            .declare_hidden_friend_function_template(
+                                std::move(hidden_info),
+                                friend_context,
+                                friend_declarator.loc,
+                                &hidden_params,
+                                record.entity,
+                                references_enclosing_parameter
+                                    ? record.entity
+                                    : cir::EntityId{});
+                    if (hidden.valid()) {
+                        collect_session_.add_pending_friend_function_template(
+                            record.entity, hidden);
+                    } else {
+                        diagnose(DiagnosticLevel::Error,
+                                 "this friend definition form is not supported yet",
+                                 friend_declarator.loc);
+                    }
+                    children.push_back(make_node(NodeKind::FunctionDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 {member_type},
+                                                 text_payload(
+                                                     friend_declarator.name)));
+                    continue;
+                }
+                if (!match(TokenType::SEMICOLON)) {
+                    diagnose(DiagnosticLevel::Error,
+                             "expected ';' after friend declaration",
+                             current_loc());
+                }
+                children.push_back(make_node(NodeKind::RecordDecl,
+                                             member_begin,
+                                             last_consumed_raw_end(),
+                                             {member_type}));
+                continue;
+            }
+            if (check(TokenType::SEMICOLON) &&
+                member_base_type.type.valid() &&
+                collect_session_.file().valid(member_base_type.type)) {
+                cir::TypeId resolved_member_type =
+                    collect_session_.file().resolved_type(member_base_type.type);
+                cir::TypeKind member_type_kind =
+                    collect_session_.file().valid(resolved_member_type)
+                        ? collect_session_.file().type(resolved_member_type).kind
+                        : cir::TypeKind::Invalid;
+                if (member_type_kind == cir::TypeKind::Record ||
+                    member_type_kind == cir::TypeKind::Enum) {
+                    cir::EntityId member_record =
+                        member_type_kind == cir::TypeKind::Record
+                            ? collect_session_.file().record_entity(
+                                  resolved_member_type)
+                            : cir::EntityId{};
+                    const cir::RecordFacts* member_facts =
+                        member_record.valid()
+                            ? collect_session_.file().record_facts(member_record)
+                            : nullptr;
+                    bool anonymous_record =
+                        member_facts &&
+                        collect_session_.file().entity(member_record)
+                            .is_unnamed_record;
+                    bool anonymous_union =
+                        anonymous_record &&
+                        member_facts->kind == cir::RecordKind::Union;
+                    consume();
+                    if (anonymous_union) {
+                        if (member_parser.storage_class != StorageClass::None ||
+                            flags.is_thread_local || flags.is_mutable) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "a class-scope anonymous union cannot have a storage-class specifier",
+                                loc_for_index(member_begin));
+                        }
+                        fields.push_back(
+                            collect_session_.declare_anonymous_union_member(
+                                resolved_member_type,
+                                current_access,
+                                loc_for_index(member_begin)));
+                    } else if (anonymous_record &&
+                               member_facts->kind ==
+                                   cir::RecordKind::Struct) {
+                        if (member_parser.storage_class != StorageClass::None ||
+                            flags.is_thread_local || flags.is_mutable) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "an anonymous struct member cannot have a storage-class specifier",
+                                loc_for_index(member_begin));
+                        }
+                        collect::RecordFieldInput input;
+                        input.type = resolved_member_type;
+                        input.qualifiers = member_base_type.qualifiers;
+                        input.loc = loc_for_index(member_begin);
+                        input.declared_access = current_access;
+                        fields.push_back(std::move(input));
+                    }
+                    children.push_back(make_node(NodeKind::RecordDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 {member_type}));
+                    continue;
+                }
+            }
+
+            bool parsed_any_member = false;
+            bool parsed_body = false;
+            while (!at_end()) {
+                member_parser.reset_declarator_parsing_state();
+                member_parser.allow_cxx_member_declarator_ids = true;
+                ParsedDeclarator declarator = member_parser.parse_declarator(member_base_type, true);
+                LayoutAttrs declarator_attrs = parse_layout_attributes();
+                std::vector<NodeId> member_children = leading_member_attrs.syntax;
+                member_children.push_back(member_type);
+                if (declarator.syntax != InvalidNodeId) {
+                    member_children.push_back(declarator.syntax);
+                }
+                member_children.insert(member_children.end(),
+                                       declarator_attrs.syntax.begin(),
+                                       declarator_attrs.syntax.end());
+
+                if (declarator.is_function) {
+                    bool is_abbreviated_template =
+                        declarator.abbreviated_template_info.has_value();
+                    bool acquired_through_dependent_type =
+                        !declarator.has_declarator_operators &&
+                        collect_session_
+                            .template_instantiation_reclassifies_data_member_as_function(
+                                declarator.name,
+                                declarator.loc);
+                    if (acquired_through_dependent_type) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "function declaration acquired through a dependent type without a function declarator",
+                            declarator.loc);
+                    }
+                    if (flags.is_thread_local) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "thread_local cannot be applied to a member function",
+                                 declarator.loc);
+                    }
+                    AttributeList member_attrs = leading_member_attrs.attrs;
+                    member_attrs.append(member_parser.leading_attrs);
+                    member_attrs.append(declarator.attrs);
+                    member_attrs.append(declarator_attrs.attrs);
+                    collect::DeclFlags method_flags = flags;
+                    method_flags.attrs = member_attrs;
+                    collect::RecordMethodInput method;
+                    method.name = declarator.name;
+                    method.type = declarator.type;
+                    method.operator_function = declarator.operator_function;
+                    method.params = param_inputs_from_parsed_params(
+                        declarator.params,
+                        /*move_runtime_fragments=*/false);
+                    method.loc = declarator.loc.isInvalid()
+                        ? loc_for_index(member_begin)
+                        : declarator.loc;
+                    method.declared_access = current_access;
+                    method.flags = method_flags;
+                    method.is_static = flags.is_static;
+                    method.is_virtual = leading_virtual;
+                    method.is_function_template = is_abbreviated_template;
+                    method.has_explicit_exception_spec =
+                        declarator.has_noexcept_specifier;
+                    method.has_deferred_noexcept_operand =
+                        declarator.has_deferred_noexcept_operand;
+                    method.noexcept_operand_begin =
+                        declarator.noexcept_operand_begin;
+                    method.noexcept_operand_end =
+                        declarator.noexcept_operand_end;
+                    method.noexcept_operand_loc =
+                        declarator.noexcept_operand_loc;
+                    method.noexcept_declaration_context =
+                        declarator.noexcept_declaration_context;
+                    method.noexcept_lookup_generation =
+                        declarator.noexcept_lookup_generation;
+                    size_t method_index = methods.size();
+                    if (declarator.has_trailing_requires_clause) {
+                        if (leading_virtual) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "a virtual function cannot have an associated requires-clause",
+                                     declarator.trailing_requires_loc);
+                        }
+                        retain_method_constraint(
+                            method_index,
+                            method,
+                            declarator.trailing_requires_constraint_begin,
+                            declarator.trailing_requires_constraint_end,
+                            declarator.trailing_requires_normal_form,
+                            declarator.trailing_requires_value);
+                    }
+                    bool declared_through_function_type =
+                        !declarator.has_declarator_operators;
+                    std::optional<PendingMemberBody> pending_template_body;
+                    bool abbreviated_has_error = false;
+                    if (is_abbreviated_template) {
+                        if (!lang_opts_.is_cxx20_or_later()) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "abbreviated function templates require C++20",
+                                method.loc);
+                            abbreviated_has_error = true;
+                        }
+                        if (leading_virtual) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "an abbreviated function template cannot be virtual",
+                                method.loc);
+                            abbreviated_has_error = true;
+                        }
+                        abbreviated_has_error =
+                            parse_member_function_template_tail(
+                                method,
+                                member_children,
+                                member_begin,
+                                /*allow_pure_specifier=*/true,
+                                /*allow_inline_body=*/true,
+                                method_index,
+                                std::move(declarator.params),
+                                &pending_template_body) ||
+                            abbreviated_has_error;
+                        if (pending_template_body.has_value() &&
+                            declarator.has_placeholder_type_constraint) {
+                            pending_template_body
+                                ->has_placeholder_return_type_constraint =
+                                true;
+                            pending_template_body
+                                ->placeholder_return_type_constraint_begin =
+                                declarator
+                                    .placeholder_type_constraint_begin;
+                            pending_template_body
+                                ->placeholder_return_type_constraint_end =
+                                declarator
+                                    .placeholder_type_constraint_end;
+                            pending_template_body
+                                ->placeholder_return_type_constraint_loc =
+                                declarator.placeholder_type_constraint_loc;
+                        }
+
+                        parsed_body = true;
+                    } else {
+                        parsed_body = parse_member_function_tail(
+                            method,
+                            member_children,
+                            false,
+                            declarator.params,
+                            declared_through_function_type);
+                        if (parsed_body &&
+                            declarator.has_placeholder_type_constraint &&
+                            !pending_bodies.empty() &&
+                            pending_bodies.back().method_index ==
+                                method_index) {
+                            PendingMemberBody& pending =
+                                pending_bodies.back();
+                            pending
+                                .has_placeholder_return_type_constraint =
+                                true;
+                            pending
+                                .placeholder_return_type_constraint_begin =
+                                declarator
+                                    .placeholder_type_constraint_begin;
+                            pending
+                                .placeholder_return_type_constraint_end =
+                                declarator
+                                    .placeholder_type_constraint_end;
+                            pending
+                                .placeholder_return_type_constraint_loc =
+                                declarator.placeholder_type_constraint_loc;
+                        }
+                    }
+                    method.has_deferred_definition =
+                        is_abbreviated_template
+                        ? pending_template_body.has_value()
+                        : parsed_body;
+                    cir::EntityId method_entity =
+                        collect_session_.declare_record_method_shell(
+                            record.entity, method);
+                    if (!is_abbreviated_template && parsed_body &&
+                        !pending_bodies.empty() &&
+                        pending_bodies.back().method_index == method_index) {
+                        register_deferred_template_member_body(
+                            method_entity, pending_bodies.back());
+                    }
+                    methods.push_back(std::move(method));
+                    if (is_abbreviated_template && !abbreviated_has_error) {
+                        collect::Session::TemplateInfo info =
+                            std::move(*declarator.abbreviated_template_info);
+                        info.name = declarator.name;
+                        info.operator_function = declarator.operator_function;
+                        info.pattern_type = declarator.type;
+                        record_trailing_function_requires_clause(
+                            info, declarator);
+                        info.has_definition =
+                            pending_template_body.has_value();
+                        PendingMemberTemplate pending;
+                        pending.method_index = method_index;
+                        pending.info = std::move(info);
+                        pending.body = std::move(pending_template_body);
+                        pending.loc = method.loc;
+                        pending_member_templates.push_back(
+                            std::move(pending));
+                    }
+                    children.push_back(make_node(NodeKind::FunctionDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 member_children,
+                                                 text_payload(declarator.name),
+                                                 is_abbreviated_template
+                                                     ? (abbreviated_has_error
+                                                            ? NodeFlagHasError
+                                                            : NodeFlagNone)
+                                                     : (parsed_body
+                                                            ? NodeFlagHasError
+                                                            : NodeFlagNone)));
+                } else if (member_parser.storage_class == StorageClass::Typedef) {
+                    handle_typedef_declarator(declarator);
+                    children.push_back(make_node(NodeKind::VarDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 member_children,
+                                                 text_payload(declarator.name)));
+                } else if (flags.is_static) {
+                    if (declarator.name.empty()) {
+                        diagnose(DiagnosticLevel::Error,
+                                 "static data member declaration requires an identifier",
+                                 loc_for_index(member_begin));
+                    }
+                    collect::DeclFlags static_flags = flags;
+                    static_flags.type_qualifiers =
+                        declarator.type_ref.qualifiers;
+                    collect::RecordStaticDataMemberInput input;
+                    input.name = declarator.name;
+                    input.type = declarator.type.valid() ? declarator.type : member_base_type.type;
+                    input.loc = declarator.loc.isInvalid()
+                        ? loc_for_index(member_begin)
+                        : declarator.loc;
+                    input.attrs = leading_member_attrs.attrs;
+                    input.attrs.append(member_parser.leading_attrs);
+                    input.attrs.append(declarator.attrs);
+                    input.attrs.append(declarator_attrs.attrs);
+                    input.declared_access = current_access;
+                    input.flags = static_flags;
+                    input.initialization_kind =
+                        check(TokenType::ASSIGN)
+                            ? (peek(1).type == TokenType::LEFT_BRACE
+                                   ? collect::ConstructorInitializationKind::
+                                         CopyList
+                                   : collect::ConstructorInitializationKind::
+                                         Copy)
+                            : collect::ConstructorInitializationKind::Direct;
+                    input.entity =
+                        collect_session_.declare_record_static_data_member(input);
+
+                    std::optional<collect::ExprResult> static_initializer;
+                    size_t static_initializer_begin = current_raw_index();
+                    const collect::Session::TemplateInfo::
+                        StaticDataMemberInitializer*
+                        retained_initializer =
+                            collect_session_
+                                .current_instantiation_static_data_member_initializer(
+                                    input.name, input.loc);
+                    bool can_defer_initializer =
+                        retained_initializer != nullptr &&
+                        current_raw_index() ==
+                            retained_initializer->begin &&
+                        retained_initializer->end >
+                            retained_initializer->begin &&
+                        ((input.flags.type_qualifiers & cir::QualConst) ||
+                         input.flags.is_constexpr) &&
+                        cir::is_integer_like_type(collect_session_.file(),
+                                                  input.type) &&
+                        !collect_session_.contains_auto_type(
+                            input.type, cir::AutoTypeFlavor::Cxx);
+                    if (can_defer_initializer) {
+                        input.has_deferred_initializer = true;
+                        input.initializer_begin =
+                            retained_initializer->begin;
+                        input.initializer_end =
+                            retained_initializer->end;
+                        input.initializer_loc =
+                            retained_initializer->loc;
+                        input.initializer_context =
+                            retained_initializer->declaration_context;
+                        input.initializer_lookup_generation =
+                            retained_initializer->lookup_generation;
+
+                        input.initializer_value_expression = {};
+                        seek_raw_index(retained_initializer->end);
+                        member_children.push_back(make_node(
+                            NodeKind::InitListExpr,
+                            retained_initializer->begin,
+                            retained_initializer->end,
+                            {}));
+                    } else if (match(TokenType::ASSIGN)) {
+                        ParsedExpr init = check(TokenType::LEFT_BRACE)
+                            ? parse_init_list_expression()
+                            : parse_expression(PrecLevel::ASSIGNMENT);
+                        static_initializer = init.sem;
+                        member_children.push_back(init.syntax);
+                    } else if (check(TokenType::LEFT_BRACE)) {
+                        ParsedExpr init = parse_init_list_expression();
+                        static_initializer = init.sem;
+                        member_children.push_back(init.syntax);
+                    } else if (check(TokenType::LEFT_PAREN)) {
+                        size_t init_begin = current_raw_index();
+                        int parens = 0;
+                        do {
+                            TokenType type = current().type;
+                            consume();
+                            if (type == TokenType::LEFT_PAREN) ++parens;
+                            if (type == TokenType::RIGHT_PAREN) --parens;
+                        } while (!at_end() && parens > 0);
+                        member_children.push_back(make_node(NodeKind::InitListExpr,
+                                                            init_begin,
+                                                            last_consumed_raw_end(),
+                                                            {},
+                                                            {},
+                                                            NodeFlagHasError));
+                        diagnose(DiagnosticLevel::Error,
+                                 "static data member direct initializers are not supported",
+                                 loc_for_index(init_begin));
+                    }
+                    if (static_initializer.has_value()) {
+                        input.initializer_begin = static_initializer_begin;
+                        input.initializer_end = last_consumed_raw_end();
+                        input.initializer_loc =
+                            loc_for_index(static_initializer_begin);
+                        input.initializer_context =
+                            collect_session_.current_decl_context();
+                        input.initializer_lookup_generation =
+                            collect_session_.lookup_generation();
+                        input.initializer_value_expression =
+                            static_initializer->template_value_expr;
+                        collect_session_.file()
+                            .canonicalize_template_value_expression(
+                                input.initializer_value_expression);
+                        if (static_data_member_initializer_capture_ &&
+                            input.initializer_begin < input.initializer_end) {
+                            collect::Session::TemplateInfo::
+                                StaticDataMemberInitializer retained;
+                            retained.name = input.name;
+                            retained.begin = input.initializer_begin;
+                            retained.end = input.initializer_end;
+                            retained.loc = input.loc;
+                            retained.declaration_context =
+                                input.initializer_context;
+                            retained.lookup_generation =
+                                input.initializer_lookup_generation;
+                            retained.value_expression =
+                                input.initializer_value_expression;
+                            static_data_member_initializer_capture_->push_back(
+                                std::move(retained));
+                        }
+                    }
+                    bool has_cxx_auto =
+                        collect_session_.contains_auto_type(
+                            input.type, cir::AutoTypeFlavor::Cxx);
+                    if (has_cxx_auto && !static_initializer.has_value()) {
+                        diagnose(
+                            DiagnosticLevel::Error,
+                            "declaration with 'auto' type requires an "
+                            "initializer",
+                            input.loc);
+                        input.has_error = true;
+                    } else if (has_cxx_auto &&
+                               static_initializer->has_error) {
+
+                        input.has_error = true;
+                    } else if (has_cxx_auto &&
+                               !collect_session_.expr_is_dependent(
+                                   *static_initializer)) {
+                        cir::TypeId deduced_type =
+                            collect_session_.deduce_auto_type(
+                                input.type, *static_initializer, input.loc);
+                        if (!deduced_type.valid() ||
+                            !collect_session_.file().valid(deduced_type) ||
+                            collect_session_.contains_auto_type(
+                                deduced_type)) {
+                            diagnose(
+                                DiagnosticLevel::Error,
+                                "cannot deduce type for static data member "
+                                "with 'auto' type",
+                                input.loc);
+                            input.has_error = true;
+                        } else {
+                            input.type = deduced_type;
+                            (void)collect_session_
+                                .complete_record_static_data_member_type(
+                                    input.entity,
+                                    input.name,
+                                    input.type);
+                        }
+                    }
+                    if (static_initializer.has_value() &&
+                        !input.has_error) {
+                        collect_session_
+                            .register_template_value_parameter_equivalence(
+                                input.entity,
+                                input.type,
+                                *static_initializer);
+                        (void)collect_session_
+                            .materialize_record_static_data_member_initializer(
+                                input.entity,
+                                input.type,
+                                *static_initializer,
+                                input.loc,
+                                input.initialization_kind);
+                        input.initializer_materialization_attempted = true;
+                    }
+                    if (input.entity.valid()) {
+                        cir::Entity& entity =
+                            collect_session_.file().entity_mut(input.entity);
+                        entity.has_initializer =
+                            static_initializer.has_value() ||
+                            input.has_deferred_initializer;
+                        entity.initializer_is_value_dependent =
+                            static_initializer.has_value() &&
+                            collect_session_.expr_is_value_dependent(
+                                *static_initializer);
+                    }
+                    bool static_member_has_error = input.has_error;
+                    input.initializer = std::move(static_initializer);
+                    collect_session_.stage_record_static_data_member_fact(
+                        input);
+                    static_data_members.push_back(std::move(input));
+                    children.push_back(make_node(NodeKind::VarDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 member_children,
+                                                 text_payload(declarator.name),
+                                                 static_member_has_error
+                                                     ? NodeFlagHasError
+                                                     : NodeFlagNone));
+                } else {
+                    bool is_bitfield = false;
+                    uint32_t bit_width = 0;
+                    cir::TemplateValueExpression bit_width_expression;
+                    bool bit_width_is_dependent = false;
+                    LayoutAttrs bitfield_attrs;
+                    if (match(TokenType::COLON)) {
+                        is_bitfield = true;
+                        if (check(TokenType::COMMA) || check(TokenType::SEMICOLON) ||
+                            check(TokenType::RIGHT_BRACE)) {
+                            diagnose(DiagnosticLevel::Error,
+                                     "expected bit-field width",
+                                     current_loc());
+                        } else {
+                            ParsedExpr width = parse_conditional_expression();
+                            member_children.push_back(width.syntax);
+                            bit_width_expression =
+                                width.sem.template_value_expr;
+                            collect_session_.file()
+                                .canonicalize_template_value_expression(
+                                    bit_width_expression);
+                            bit_width_is_dependent =
+                                collect_session_.expr_is_dependent(width.sem) ||
+                                collect_session_.expr_is_value_dependent(
+                                    width.sem);
+                            if (!bit_width_is_dependent) {
+                                int64_t value = 0;
+                                if (collect_session_.evaluate_integer_constant(
+                                        width.sem,
+                                        value,
+                                        declarator.loc,
+                                        "bit-field width is not an integer constant expression")) {
+                                    if (value < 0) {
+                                        diagnose(DiagnosticLevel::Error,
+                                                 "bit-field width cannot be negative",
+                                                 declarator.loc);
+                                    } else if (value >
+                                               static_cast<int64_t>(
+                                                   std::numeric_limits<uint32_t>::max())) {
+                                        diagnose(DiagnosticLevel::Error,
+                                                 "bit-field width is too large",
+                                                 declarator.loc);
+                                    } else {
+                                        bit_width =
+                                            static_cast<uint32_t>(value);
+                                    }
+                                }
+                            }
+                        }
+                        bitfield_attrs = parse_layout_attributes();
+                        member_children.insert(member_children.end(),
+                                               bitfield_attrs.syntax.begin(),
+                                               bitfield_attrs.syntax.end());
+                    }
+
+                    bool has_dmi = false;
+                    bool dmi_braced = false;
+                    uint32_t dmi_begin = 0;
+                    uint32_t dmi_end = 0;
+                    SrcLoc dmi_loc{};
+                    if (check(TokenType::ASSIGN) ||
+                        check(TokenType::LEFT_BRACE)) {
+                        has_dmi = true;
+                        dmi_loc = current_loc();
+                        if (match(TokenType::ASSIGN)) {
+                            dmi_braced = check(TokenType::LEFT_BRACE);
+                        } else {
+                            dmi_braced = true;
+                        }
+                        dmi_begin =
+                            static_cast<uint32_t>(current_raw_index());
+                        int depth = 0;
+                        while (!at_end()) {
+                            TokenType type = current().type;
+                            if (depth == 0 &&
+                                (type == TokenType::COMMA ||
+                                 type == TokenType::SEMICOLON ||
+                                 type == TokenType::RIGHT_BRACE)) {
+                                break;
+                            }
+                            if (type == TokenType::LEFT_PAREN ||
+                                type == TokenType::LEFT_BRACE ||
+                                type == TokenType::LEFT_BRACKET) {
+                                ++depth;
+                            }
+                            if (type == TokenType::RIGHT_PAREN ||
+                                type == TokenType::RIGHT_BRACE ||
+                                type == TokenType::RIGHT_BRACKET) {
+                                --depth;
+                            }
+                            consume();
+                            if (dmi_braced && depth == 0 &&
+                                type == TokenType::RIGHT_BRACE) {
+
+                                break;
+                            }
+                        }
+                        dmi_end =
+                            static_cast<uint32_t>(current_raw_index());
+                    }
+
+                    collect::RecordFieldInput input;
+                    input.name = declarator.name;
+                    input.type = declarator.type.valid() ? declarator.type : member_base_type.type;
+                    input.qualifiers = declarator.type_ref.qualifiers;
+                    input.has_default_member_initializer = has_dmi;
+                    input.default_member_initializer_braced = dmi_braced;
+                    input.default_member_initializer_begin = dmi_begin;
+                    input.default_member_initializer_end = dmi_end;
+                    input.default_member_initializer_loc = dmi_loc;
+                    input.default_member_initializer_context =
+                        collect_session_.current_decl_context();
+                    input.default_member_initializer_lookup_generation =
+                        collect_session_.lookup_generation();
+                    input.loc = declarator.loc.isInvalid()
+                        ? loc_for_index(member_begin)
+                        : declarator.loc;
+                    input.attrs = leading_member_attrs.attrs;
+                    input.attrs.append(member_parser.leading_attrs);
+                    input.attrs.append(declarator.attrs);
+                    input.attrs.append(declarator_attrs.attrs);
+                    input.attrs.append(bitfield_attrs.attrs);
+                    input.type = collect_session_
+                                     .apply_type_attributes(
+                                         collect_session_.type_ref(input.type),
+                                         input.attrs,
+                                         input.loc)
+                                     .type;
+                    input.declared_access = current_access;
+                    input.forced_alignment = std::max({leading_member_attrs.alignment,
+                                                       declarator_attrs.alignment,
+                                                       bitfield_attrs.alignment});
+                    input.is_packed = leading_member_attrs.is_packed ||
+                                      declarator_attrs.is_packed ||
+                                      bitfield_attrs.is_packed;
+                    input.is_bitfield = is_bitfield;
+                    input.bit_width = bit_width;
+                    input.bit_width_expression =
+                        std::move(bit_width_expression);
+                    input.bit_width_is_dependent =
+                        bit_width_is_dependent;
+                    input.is_mutable = flags.is_mutable;
+                    fields.push_back(std::move(input));
+                    children.push_back(make_node(NodeKind::FieldDecl,
+                                                 member_begin,
+                                                 last_consumed_raw_end(),
+                                                 member_children,
+                                                 text_payload(declarator.name)));
+                }
+
+                parsed_any_member = true;
+                if (parsed_body || !match(TokenType::COMMA)) {
+                    break;
+                }
+                member_begin = current_raw_index();
+            }
+
+            if (!parsed_any_member) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected class member declarator",
+                         loc_for_index(member_begin));
+            }
+            if (!parsed_body && !match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error,
+                         "expected ';' after class member declaration",
+                         current_loc());
+                skip_until_statement_boundary();
+            }
+        }
+
+        if (!match(TokenType::RIGHT_BRACE)) {
+            diagnose(DiagnosticLevel::Error, "expected '}' after record body", current_loc());
+        }
+        collect_session_.set_current_record_member_access(std::nullopt);
+        LayoutAttrs post_body_attrs = parse_layout_attributes();
+        children.insert(children.end(), post_body_attrs.syntax.begin(), post_body_attrs.syntax.end());
+        merge_attrs(record_attrs, std::move(post_body_attrs));
+        if (!has_friend_equality_declaration &&
+            std::none_of(methods.begin(), methods.end(),
+                         [](const collect::RecordMethodInput& method) {
+                             return method.name == "operator==";
+                         })) {
+            uint64_t key = static_cast<uint64_t>(record.entity.index);
+            auto pending = pending_hidden_friend_bodies_.find(key);
+            if (pending != pending_hidden_friend_bodies_.end()) {
+                std::optional<PendingHiddenFriendBody> implicit_equality;
+                for (const PendingHiddenFriendBody& spaceship :
+                     pending->second) {
+                    if (!spaceship.is_defaulted_comparison ||
+                        spaceship.name != "operator<=>" ||
+                        !spaceship.entity.valid() ||
+                        !collect_session_.file().valid(spaceship.entity)) {
+                        continue;
+                    }
+                    const auto* payload = std::get_if<
+                        cir::FunctionTypePayload>(
+                        &collect_session_.file().type_payload(
+                            collect_session_.file().resolved_type(
+                                spaceship.function_type)));
+                    if (!payload) {
+                        continue;
+                    }
+                    cir::TypeId equality_type =
+                        collect_session_.function_type(
+                            collect_session_.type_ref(
+                                collect_session_.file().builtin_type(
+                                    cir::BuiltinTypeKind::Bool)),
+                            payload->parameters,
+                            payload->is_variadic,
+                            payload->has_prototype,
+                            payload->member_is_const,
+                            payload->exception_spec,
+                            payload->parameter_pack_flags,
+                            payload->member_ref_qualifier,
+                            payload->member_is_volatile);
+                    cir::OperatorFunctionIdentity identity;
+                    identity.kind =
+                        cir::OperatorFunctionKind::Symbolic;
+                    identity.spelling =
+                        cir::OperatorFunctionSpelling::Equal;
+                    cir::EntityId equality =
+                        collect_session_.add_pending_friend_function(
+                            record.entity, "operator==", equality_type,
+                            collect_session_.file()
+                                .entity(spaceship.entity)
+                                .semantic_context,
+                            spaceship.loc, {},
+                            /*require_existing=*/false, identity);
+                    if (!equality.valid()) {
+                        break;
+                    }
+                    PendingHiddenFriendBody generated = spaceship;
+                    generated.entity = equality;
+                    generated.name = "operator==";
+                    generated.function_type = equality_type;
+                    generated.result_type = collect_session_.type_ref(
+                        collect_session_.file().builtin_type(
+                            cir::BuiltinTypeKind::Bool));
+                    generated.implicit_equality_origin = spaceship.entity;
+                    implicit_equality = std::move(generated);
+                    break;
+                }
+                if (implicit_equality.has_value()) {
+                    pending->second.push_back(
+                        std::move(*implicit_equality));
+                }
+            }
+        }
+        collect_session_.leave_scope();
+        for (PendingMethodConstraints& lhs : pending_method_constraints) {
+            if (lhs.method_index >= methods.size()) {
+                continue;
+            }
+            for (const PendingMethodConstraints& rhs :
+                 pending_method_constraints) {
+                if (lhs.method_index == rhs.method_index ||
+                    rhs.method_index >= methods.size()) {
+                    continue;
+                }
+                if (collect_session_.declaration_more_constrained(
+                        lhs.constraints, rhs.constraints)) {
+                    methods[lhs.method_index].more_constrained_than.push_back(
+                        methods[rhs.method_index]
+                            .associated_constraint_fingerprint);
+                }
+            }
+        }
+        std::vector<const collect::Session::TemplateInfo*>
+            method_template_heads(methods.size(), nullptr);
+        for (const PendingMemberTemplate& pending :
+             pending_member_templates) {
+            if (pending.method_index < method_template_heads.size()) {
+                method_template_heads[pending.method_index] = &pending.info;
+            }
+        }
+        std::vector<cir::EntityId> method_entities;
+        record = collect_session_.finish_record_definition(std::move(record),
+                                                           kind,
+                                                           std::move(fields),
+                                                           std::move(static_data_members),
+                                                           std::move(methods),
+                                                           keyword.loc,
+                                                           layout_options_from_attrs(record_attrs),
+                                                           &method_entities,
+                                                           &method_template_heads,
+                                                           std::move(bases),
+                                                           is_final,
+                                                           kind == cir::RecordKind::Union &&
+                                                               tag.empty() &&
+                                                               check(TokenType::SEMICOLON));
+        if (base_access_capture.valid() &&
+            !collect_session_.finish_access_capture(base_access_capture,
+                                                    record.entity)) {
+            record.has_error = true;
+        }
+        replay_or_defer_record_bodies(record.entity,
+                                      std::move(pending_member_templates),
+                                      std::move(pending_bodies),
+                                      std::move(method_entities));
+        if (type_out) {
+            *type_out = record.type;
+        }
+
+        std::string text = std::string(cir::record_kind_name(kind));
+        if (!tag.empty()) {
+            text += ' ';
+            text += tag;
+        }
+        return make_node(NodeKind::RecordDecl,
+                         begin,
+                         last_consumed_raw_end(),
+                         children,
+                         text_payload(std::move(text)),
+                         (record.has_error || header_has_error) ? NodeFlagHasError : NodeFlagNone);
     }
 
+    std::vector<collect::RecordFieldInput> fields;
+    bool is_definition = false;
+    if (check(TokenType::LEFT_BRACE)) {
+        is_definition = true;
+        if (!tag.empty()) {
+            collect_session_.declare_record_tag_in_current_scope(kind, tag, keyword.loc);
+        }
+        consume();
+
+        while (!at_end() && !check(TokenType::RIGHT_BRACE)) {
+            size_t field_begin = current_raw_index();
+            if (match(TokenType::SEMICOLON)) {
+                continue;
+            }
+            if (check(TokenType::STATIC_ASSERT)) {
+                ParsedDecl assert_decl = parse_static_assert_declaration();
+                if (assert_decl.syntax != InvalidNodeId) {
+                    children.push_back(assert_decl.syntax);
+                }
+                continue;
+            }
+            LayoutAttrs leading_field_attrs = parse_layout_attributes();
+            if (!is_type_start(current().type)) {
+                diagnose(DiagnosticLevel::Error, "expected field declaration", current_loc());
+                skip_until_statement_boundary();
+                continue;
+            }
+
+            DeclarationParser field_parser(
+                *this,
+                TypeParseContext::type_only(
+                    TypeParseContext::Origin::MemberDeclSpecifier));
+            cir::TypeRef field_base_type = field_parser.parse_declaration(false, true);
+            NodeId field_type = field_parser.type_syntax;
+            bool parsed_any_field = false;
+            while (!at_end()) {
+                field_parser.reset_declarator_parsing_state();
+                ParsedDeclarator declarator = field_parser.parse_declarator(field_base_type, true);
+                LayoutAttrs declarator_attrs = parse_layout_attributes();
+
+                bool is_bitfield = false;
+                uint32_t bit_width = 0;
+                cir::TemplateValueExpression bit_width_expression;
+                bool bit_width_is_dependent = false;
+                NodeId width_syntax = InvalidNodeId;
+                LayoutAttrs bitfield_attrs;
+                if (match(TokenType::COLON)) {
+                    is_bitfield = true;
+                    if (check(TokenType::COMMA) || check(TokenType::SEMICOLON) ||
+                        check(TokenType::RIGHT_BRACE)) {
+                        diagnose(DiagnosticLevel::Error, "expected bit-field width", current_loc());
+                    } else {
+                        ParsedExpr width = parse_conditional_expression();
+                        width_syntax = width.syntax;
+                        bit_width_expression =
+                            width.sem.template_value_expr;
+                        collect_session_.file()
+                            .canonicalize_template_value_expression(
+                                bit_width_expression);
+                        bit_width_is_dependent =
+                            collect_session_.expr_is_dependent(width.sem) ||
+                            collect_session_.expr_is_value_dependent(
+                                width.sem);
+                        if (!bit_width_is_dependent) {
+                            int64_t value = 0;
+                            if (collect_session_.evaluate_integer_constant(
+                                    width.sem,
+                                    value,
+                                    declarator.loc,
+                                    "bit-field width is not an integer constant expression")) {
+                                if (value < 0) {
+                                    diagnose(DiagnosticLevel::Error,
+                                             "bit-field width cannot be negative",
+                                             declarator.loc);
+                                } else if (value >
+                                           static_cast<int64_t>(
+                                               std::numeric_limits<uint32_t>::max())) {
+                                    diagnose(DiagnosticLevel::Error,
+                                             "bit-field width is too large",
+                                             declarator.loc);
+                                } else {
+                                    bit_width =
+                                        static_cast<uint32_t>(value);
+                                }
+                            }
+                        }
+                    }
+                    bitfield_attrs = parse_layout_attributes();
+                }
+
+                std::vector<NodeId> field_children = leading_field_attrs.syntax;
+                field_children.push_back(field_type);
+                if (declarator.syntax != InvalidNodeId) {
+                    field_children.push_back(declarator.syntax);
+                }
+                field_children.insert(field_children.end(),
+                                      declarator_attrs.syntax.begin(),
+                                      declarator_attrs.syntax.end());
+                if (width_syntax != InvalidNodeId) {
+                    field_children.push_back(width_syntax);
+                }
+                field_children.insert(field_children.end(),
+                                      bitfield_attrs.syntax.begin(),
+                                      bitfield_attrs.syntax.end());
+                NodeId field_node = make_node(NodeKind::FieldDecl,
+                                              field_begin,
+                                              last_consumed_raw_end(),
+                                              field_children,
+                                              text_payload(declarator.name));
+                children.push_back(field_node);
+
+                collect::RecordFieldInput input;
+                input.name = declarator.name;
+                input.type = declarator.type.valid() ? declarator.type : field_base_type.type;
+                input.qualifiers = declarator.type_ref.qualifiers;
+                input.loc = declarator.loc.isInvalid() ? loc_for_index(field_begin) : declarator.loc;
+                input.attrs = leading_field_attrs.attrs;
+                input.attrs.append(field_parser.leading_attrs);
+                input.attrs.append(declarator.attrs);
+                input.attrs.append(declarator_attrs.attrs);
+                input.attrs.append(bitfield_attrs.attrs);
+
+                input.type = collect_session_
+                                 .apply_type_attributes(
+                                     collect_session_.type_ref(input.type),
+                                     input.attrs,
+                                     input.loc)
+                                 .type;
+                input.forced_alignment = std::max({leading_field_attrs.alignment,
+                                                   declarator_attrs.alignment,
+                                                   bitfield_attrs.alignment});
+                input.is_packed = leading_field_attrs.is_packed ||
+                                  declarator_attrs.is_packed ||
+                                  bitfield_attrs.is_packed;
+                input.is_bitfield = is_bitfield;
+                input.bit_width = bit_width;
+                input.bit_width_expression =
+                    std::move(bit_width_expression);
+                input.bit_width_is_dependent =
+                    bit_width_is_dependent;
+                fields.push_back(std::move(input));
+                parsed_any_field = true;
+
+                if (!match(TokenType::COMMA)) {
+                    break;
+                }
+                field_begin = current_raw_index();
+            }
+
+            if (!parsed_any_field) {
+                diagnose(DiagnosticLevel::Error, "expected field declarator", loc_for_index(field_begin));
+            }
+            if (!match(TokenType::SEMICOLON)) {
+                diagnose(DiagnosticLevel::Error, "expected ';' after field declaration", current_loc());
+                skip_until_statement_boundary();
+            }
+        }
+
+        if (!match(TokenType::RIGHT_BRACE)) {
+            diagnose(DiagnosticLevel::Error, "expected '}' after record body", current_loc());
+        }
+        LayoutAttrs post_body_attrs = parse_layout_attributes();
+        children.insert(children.end(), post_body_attrs.syntax.begin(), post_body_attrs.syntax.end());
+        merge_attrs(record_attrs, std::move(post_body_attrs));
+    }
+
+    collect::RecordDeclResult record = is_definition
+        ? collect_session_.define_record(kind,
+                                         tag,
+                                         std::move(fields),
+                                         keyword.loc,
+                                         layout_options_from_attrs(record_attrs))
+        : collect_session_.declare_record_tag(kind, tag, keyword.loc);
+    if (type_out) {
+        *type_out = record.type;
+    }
+
+    std::string text = std::string(cir::record_kind_name(kind));
+    if (!tag.empty()) {
+        text += ' ';
+        text += tag;
+    }
+    NodeId syntax = make_node(NodeKind::RecordDecl,
+                              begin,
+                              last_consumed_raw_end(),
+                              children,
+                              text_payload(std::move(text)),
+                              record.has_error ? NodeFlagHasError : NodeFlagNone);
+    return syntax;
 }
+
+NodeId Parser::parse_enum_specifier(cir::TypeId* type_out) {
+    size_t begin = current_raw_index();
+    Token keyword = current();
+    if (!match(TokenType::ENUM)) {
+        return parse_error_node("expected enum specifier", begin, begin + 1);
+    }
+
+    bool is_scoped = false;
+    if (lang_opts_.is_cxx_mode() &&
+        (check(TokenType::CLASS) || check(TokenType::STRUCT))) {
+        is_scoped = true;
+        consume();
+    }
+
+    bool enum_packed = false;
+    auto consume_enum_attributes = [&]() {
+        while (check(TokenType::ATTRIBUTE_KW)) {
+            ParsedAttributes attrs = try_parse_attributes();
+            for (const ParsedAttribute& attr : attrs.attrs.attrs) {
+                if (attr.kind == AttributeKind::Packed) {
+                    enum_packed = true;
+                }
+            }
+        }
+    };
+    consume_enum_attributes();
+
+    struct QualifiedEnumContextExit {
+        collect::Session* session = nullptr;
+        ~QualifiedEnumContextExit() {
+            if (session) {
+                session->leave_scope();
+            }
+        }
+    } qualified_enum_context;
+    if (lang_opts_.is_cxx_mode()) {
+        ParsedNestedName nested = parse_nested_name_specifier();
+        if (nested.consumed_any) {
+            if (nested.has_error || !nested.scope.context.valid()) {
+                diagnose(DiagnosticLevel::Error,
+                         "qualified enum definition qualifier does not name a class or namespace",
+                         keyword.loc);
+            } else {
+                const cir::File& file = collect_session_.file();
+                cir::DeclContextKind context_kind =
+                    file.decl_context(nested.scope.context).kind;
+                if (context_kind != cir::DeclContextKind::Record &&
+                    context_kind != cir::DeclContextKind::Namespace &&
+                    context_kind != cir::DeclContextKind::TranslationUnit) {
+                    diagnose(DiagnosticLevel::Error,
+                             "qualified enum definition qualifier does not name a class or namespace",
+                             keyword.loc);
+                } else {
+                    collect::ScopeFlags flags =
+                        context_kind == cir::DeclContextKind::Record
+                            ? collect::ScopeFlags::RecordScope
+                            : (collect::ScopeFlags::NamespaceScope |
+                               collect::ScopeFlags::FileScope);
+                    collect_session_.enter_existing_context(
+                        nested.scope.context,
+                        flags);
+                    qualified_enum_context.session = &collect_session_;
+                }
+            }
+        }
+    }
+
+    std::string tag;
+    if (is_identifier_token(current().type)) {
+        tag = current().value;
+        consume();
+    }
+    consume_enum_attributes();
+
+    std::vector<NodeId> children;
+    bool has_error = false;
+
+    cir::TypeRef fixed_underlying{};
+    if (check(TokenType::COLON)) {
+        consume();
+        DeclarationParser underlying_parser(*this);
+        // An enum-base ends after its type-specifier-seq. Parsing a declarator
+        // here would consume the name in forms such as
+        // `typedef enum E : int E;` instead of leaving it for the typedef.
+        fixed_underlying = underlying_parser.parse_declaration(false, true);
+        if (!fixed_underlying.valid()) {
+            diagnose(DiagnosticLevel::Error,
+                     "expected integer type after ':' in enum specifier",
+                     current_loc());
+            has_error = true;
+        } else {
+            cir::TypeId resolved_underlying =
+                collect_session_.file().resolved_type(fixed_underlying.type);
+            cir::TypeKind underlying_kind =
+                collect_session_.file().valid(resolved_underlying)
+                    ? collect_session_.file().type(resolved_underlying).kind
+                    : cir::TypeKind::Invalid;
+            cir::OperatorValueDomain domain =
+                collect_session_.file().operator_value_domain(fixed_underlying);
+            bool integer_domain =
+                domain == cir::OperatorValueDomain::Bool ||
+                domain == cir::OperatorValueDomain::SignedInteger ||
+                domain == cir::OperatorValueDomain::UnsignedInteger;
+            bool dependent_underlying =
+                collect_session_.is_dependent_type(fixed_underlying.type);
+            if (!dependent_underlying &&
+                (!integer_domain ||
+                 (underlying_kind != cir::TypeKind::Builtin &&
+                  underlying_kind != cir::TypeKind::BitInt))) {
+                diagnose(DiagnosticLevel::Error,
+                         "invalid fixed underlying type for enum",
+                         keyword.loc);
+                has_error = true;
+            }
+        }
+    }
+
+    if (is_scoped && !fixed_underlying.valid()) {
+        fixed_underlying = collect_session_.file().type_ref(
+            collect_session_.file().builtin_type(cir::BuiltinTypeKind::Int));
+    }
+    if (is_scoped && tag.empty()) {
+        diagnose(DiagnosticLevel::Error,
+                 "scoped enum requires a name",
+                 keyword.loc);
+        has_error = true;
+    }
+
+    if (!check(TokenType::LEFT_BRACE)) {
+        if (lang_opts_.is_cxx_mode() && !is_scoped &&
+            !fixed_underlying.valid() && check(TokenType::SEMICOLON)) {
+            diagnose(DiagnosticLevel::Error,
+                     "opaque enum declaration requires an explicit underlying type",
+                     keyword.loc);
+            has_error = true;
+        }
+        cir::TypeId type = collect_session_.declare_enum_tag(tag,
+                                                             is_scoped,
+                                                             fixed_underlying,
+                                                             keyword.loc);
+        if (type_out) {
+            *type_out = type;
+        }
+        std::string text = is_scoped ? "enum class" : "enum";
+        if (!tag.empty()) {
+            text += ' ';
+            text += tag;
+        }
+        return make_node(NodeKind::RecordDecl,
+                         begin,
+                         last_consumed_raw_end(),
+                         children,
+                         text_payload(std::move(text)),
+                         (has_error || !type.valid()) ? NodeFlagHasError
+                                                      : NodeFlagNone);
+    }
+
+    cir::TypeId announced_enum_type;
+    bool entered_enum_scope = false;
+    cir::EntityId announced_enum_entity{};
+    if (lang_opts_.is_cxx_mode() && !tag.empty()) {
+        announced_enum_type = collect_session_.declare_enum_tag(tag,
+                                                                 is_scoped,
+                                                                 fixed_underlying,
+                                                                 keyword.loc);
+        const auto* enum_payload = announced_enum_type.valid() &&
+                                           collect_session_.file().valid(
+                                               announced_enum_type)
+            ? std::get_if<cir::EnumTypePayload>(
+                  &collect_session_.file().type_payload(announced_enum_type))
+            : nullptr;
+        if (!enum_payload) {
+            announced_enum_type = {};
+            has_error = true;
+        }
+        announced_enum_entity = enum_payload ? enum_payload->entity
+                                             : cir::EntityId{};
+        cir::EntityId owner = collect_session_.enclosing_record_for_context(
+            collect_session_.current_decl_context());
+        bool defer_scoped_definition =
+            is_scoped && !replaying_deferred_scoped_enum_definition_ &&
+            collect_session_.is_instantiating() && owner.valid() &&
+            collect_session_.file().template_specialization(owner);
+        if (defer_scoped_definition && announced_enum_entity.valid()) {
+            size_t definition_end = skip_balanced_until_semicolon_or_brace();
+            uint64_t key = static_cast<uint64_t>(announced_enum_entity.index);
+            deferred_scoped_enum_definitions_[key] =
+                DeferredScopedEnumDefinition{announced_enum_entity,
+                                             owner,
+                                             begin,
+                                             definition_end,
+                                             keyword.loc};
+            collect_session_.track_speculative_rollback([this, key] {
+                deferred_scoped_enum_definitions_.erase(key);
+            });
+            if (type_out) {
+                *type_out = announced_enum_type;
+            }
+            std::string text = "enum class " + tag;
+            return make_node(NodeKind::RecordDecl,
+                             begin,
+                             definition_end,
+                             children,
+                             text_payload(std::move(text)),
+                             has_error ? NodeFlagHasError : NodeFlagNone);
+        }
+        if (announced_enum_entity.valid() &&
+            collect_session_.file().valid(announced_enum_entity)) {
+            cir::DeclContextId enum_context =
+                collect_session_.file()
+                    .entity(announced_enum_entity)
+                    .semantic_context;
+            if (enum_context.valid()) {
+                collect_session_.enter_existing_context(
+                    enum_context,
+                    collect::ScopeFlags::EnumScope);
+                entered_enum_scope = true;
+            }
+        }
+    }
+
+    consume();
+    std::vector<collect::EnumEnumeratorInput> enumerators;
+    int64_t next_value = 0;
+    while (!at_end() && !check(TokenType::RIGHT_BRACE)) {
+        size_t enumerator_begin = current_raw_index();
+        if (!check(TokenType::IDENTIFIER)) {
+            diagnose(DiagnosticLevel::Error, "expected enumerator name", current_loc());
+            has_error = true;
+            skip_balanced_until_semicolon_or_brace();
+            break;
+        }
+
+        Token name_token = current();
+        NodeId name_node = parse_name_node(NodeKind::Name);
+        std::vector<NodeId> enumerator_children{name_node};
+        std::optional<int64_t> value;
+
+        while (check(TokenType::ATTRIBUTE_KW) || (check(TokenType::LEFT_BRACKET) &&
+               peek(1).type == TokenType::LEFT_BRACKET)) {
+            ParsedAttributes enum_attrs = try_parse_attributes();
+            enumerator_children.insert(enumerator_children.end(),
+                                       enum_attrs.syntax.begin(),
+                                       enum_attrs.syntax.end());
+        }
+
+        if (match(TokenType::ASSIGN)) {
+            uint64_t value_taint_before = collect_session_.pattern_taint();
+            ParsedExpr expr = parse_conditional_expression();
+            enumerator_children.push_back(expr.syntax);
+            int64_t evaluated = 0;
+            bool defer_dependent_value =
+                collect_session_.in_template_definition() &&
+                (collect_session_.expr_is_dependent(expr.sem) ||
+                 collect_session_.pattern_taint() != value_taint_before);
+            if (defer_dependent_value) {
+                value = next_value;
+                ++next_value;
+            } else if (collect_session_.evaluate_integer_constant(
+                    expr.sem,
+                    evaluated,
+                    name_token.loc,
+                    "enumerator value is not an integer constant expression")) {
+                value = evaluated;
+                next_value = evaluated + 1;
+            } else {
+                has_error = true;
+                value = next_value;
+                ++next_value;
+            }
+        } else {
+            value = next_value;
+            ++next_value;
+        }
+
+        cir::EntityId enumerator_entity = collect_session_.declare_enumerator(
+            name_token.value,
+            value.value_or(next_value - 1),
+
+            fixed_underlying.valid() ? fixed_underlying.type : cir::TypeId{},
+            name_token.loc);
+
+        enumerators.push_back(collect::EnumEnumeratorInput{
+            std::string(name_token.value),
+            value,
+            name_token.loc,
+            enumerator_entity
+        });
+        children.push_back(make_node(NodeKind::FieldDecl,
+                                     enumerator_begin,
+                                     last_consumed_raw_end(),
+                                     enumerator_children,
+                                     text_payload(name_token.value),
+                                     has_error ? NodeFlagHasError : NodeFlagNone));
+
+        if (match(TokenType::COMMA)) {
+            if (check(TokenType::RIGHT_BRACE)) {
+                break;
+            }
+            continue;
+        }
+        if (!check(TokenType::RIGHT_BRACE)) {
+            diagnose(DiagnosticLevel::Error, "expected ',' or '}' in enum specifier", current_loc());
+            has_error = true;
+            while (!at_end() && !check(TokenType::COMMA) && !check(TokenType::RIGHT_BRACE)) {
+                consume();
+            }
+            match(TokenType::COMMA);
+        }
+    }
+
+    if (!match(TokenType::RIGHT_BRACE)) {
+        diagnose(DiagnosticLevel::Error, "expected '}' after enum body", current_loc());
+        has_error = true;
+    }
+
+    consume_enum_attributes();
+    if (entered_enum_scope) {
+        collect_session_.leave_scope();
+    }
+
+    collect::EnumDeclResult enum_result =
+        collect_session_.define_enum(tag,
+                                     std::move(enumerators),
+                                     keyword.loc,
+                                     fixed_underlying,
+                                     enum_packed,
+                                     is_scoped);
+    if (type_out) {
+        *type_out = enum_result.type;
+    }
+
+    std::string text = is_scoped ? "enum class" : "enum";
+    if (!tag.empty()) {
+        text += ' ';
+        text += tag;
+    }
+    return make_node(NodeKind::RecordDecl,
+                     begin,
+                     last_consumed_raw_end(),
+                     children,
+                     text_payload(std::move(text)),
+                     (has_error || enum_result.has_error) ? NodeFlagHasError : NodeFlagNone);
+}
+
+bool Parser::force_deferred_scoped_enum_definition(
+    cir::EntityId enum_entity) {
+    if (!enum_entity.valid() || !collect_session_.file().valid(enum_entity)) {
+        return false;
+    }
+    if (collect_session_.file().entity(enum_entity).is_definition) {
+        return true;
+    }
+    uint64_t key = static_cast<uint64_t>(enum_entity.index);
+    auto found = deferred_scoped_enum_definitions_.find(key);
+    if (found == deferred_scoped_enum_definitions_.end()) {
+        return false;
+    }
+    DeferredScopedEnumDefinition deferred = found->second;
+    deferred_scoped_enum_definitions_.erase(found);
+
+    collect_session_.track_speculative_rollback(
+        "restore deferred scoped enum definition",
+        [this, key, deferred] {
+            deferred_scoped_enum_definitions_[key] = deferred;
+        });
+
+    collect::Session::InstantiationScope scope;
+    if (!collect_session_.begin_member_instantiation_scope(enum_entity,
+                                                           scope)) {
+        return false;
+    }
+    bool entered_owner = false;
+    if (deferred.owner.valid() &&
+        collect_session_.file().valid(deferred.owner)) {
+        cir::DeclContextId context =
+            collect_session_.file().entity(deferred.owner).semantic_context;
+        if (context.valid()) {
+            collect_session_.enter_existing_context(
+                context, collect::ScopeFlags::RecordScope);
+            entered_owner = true;
+        }
+    }
+
+    size_t saved_cursor = cursor_;
+    size_t saved_last_end = last_consumed_raw_end_;
+    int saved_template_closes = pending_template_closes_;
+    bool saved_replaying = replaying_deferred_scoped_enum_definition_;
+    cursor_ = deferred.definition_begin;
+    pending_template_closes_ = 0;
+    replaying_deferred_scoped_enum_definition_ = true;
+    cir::TypeId replayed_type{};
+    (void)parse_enum_specifier(&replayed_type);
+    replaying_deferred_scoped_enum_definition_ = saved_replaying;
+    cursor_ = saved_cursor;
+    last_consumed_raw_end_ = saved_last_end;
+    pending_template_closes_ = saved_template_closes;
+    if (entered_owner) {
+        collect_session_.leave_scope();
+    }
+    collect_session_.finish_template_instantiation(std::move(scope));
+    return collect_session_.file().valid(enum_entity) &&
+        collect_session_.file().entity(enum_entity).is_definition;
+}
+
+bool Parser::force_deferred_member_class_definition(
+    cir::EntityId record_entity) {
+    if (!record_entity.valid() ||
+        !collect_session_.file().valid(record_entity)) {
+        return false;
+    }
+    const cir::RecordFacts* existing =
+        collect_session_.file().record_facts(record_entity);
+    if (existing && !existing->is_incomplete) {
+        return true;
+    }
+    uint64_t key = static_cast<uint64_t>(record_entity.index);
+    auto found = deferred_member_class_definitions_.find(key);
+    if (found == deferred_member_class_definitions_.end()) {
+        return false;
+    }
+    DeferredMemberClassDefinition deferred = found->second;
+    deferred_member_class_definitions_.erase(found);
+
+    collect_session_.track_speculative_rollback(
+        "restore deferred member class definition",
+        [this, key, deferred] {
+            deferred_member_class_definitions_[key] = deferred;
+        });
+
+    collect::Session::InstantiationScope scope;
+    if (!collect_session_.begin_member_instantiation_scope(record_entity,
+                                                           scope)) {
+        return false;
+    }
+    bool entered_owner = false;
+    if (deferred.owner.valid() &&
+        collect_session_.file().valid(deferred.owner)) {
+        cir::DeclContextId context =
+            collect_session_.file().entity(deferred.owner).semantic_context;
+        if (context.valid()) {
+            collect_session_.enter_existing_context(
+                context, collect::ScopeFlags::RecordScope);
+            entered_owner = true;
+        }
+    }
+
+    size_t saved_cursor = cursor_;
+    size_t saved_last_end = last_consumed_raw_end_;
+    int saved_template_closes = pending_template_closes_;
+    size_t saved_replaying = replaying_deferred_member_class_begin_;
+    cursor_ = deferred.definition_begin;
+    pending_template_closes_ = 0;
+    replaying_deferred_member_class_begin_ = deferred.definition_begin;
+    cir::TypeId replayed_type{};
+    (void)parse_record_specifier(&replayed_type);
+    replaying_deferred_member_class_begin_ = saved_replaying;
+    cursor_ = saved_cursor;
+    last_consumed_raw_end_ = saved_last_end;
+    pending_template_closes_ = saved_template_closes;
+    if (entered_owner) {
+        collect_session_.leave_scope();
+    }
+    collect_session_.finish_template_instantiation(std::move(scope));
+    const cir::RecordFacts* facts =
+        collect_session_.file().record_facts(record_entity);
+    return facts && !facts->is_incomplete;
+}
+
+} // namespace aburi::syntax

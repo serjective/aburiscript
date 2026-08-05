@@ -1,0 +1,158 @@
+#ifndef ADINKRA_CONCEPTS
+#define ADINKRA_CONCEPTS
+
+#include <__adinkra/config>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Left, class Right>
+concept same_as = is_same_v<Left, Right> && is_same_v<Right, Left>;
+
+template<class Derived, class Base>
+concept derived_from =
+    is_base_of_v<Base, Derived> &&
+    is_convertible_v<const volatile Derived*, const volatile Base*>;
+
+template<class From, class To>
+concept convertible_to =
+    is_convertible_v<From, To> &&
+    requires {
+        static_cast<To>(declval<From>());
+    };
+
+template<class Type>
+concept integral = is_integral_v<Type>;
+
+template<class Type>
+concept signed_integral = integral<Type> && is_signed_v<Type>;
+
+template<class Type>
+concept unsigned_integral = integral<Type> && !signed_integral<Type>;
+
+template<class Type>
+concept floating_point = is_floating_point_v<Type>;
+
+template<class Type>
+concept destructible = is_nothrow_destructible_v<Type>;
+
+template<class Type, class... Arguments>
+concept constructible_from =
+    destructible<Type> && is_constructible_v<Type, Arguments...>;
+
+template<class Type>
+concept default_initializable =
+    constructible_from<Type> &&
+    requires {
+        Type{};
+        ::new (static_cast<void*>(nullptr)) Type;
+    };
+
+template<class Type>
+concept move_constructible =
+    constructible_from<Type, Type> && convertible_to<Type, Type>;
+
+template<class Type>
+concept copy_constructible =
+    move_constructible<Type> &&
+    constructible_from<Type, Type&> && convertible_to<Type&, Type> &&
+    constructible_from<Type, const Type&> && convertible_to<const Type&, Type> &&
+    constructible_from<Type, const Type> && convertible_to<const Type, Type>;
+
+template<class Left, class Right>
+concept assignable_from =
+    is_lvalue_reference_v<Left> &&
+    requires(Left left, Right&& right) {
+        { left = std::forward<Right>(right) } -> same_as<Left>;
+    };
+
+template<class Type>
+concept swappable = requires(Type& left, Type& right) {
+    swap(left, right);
+};
+
+template<class Type, class Other>
+concept swappable_with =
+    requires(Type&& left, Other&& right) {
+        swap(std::forward<Type>(left), std::forward<Type>(left));
+        swap(std::forward<Other>(right), std::forward<Other>(right));
+        swap(std::forward<Type>(left), std::forward<Other>(right));
+        swap(std::forward<Other>(right), std::forward<Type>(left));
+    };
+
+template<class Type>
+concept movable =
+    is_object_v<Type> &&
+    move_constructible<Type> &&
+    assignable_from<Type&, Type> &&
+    swappable<Type>;
+
+template<class Type>
+concept copyable =
+    copy_constructible<Type> &&
+    movable<Type> &&
+    assignable_from<Type&, Type&> &&
+    assignable_from<Type&, const Type&> &&
+    assignable_from<Type&, const Type>;
+
+template<class Type>
+concept semiregular = copyable<Type> && default_initializable<Type>;
+
+template<class Left, class Right>
+concept weakly_equality_comparable_with =
+    requires(const remove_reference_t<Left>& left,
+             const remove_reference_t<Right>& right) {
+        { left == right } -> convertible_to<bool>;
+        { left != right } -> convertible_to<bool>;
+        { right == left } -> convertible_to<bool>;
+        { right != left } -> convertible_to<bool>;
+    };
+
+template<class Type>
+concept equality_comparable = weakly_equality_comparable_with<Type, Type>;
+
+template<class Left, class Right>
+concept equality_comparable_with =
+    equality_comparable<Left> &&
+    equality_comparable<Right> &&
+    weakly_equality_comparable_with<Left, Right>;
+
+template<class Type>
+concept regular = semiregular<Type> && equality_comparable<Type>;
+
+template<class Function, class... Arguments>
+concept invocable =
+    requires(Function&& function, Arguments&&... arguments) {
+        std::forward<Function>(function)(std::forward<Arguments>(arguments)...);
+    };
+
+template<class Function, class... Arguments>
+concept regular_invocable = invocable<Function, Arguments...>;
+
+template<class Predicate, class... Arguments>
+concept predicate =
+    regular_invocable<Predicate, Arguments...> &&
+    requires(Predicate&& predicate, Arguments&&... arguments) {
+        {
+            std::forward<Predicate>(predicate)(std::forward<Arguments>(arguments)...)
+        } -> convertible_to<bool>;
+    };
+
+template<class Relation, class Left, class Right>
+concept relation =
+    predicate<Relation, Left, Left> &&
+    predicate<Relation, Right, Right> &&
+    predicate<Relation, Left, Right> &&
+    predicate<Relation, Right, Left>;
+
+template<class Relation, class Left, class Right>
+concept equivalence_relation = relation<Relation, Left, Right>;
+
+template<class Relation, class Left, class Right>
+concept strict_weak_order = relation<Relation, Left, Right>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

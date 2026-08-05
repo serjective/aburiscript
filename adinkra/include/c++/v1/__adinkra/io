@@ -1,0 +1,59 @@
+#ifndef ADINKRA___ADINKRA_IO
+#define ADINKRA___ADINKRA_IO
+
+#include <__adinkra/config>
+#include <cstddef>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+namespace __io {
+
+struct ios_word_storage;
+
+_ADINKRA_EXPORT int ios_xalloc() noexcept;
+_ADINKRA_EXPORT void ios_storage_destroy(
+    ios_word_storage* storage) noexcept;
+_ADINKRA_EXPORT ios_word_storage* ios_storage_copy(
+    const ios_word_storage* storage);
+_ADINKRA_EXPORT long& ios_iword(
+    ios_word_storage*& storage, int index);
+_ADINKRA_EXPORT void*& ios_pword(
+    ios_word_storage*& storage, int index);
+
+_ADINKRA_EXPORT bool write(
+    void* stream, const char* value, size_t count) noexcept;
+_ADINKRA_EXPORT bool put(void* stream, char value) noexcept;
+_ADINKRA_EXPORT bool flush(void* stream) noexcept;
+_ADINKRA_EXPORT bool write_signed(
+    void* stream, long long value, int base,
+    bool uppercase, bool show_base, bool show_positive) noexcept;
+_ADINKRA_EXPORT bool write_unsigned(
+    void* stream, unsigned long long value, int base,
+    bool uppercase, bool show_base, bool show_positive) noexcept;
+_ADINKRA_EXPORT bool write_floating(
+    void* stream, long double value, int precision,
+    bool uppercase, bool scientific, bool fixed,
+    bool show_point, bool show_positive) noexcept;
+_ADINKRA_EXPORT bool write_pointer(
+    void* stream, const void* value, bool uppercase) noexcept;
+
+_ADINKRA_EXPORT int get(void* stream) noexcept;
+_ADINKRA_EXPORT bool unget(void* stream, char value) noexcept;
+_ADINKRA_EXPORT bool skip_whitespace(void* stream) noexcept;
+_ADINKRA_EXPORT bool read_token(
+    void* stream, char* destination, size_t capacity) noexcept;
+_ADINKRA_EXPORT bool read_signed(
+    void* stream, long long& value, int base) noexcept;
+_ADINKRA_EXPORT bool read_unsigned(
+    void* stream, unsigned long long& value, int base) noexcept;
+_ADINKRA_EXPORT bool read_floating(
+    void* stream, long double& value) noexcept;
+_ADINKRA_EXPORT long long tell(void* stream) noexcept;
+_ADINKRA_EXPORT bool seek(
+    void* stream, long long offset, unsigned int direction) noexcept;
+
+} // namespace __io
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

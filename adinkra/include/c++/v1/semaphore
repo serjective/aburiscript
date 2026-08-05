@@ -1,0 +1,181 @@
+#ifndef ADINKRA_SEMAPHORE
+#define ADINKRA_SEMAPHORE
+
+#include <__adinkra/config>
+#include <cerrno>
+#include <chrono>
+#include <cstddef>
+#include <ctime>
+#include <pthread.h>
+#include <system_error>
+
+#define __cpp_lib_semaphore 201907L
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<ptrdiff_t least_max_value = __PTRDIFF_MAX__>
+class counting_semaphore {
+    static_assert(least_max_value >= 0);
+
+public:
+    static constexpr ptrdiff_t max() noexcept {
+        return __PTRDIFF_MAX__;
+    }
+
+    constexpr explicit counting_semaphore(ptrdiff_t desired) noexcept
+        : counter_(desired) {}
+
+    ~counting_semaphore() {
+        (void)::pthread_cond_destroy(&condition_);
+        (void)::pthread_mutex_destroy(&mutex_);
+    }
+
+    counting_semaphore(const counting_semaphore&) = delete;
+    counting_semaphore& operator=(const counting_semaphore&) = delete;
+
+    void release(ptrdiff_t update = 1) {
+        lock();
+        counter_ += update;
+        const int unlock_result = ::pthread_mutex_unlock(&mutex_);
+        if (unlock_result != 0) {
+            throw system_error(
+                unlock_result, generic_category(),
+                "counting_semaphore::release");
+        }
+        if (update == 1) {
+            const int result = ::pthread_cond_signal(&condition_);
+            if (result != 0) {
+                throw system_error(
+                    result, generic_category(),
+                    "counting_semaphore::release");
+            }
+        } else if (update > 1) {
+            const int result = ::pthread_cond_broadcast(&condition_);
+            if (result != 0) {
+                throw system_error(
+                    result, generic_category(),
+                    "counting_semaphore::release");
+            }
+        }
+    }
+
+    void acquire() {
+        lock();
+        while (counter_ == 0) {
+            const int result =
+                ::pthread_cond_wait(&condition_, &mutex_);
+            if (result != 0) {
+                (void)::pthread_mutex_unlock(&mutex_);
+                throw system_error(
+                    result, generic_category(),
+                    "counting_semaphore::acquire");
+            }
+        }
+        --counter_;
+        unlock_after_acquire("counting_semaphore::acquire");
+    }
+
+    bool try_acquire() noexcept {
+        if (::pthread_mutex_lock(&mutex_) != 0) {
+            return false;
+        }
+        const bool acquired = counter_ > 0;
+        if (acquired) {
+            --counter_;
+        }
+        (void)::pthread_mutex_unlock(&mutex_);
+        return acquired;
+    }
+
+    template<class Representation, class Period>
+    bool try_acquire_for(
+        const chrono::duration<Representation, Period>& relative_time) {
+        if (relative_time <= relative_time.zero()) {
+            return try_acquire();
+        }
+        return try_acquire_until(
+            chrono::steady_clock::now() + relative_time);
+    }
+
+    template<class Clock, class Duration>
+    bool try_acquire_until(
+        const chrono::time_point<Clock, Duration>& deadline) {
+        lock();
+        while (counter_ == 0) {
+            const auto remaining = deadline - Clock::now();
+            if (remaining <= remaining.zero()) {
+                (void)::pthread_mutex_unlock(&mutex_);
+                return false;
+            }
+
+            auto nanoseconds =
+                chrono::duration_cast<chrono::nanoseconds>(
+                    remaining).count();
+            if (nanoseconds <= 0) {
+                nanoseconds = 1;
+            }
+
+            timespec realtime_deadline{};
+            (void)::clock_gettime(
+                CLOCK_REALTIME, &realtime_deadline);
+            realtime_deadline.tv_sec += static_cast<time_t>(
+                nanoseconds / 1000000000LL);
+            const long long combined_nanoseconds =
+                static_cast<long long>(realtime_deadline.tv_nsec) +
+                nanoseconds % 1000000000LL;
+            if (combined_nanoseconds >= 1000000000LL) {
+                ++realtime_deadline.tv_sec;
+                realtime_deadline.tv_nsec = static_cast<long>(
+                    combined_nanoseconds - 1000000000LL);
+            } else {
+                realtime_deadline.tv_nsec =
+                    static_cast<long>(combined_nanoseconds);
+            }
+
+            const int result = ::pthread_cond_timedwait(
+                &condition_, &mutex_, &realtime_deadline);
+            if (result != 0 && result != ETIMEDOUT) {
+                (void)::pthread_mutex_unlock(&mutex_);
+                throw system_error(
+                    result, generic_category(),
+                    "counting_semaphore::try_acquire_until");
+            }
+            if (result == ETIMEDOUT && Clock::now() >= deadline) {
+                (void)::pthread_mutex_unlock(&mutex_);
+                return false;
+            }
+        }
+        --counter_;
+        unlock_after_acquire(
+            "counting_semaphore::try_acquire_until");
+        return true;
+    }
+
+private:
+    void lock() {
+        const int result = ::pthread_mutex_lock(&mutex_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(),
+                "counting_semaphore");
+        }
+    }
+
+    void unlock_after_acquire(const char* operation) {
+        const int result = ::pthread_mutex_unlock(&mutex_);
+        if (result != 0) {
+            throw system_error(
+                result, generic_category(), operation);
+        }
+    }
+
+    pthread_mutex_t mutex_ = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t condition_ = PTHREAD_COND_INITIALIZER;
+    ptrdiff_t counter_;
+};
+
+using binary_semaphore = counting_semaphore<1>;
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

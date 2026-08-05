@@ -1,0 +1,55 @@
+#ifndef ADINKRA_INITIALIZER_LIST
+#define ADINKRA_INITIALIZER_LIST
+
+#include <__adinkra/config>
+#include <cstddef>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Element>
+class initializer_list {
+public:
+    using value_type = Element;
+    using reference = const Element&;
+    using const_reference = const Element&;
+    using size_type = size_t;
+    using iterator = const Element*;
+    using const_iterator = const Element*;
+
+    constexpr initializer_list() noexcept : begin_(nullptr), size_(0) {}
+
+    _ADINKRA_NODISCARD constexpr size_t size() const noexcept {
+        return size_;
+    }
+
+    _ADINKRA_NODISCARD constexpr const Element* begin() const noexcept {
+        return begin_;
+    }
+
+    _ADINKRA_NODISCARD constexpr const Element* end() const noexcept {
+        return begin_ + size_;
+    }
+
+private:
+    constexpr initializer_list(const Element* begin, size_t size) noexcept
+        : begin_(begin), size_(size) {}
+
+    const Element* begin_;
+    size_t size_;
+};
+
+template<class Element>
+_ADINKRA_NODISCARD constexpr const Element*
+begin(initializer_list<Element> list) noexcept {
+    return list.begin();
+}
+
+template<class Element>
+_ADINKRA_NODISCARD constexpr const Element*
+end(initializer_list<Element> list) noexcept {
+    return list.end();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

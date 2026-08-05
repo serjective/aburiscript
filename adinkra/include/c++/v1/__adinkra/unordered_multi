@@ -1,0 +1,496 @@
+#ifndef ADINKRA_INTERNAL_UNORDERED_MULTI
+#define ADINKRA_INTERNAL_UNORDERED_MULTI
+
+#include <__adinkra/config>
+#include <cstddef>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Key>
+struct __unordered_identity_key {
+    const Key& operator()(const Key& value) const noexcept {
+        return value;
+    }
+};
+
+template<class Key, class Mapped>
+struct __unordered_pair_key {
+    const Key& operator()(
+        const pair<const Key, Mapped>& value) const noexcept {
+        return value.first;
+    }
+};
+
+template<class Key, class Value, class KeyOfValue,
+         class Hash, class KeyEqual, class Allocator,
+         bool MutableIterator>
+class __unordered_multi_table {
+    struct node {
+        Value value;
+        node* next;
+
+        template<class... Arguments>
+        explicit node(node* following, Arguments&&... arguments)
+            : value(std::forward<Arguments>(arguments)...),
+              next(following) {}
+    };
+
+public:
+    using key_type = Key;
+    using value_type = Value;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using hasher = Hash;
+    using key_equal = KeyEqual;
+    using allocator_type = Allocator;
+    using reference =
+        conditional_t<MutableIterator, value_type&, const value_type&>;
+    using const_reference = const value_type&;
+    using pointer =
+        conditional_t<MutableIterator, value_type*, const value_type*>;
+    using const_pointer = const value_type*;
+
+    template<bool Constant>
+    class iterator_base {
+        friend class __unordered_multi_table;
+        template<bool>
+        friend class iterator_base;
+
+        static constexpr bool is_const =
+            Constant || !MutableIterator;
+
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type = Value;
+        using difference_type = ptrdiff_t;
+        using pointer = conditional_t<
+            is_const, const value_type*, value_type*>;
+        using reference = conditional_t<
+            is_const, const value_type&, value_type&>;
+
+        iterator_base() noexcept : current_(nullptr) {}
+
+        template<bool OtherConstant>
+            requires (is_const &&
+                      !(OtherConstant || !MutableIterator))
+        iterator_base(
+            const iterator_base<OtherConstant>& other) noexcept
+            : current_(other.current_) {}
+
+        reference operator*() const noexcept {
+            return current_->value;
+        }
+
+        pointer operator->() const noexcept {
+            return std::addressof(current_->value);
+        }
+
+        iterator_base& operator++() {
+            current_ = current_->next;
+            return *this;
+        }
+
+        iterator_base operator++(int) {
+            iterator_base result(*this);
+            ++*this;
+            return result;
+        }
+
+        template<bool OtherConstant>
+        bool operator==(
+            const iterator_base<OtherConstant>& other) const noexcept {
+            return current_ == other.current_;
+        }
+
+    private:
+        using node_pointer =
+            conditional_t<is_const, const node*, node*>;
+        node_pointer current_;
+
+        explicit iterator_base(node_pointer value) noexcept
+            : current_(value) {}
+    };
+
+    using iterator = iterator_base<!MutableIterator>;
+    using const_iterator = iterator_base<true>;
+    using local_iterator = iterator;
+    using const_local_iterator = const_iterator;
+
+    __unordered_multi_table()
+        : __unordered_multi_table(1) {}
+
+    explicit __unordered_multi_table(
+        size_type,
+        const hasher& hash_value = hasher(),
+        const key_equal& equal_value = key_equal(),
+        const allocator_type& allocator_value = allocator_type())
+        : head_(nullptr), size_(0), max_load_(1.0F),
+          hash_(hash_value), equal_(equal_value),
+          allocator_(allocator_value) {}
+
+    explicit __unordered_multi_table(
+        const allocator_type& allocator_value)
+        : __unordered_multi_table(
+              1, hasher(), key_equal(), allocator_value) {}
+
+    template<class InputIterator>
+    __unordered_multi_table(
+        InputIterator first, InputIterator last,
+        size_type bucket_count = 1,
+        const hasher& hash_value = hasher(),
+        const key_equal& equal_value = key_equal(),
+        const allocator_type& allocator_value = allocator_type())
+        : __unordered_multi_table(
+              bucket_count, hash_value, equal_value,
+              allocator_value) {
+        insert(first, last);
+    }
+
+    __unordered_multi_table(
+        initializer_list<value_type> values,
+        size_type bucket_count = 1,
+        const hasher& hash_value = hasher(),
+        const key_equal& equal_value = key_equal(),
+        const allocator_type& allocator_value = allocator_type())
+        : __unordered_multi_table(
+              values.begin(), values.end(), bucket_count,
+              hash_value, equal_value, allocator_value) {}
+
+    __unordered_multi_table(
+        const __unordered_multi_table& other)
+        : __unordered_multi_table(
+              1, other.hash_, other.equal_,
+              allocator_traits<allocator_type>::
+                  select_on_container_copy_construction(
+                      other.allocator_)) {
+        max_load_ = other.max_load_;
+        insert(other.begin(), other.end());
+    }
+
+    __unordered_multi_table(
+        const __unordered_multi_table& other,
+        const allocator_type& allocator_value)
+        : __unordered_multi_table(
+              1, other.hash_, other.equal_, allocator_value) {
+        max_load_ = other.max_load_;
+        insert(other.begin(), other.end());
+    }
+
+    __unordered_multi_table(
+        __unordered_multi_table&& other) noexcept
+        : head_(std::exchange(other.head_, nullptr)),
+          size_(std::exchange(other.size_, 0)),
+          max_load_(other.max_load_),
+          hash_(std::move(other.hash_)),
+          equal_(std::move(other.equal_)),
+          allocator_(std::move(other.allocator_)) {}
+
+    __unordered_multi_table(
+        __unordered_multi_table&& other,
+        const allocator_type& allocator_value)
+        : __unordered_multi_table(
+              1, std::move(other.hash_),
+              std::move(other.equal_), allocator_value) {
+        max_load_ = other.max_load_;
+        for (auto& value : other) {
+            emplace(std::move(value));
+        }
+        other.clear();
+    }
+
+    ~__unordered_multi_table() {
+        clear();
+    }
+
+    __unordered_multi_table& operator=(
+        const __unordered_multi_table& other) {
+        if (this != std::addressof(other)) {
+            __unordered_multi_table replacement(other);
+            swap(replacement);
+        }
+        return *this;
+    }
+
+    __unordered_multi_table& operator=(
+        __unordered_multi_table&& other) noexcept {
+        if (this != std::addressof(other)) {
+            clear();
+            head_ = std::exchange(other.head_, nullptr);
+            size_ = std::exchange(other.size_, 0);
+            max_load_ = other.max_load_;
+            hash_ = std::move(other.hash_);
+            equal_ = std::move(other.equal_);
+            allocator_ = std::move(other.allocator_);
+        }
+        return *this;
+    }
+
+    __unordered_multi_table& operator=(
+        initializer_list<value_type> values) {
+        clear();
+        insert(values);
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept {
+        return allocator_;
+    }
+
+    bool empty() const noexcept { return size_ == 0; }
+    size_type size() const noexcept { return size_; }
+    size_type max_size() const noexcept {
+        return static_cast<size_type>(-1) / sizeof(node);
+    }
+
+    iterator begin() noexcept { return iterator(head_); }
+    const_iterator begin() const noexcept {
+        return const_iterator(head_);
+    }
+    const_iterator cbegin() const noexcept {
+        return const_iterator(head_);
+    }
+    iterator end() noexcept { return iterator(nullptr); }
+    const_iterator end() const noexcept {
+        return const_iterator(nullptr);
+    }
+    const_iterator cend() const noexcept {
+        return const_iterator(nullptr);
+    }
+
+    iterator insert(const value_type& value) {
+        return emplace(value);
+    }
+
+    iterator insert(value_type&& value) {
+        return emplace(std::move(value));
+    }
+
+    iterator insert(
+        const_iterator, const value_type& value) {
+        return insert(value);
+    }
+
+    iterator insert(
+        const_iterator, value_type&& value) {
+        return insert(std::move(value));
+    }
+
+    template<class InputIterator>
+    void insert(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    void insert(initializer_list<value_type> values) {
+        insert(values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    iterator emplace(Arguments&&... arguments) {
+        node* candidate = new node(
+            nullptr, std::forward<Arguments>(arguments)...);
+        insert_node(candidate);
+        return iterator(candidate);
+    }
+
+    template<class... Arguments>
+    iterator emplace_hint(
+        const_iterator, Arguments&&... arguments) {
+        return emplace(std::forward<Arguments>(arguments)...);
+    }
+
+    iterator erase(const_iterator position) {
+        node** current = std::addressof(head_);
+        while (*current != position.current_) {
+            current = std::addressof((*current)->next);
+        }
+        node* removed = *current;
+        node* following = removed->next;
+        *current = following;
+        delete removed;
+        --size_;
+        return iterator(following);
+    }
+
+    iterator erase(
+        const_iterator first, const_iterator last) {
+        while (first != last) {
+            first = erase(first);
+        }
+        return iterator(
+            const_cast<node*>(last.current_));
+    }
+
+    size_type erase(const key_type& key) {
+        size_type removed_count = 0;
+        node** current = std::addressof(head_);
+        while (*current != nullptr) {
+            if (equal_(key_of_((*current)->value), key)) {
+                node* removed = *current;
+                *current = removed->next;
+                delete removed;
+                --size_;
+                ++removed_count;
+            } else {
+                current = std::addressof((*current)->next);
+            }
+        }
+        return removed_count;
+    }
+
+    void clear() noexcept {
+        while (head_ != nullptr) {
+            node* removed = head_;
+            head_ = head_->next;
+            delete removed;
+        }
+        size_ = 0;
+    }
+
+    void swap(__unordered_multi_table& other)
+        noexcept(noexcept(std::swap(hash_, other.hash_)) &&
+                 noexcept(std::swap(equal_, other.equal_))) {
+        std::swap(head_, other.head_);
+        std::swap(size_, other.size_);
+        std::swap(max_load_, other.max_load_);
+        std::swap(hash_, other.hash_);
+        std::swap(equal_, other.equal_);
+        if constexpr (allocator_traits<allocator_type>::
+                          propagate_on_container_swap::value) {
+            std::swap(allocator_, other.allocator_);
+        }
+    }
+
+    iterator find(const key_type& key) {
+        return iterator(find_node(key));
+    }
+
+    const_iterator find(const key_type& key) const {
+        return const_iterator(find_node(key));
+    }
+
+    bool contains(const key_type& key) const {
+        return find_node(key) != nullptr;
+    }
+
+    size_type count(const key_type& key) const {
+        size_type result = 0;
+        for (const node* current = find_node(key);
+             current != nullptr &&
+             equal_(key_of_(current->value), key);
+             current = current->next) {
+            ++result;
+        }
+        return result;
+    }
+
+    pair<iterator, iterator> equal_range(
+        const key_type& key) {
+        node* first = find_node(key);
+        node* last = first;
+        while (last != nullptr &&
+               equal_(key_of_(last->value), key)) {
+            last = last->next;
+        }
+        return {iterator(first), iterator(last)};
+    }
+
+    pair<const_iterator, const_iterator> equal_range(
+        const key_type& key) const {
+        const node* first = find_node(key);
+        const node* last = first;
+        while (last != nullptr &&
+               equal_(key_of_(last->value), key)) {
+            last = last->next;
+        }
+        return {
+            const_iterator(first), const_iterator(last)
+        };
+    }
+
+    size_type bucket_count() const noexcept { return 1; }
+    size_type max_bucket_count() const noexcept { return 1; }
+    size_type bucket_size(size_type bucket_index) const {
+        return bucket_index == 0 ? size_ : 0;
+    }
+    size_type bucket(const key_type&) const { return 0; }
+
+    float load_factor() const noexcept {
+        return static_cast<float>(size_);
+    }
+    float max_load_factor() const noexcept {
+        return max_load_;
+    }
+    void max_load_factor(float value) {
+        if (value > 0.0F) {
+            max_load_ = value;
+        }
+    }
+    void rehash(size_type) {}
+    void reserve(size_type) {}
+
+    hasher hash_function() const { return hash_; }
+    key_equal key_eq() const { return equal_; }
+
+private:
+    node* head_;
+    size_type size_;
+    float max_load_;
+    hasher hash_;
+    key_equal equal_;
+    allocator_type allocator_;
+    KeyOfValue key_of_;
+
+    void insert_node(node* candidate) {
+        const key_type& key = key_of_(candidate->value);
+        node* current = head_;
+        while (current != nullptr) {
+            if (equal_(key_of_(current->value), key)) {
+                while (current->next != nullptr &&
+                       equal_(
+                           key_of_(current->next->value), key)) {
+                    current = current->next;
+                }
+                candidate->next = current->next;
+                current->next = candidate;
+                ++size_;
+                return;
+            }
+            current = current->next;
+        }
+        candidate->next = head_;
+        head_ = candidate;
+        ++size_;
+    }
+
+    node* find_node(const key_type& key) {
+        for (node* current = head_;
+             current != nullptr; current = current->next) {
+            if (equal_(key_of_(current->value), key)) {
+                return current;
+            }
+        }
+        return nullptr;
+    }
+
+    const node* find_node(const key_type& key) const {
+        for (const node* current = head_;
+             current != nullptr; current = current->next) {
+            if (equal_(key_of_(current->value), key)) {
+                return current;
+            }
+        }
+        return nullptr;
+    }
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

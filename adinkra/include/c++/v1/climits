@@ -1,0 +1,6 @@
+#ifndef ADINKRA_CLIMITS
+#define ADINKRA_CLIMITS
+
+#include <limits.h>
+
+#endif

@@ -1,0 +1,156 @@
+#ifndef ADINKRA_BIT
+#define ADINKRA_BIT
+
+#include <__adinkra/config>
+#include <limits>
+#include <type_traits>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Destination, class Source>
+    requires (
+        sizeof(Destination) == sizeof(Source) &&
+        is_trivially_copyable_v<Source> &&
+        is_trivially_copyable_v<Destination>)
+_ADINKRA_NODISCARD constexpr Destination
+bit_cast(const Source& source) noexcept {
+    return __builtin_bit_cast(Destination, source);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr bool
+has_single_bit(Type value) noexcept {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr int
+countl_zero(Type value) noexcept {
+    constexpr int digits = numeric_limits<Type>::digits;
+    int count = 0;
+    for (Type mask = Type(1) << (digits - 1);
+         mask != 0 && (value & mask) == 0; mask >>= 1) {
+        ++count;
+    }
+    return count;
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr int
+countl_one(Type value) noexcept {
+    return std::countl_zero(static_cast<Type>(~value));
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr int
+countr_zero(Type value) noexcept {
+    constexpr int digits = numeric_limits<Type>::digits;
+    if (value == 0) {
+        return digits;
+    }
+    int count = 0;
+    while ((value & Type(1)) == 0) {
+        value >>= 1;
+        ++count;
+    }
+    return count;
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr int
+countr_one(Type value) noexcept {
+    return std::countr_zero(static_cast<Type>(~value));
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr int
+popcount(Type value) noexcept {
+    int count = 0;
+    while (value != 0) {
+        value &= value - 1;
+        ++count;
+    }
+    return count;
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr int
+bit_width(Type value) noexcept {
+    return numeric_limits<Type>::digits - std::countl_zero(value);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr Type
+bit_floor(Type value) noexcept {
+    return value == 0
+        ? Type(0)
+        : Type(1) << (std::bit_width(value) - 1);
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr Type
+bit_ceil(Type value) noexcept {
+    return value <= 1
+        ? Type(1)
+        : Type(1) << std::bit_width(static_cast<Type>(value - 1));
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr Type
+rotl(Type value, int shift) noexcept;
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr Type
+rotr(Type value, int shift) noexcept {
+    constexpr int digits = numeric_limits<Type>::digits;
+    const int normalized = shift % digits;
+    if (normalized == 0) {
+        return value;
+    }
+    if (normalized < 0) {
+        return std::rotl(value, -normalized);
+    }
+    return static_cast<Type>(
+        (value >> normalized) | (value << (digits - normalized)));
+}
+
+template<class Type>
+    requires (is_integral_v<Type> && is_unsigned_v<Type>)
+_ADINKRA_NODISCARD constexpr Type
+rotl(Type value, int shift) noexcept {
+    constexpr int digits = numeric_limits<Type>::digits;
+    const int normalized = shift % digits;
+    if (normalized == 0) {
+        return value;
+    }
+    if (normalized < 0) {
+        return std::rotr(value, -normalized);
+    }
+    return static_cast<Type>(
+        (value << normalized) | (value >> (digits - normalized)));
+}
+
+enum class endian {
+    little = 0,
+    big = 1,
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    native = little
+#else
+    native = big
+#endif
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

@@ -1,0 +1,97 @@
+#ifndef ADINKRA_STRSTREAM
+#define ADINKRA_STRSTREAM
+
+#include <cstring>
+#include <istream>
+#include <ostream>
+#include <streambuf>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+class strstreambuf : public streambuf {
+public:
+    strstreambuf(char* buffer, streamsize count) noexcept {
+        if (buffer != nullptr && count > 0) {
+            setg(buffer, buffer, buffer + count);
+            setp(buffer, buffer + count);
+        }
+    }
+
+    strstreambuf(const char* buffer, streamsize count) noexcept {
+        if (buffer != nullptr && count > 0) {
+            char* mutable_buffer = const_cast<char*>(buffer);
+            setg(
+                mutable_buffer,
+                mutable_buffer,
+                mutable_buffer + count);
+        }
+    }
+
+    char* str() noexcept {
+        return pbase();
+    }
+
+    streamsize pcount() const noexcept {
+        return pptr() != nullptr
+            ? static_cast<streamsize>(pptr() - pbase())
+            : 0;
+    }
+
+    void freeze(bool = true) noexcept {}
+};
+
+class istrstream : public istream {
+public:
+    explicit istrstream(const char* value)
+        : istream(static_cast<void*>(nullptr)),
+          buffer_(value, static_cast<streamsize>(
+              value != nullptr ? std::strlen(value) : 0)) {
+        set_streambuf(&buffer_);
+    }
+
+    istrstream(const char* value, streamsize count)
+        : istream(static_cast<void*>(nullptr)),
+          buffer_(value, count) {
+        set_streambuf(&buffer_);
+    }
+
+    strstreambuf* rdbuf() const noexcept {
+        return const_cast<strstreambuf*>(&buffer_);
+    }
+
+private:
+    strstreambuf buffer_;
+};
+
+class ostrstream : public ostream {
+public:
+    ostrstream(char* value, streamsize count,
+               ios_base::openmode = ios_base::out)
+        : ostream(static_cast<void*>(nullptr)),
+          buffer_(value, count) {
+        set_streambuf(&buffer_);
+    }
+
+    strstreambuf* rdbuf() const noexcept {
+        return const_cast<strstreambuf*>(&buffer_);
+    }
+
+    char* str() noexcept {
+        return buffer_.str();
+    }
+
+    streamsize pcount() const noexcept {
+        return buffer_.pcount();
+    }
+
+    void freeze(bool frozen = true) noexcept {
+        buffer_.freeze(frozen);
+    }
+
+private:
+    strstreambuf buffer_;
+};
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif

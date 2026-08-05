@@ -1,91 +1,53 @@
 #include "const_value.h"
 
-#include "../ast/symbols.h"
-#include "../ast/types.h"
+#include "../numeric/floating_point.h"
 
 #include <limits>
 #include <sstream>
 
 namespace {
+using uint128_t = unsigned __int128;
+
 uint16_t normalize_width(uint16_t width) {
-    if (width == 0) {
-        return 1;
-    }
-    if (width > 64) {
-        return 64;
-    }
-    return width;
+    return ConstIntValue::normalized_width(width);
 }
 
-uint64_t width_mask(uint16_t width) {
-    width = normalize_width(width);
-    if (width == 64) {
-        return std::numeric_limits<uint64_t>::max();
-    }
-    return (uint64_t(1) << width) - 1;
+uint128_t width_mask(uint16_t width) {
+    return ConstIntValue::width_mask(width);
 }
 
-uint64_t sign_extend_u64(uint64_t value, uint16_t width) {
-    width = normalize_width(width);
-    value &= width_mask(width);
-    if (width == 64) {
-        return value;
-    }
-    const uint64_t sign_bit = uint64_t(1) << (width - 1);
-    if ((value & sign_bit) == 0) {
-        return value;
-    }
-    return value | ~width_mask(width);
-}
-
-ConstIntValue make_int_from_bits(uint64_t bits, uint16_t width, bool is_unsigned) {
-    ConstIntValue out;
-    out.bit_width = normalize_width(width);
-    out.is_unsigned = is_unsigned;
-    out.bits = bits & width_mask(out.bit_width);
-    return out;
+ConstIntValue make_int_from_bits(uint128_t bits, uint16_t width, bool is_unsigned) {
+    return ConstIntValue::from_bits128(bits, width, is_unsigned);
 }
 
 bool const_object_equals(const std::shared_ptr<ConstObjectValue>& lhs,
                          const std::shared_ptr<ConstObjectValue>& rhs);
+bool const_meta_info_equals(const std::shared_ptr<ConstMetaInfoValue>& lhs,
+                            const std::shared_ptr<ConstMetaInfoValue>& rhs);
 }
 
-ConstIntValue ConstIntValue::from_unsigned(uint64_t value, uint16_t width) {
-    ConstIntValue out;
-    out.bit_width = normalize_width(width);
-    out.is_unsigned = true;
-    out.bits = value & width_mask(out.bit_width);
-    return out;
-}
+bool const_int_value_representable(ConstIntValue value,
+                                   uint16_t target_bit_width,
+                                   bool target_is_unsigned) {
+    target_bit_width = normalize_width(target_bit_width);
+    const uint128_t target_unsigned_max = width_mask(target_bit_width);
+    const uint128_t target_signed_max =
+        (uint128_t{1} << (target_bit_width - 1)) - 1;
 
-ConstIntValue ConstIntValue::from_signed(int64_t value, uint16_t width) {
-    ConstIntValue out;
-    out.bit_width = normalize_width(width);
-    out.is_unsigned = false;
-    out.bits = static_cast<uint64_t>(value) & width_mask(out.bit_width);
-    return out;
-}
+    if (value.is_unsigned) {
+        uint128_t raw = value.to_unsigned_u128();
+        return target_is_unsigned
+            ? raw <= target_unsigned_max
+            : raw <= target_signed_max;
+    }
 
-uint64_t ConstIntValue::to_unsigned_u64() const {
-    return bits & width_mask(bit_width);
-}
-
-int64_t ConstIntValue::to_signed_i64() const {
-    uint64_t extended = sign_extend_u64(bits, bit_width);
-    return static_cast<int64_t>(extended);
-}
-
-ConstIntValue ConstIntValue::cast(uint16_t new_width, bool new_unsigned) const {
-    new_width = normalize_width(new_width);
-
-    ConstIntValue out;
-    out.bit_width = new_width;
-    out.is_unsigned = new_unsigned;
-    uint64_t source_value = is_unsigned
-        ? to_unsigned_u64()
-        : static_cast<uint64_t>(to_signed_i64());
-    out.bits = source_value & width_mask(out.bit_width);
-    return out;
+    __int128 raw = value.to_signed_i128();
+    if (target_is_unsigned) {
+        return raw >= 0 && static_cast<uint128_t>(raw) <= target_unsigned_max;
+    }
+    const __int128 signed_max = static_cast<__int128>(target_signed_max);
+    const __int128 signed_min = -signed_max - 1;
+    return raw >= signed_min && raw <= signed_max;
 }
 
 ConstValue ConstValue::object(ConstObjectValueKind object_kind,
@@ -101,11 +63,13 @@ ConstValue ConstValue::object(ConstObjectValueKind object_kind,
 std::optional<int64_t> ConstValue::try_as_int64() const {
     switch (kind) {
         case ConstValueKind::Integer:
-            return int_value.to_signed_i64();
+            return int_value.try_as_int64();
         case ConstValueKind::Boolean:
             return bool_value ? 1 : 0;
-        case ConstValueKind::NullPointer:
-            return 0;
+        case ConstValueKind::Null:
+            return null_kind == ConstNullKind::Pointer
+                ? std::optional<int64_t>(0)
+                : std::nullopt;
         default:
             return std::nullopt;
     }
@@ -120,24 +84,37 @@ bool const_value_equals(const ConstValue& lhs, const ConstValue& rhs) {
         case ConstValueKind::Invalid:
             return true;
         case ConstValueKind::Integer:
-            return lhs.int_value.bits == rhs.int_value.bits &&
-                   lhs.int_value.bit_width == rhs.int_value.bit_width &&
-                   lhs.int_value.is_unsigned == rhs.int_value.is_unsigned;
+            return lhs.int_value == rhs.int_value;
         case ConstValueKind::Boolean:
             return lhs.bool_value == rhs.bool_value;
         case ConstValueKind::Floating:
-            return lhs.float_value.value == rhs.float_value.value &&
-                   lhs.float_value.bit_width == rhs.float_value.bit_width;
-        case ConstValueKind::NullPointer:
-            return true;
+            return lhs.float_value.value == rhs.float_value.value;
+        case ConstValueKind::Complex:
+            if (lhs.complex_value.has_integer_components !=
+                rhs.complex_value.has_integer_components) {
+                return false;
+            }
+            if (lhs.complex_value.has_integer_components) {
+                return const_value_equals(
+                           ConstValue::integer(lhs.complex_value.integer_real),
+                           ConstValue::integer(rhs.complex_value.integer_real)) &&
+                       const_value_equals(
+                           ConstValue::integer(lhs.complex_value.integer_imag),
+                           ConstValue::integer(rhs.complex_value.integer_imag));
+            }
+            return lhs.complex_value.real == rhs.complex_value.real &&
+                   lhs.complex_value.imag == rhs.complex_value.imag;
+        case ConstValueKind::Null:
+            return lhs.null_kind == rhs.null_kind;
         case ConstValueKind::Address:
-            return lhs.address_value.symbol.get() == rhs.address_value.symbol.get() &&
+            return lhs.address_value.entity == rhs.address_value.entity &&
+                   lhs.address_value.allocation_id == rhs.address_value.allocation_id &&
                    lhs.address_value.byte_offset == rhs.address_value.byte_offset;
         case ConstValueKind::MemberPointer:
             return lhs.member_pointer_value.byte_offset ==
                        rhs.member_pointer_value.byte_offset &&
-                   lhs.member_pointer_value.method_symbol.get() ==
-                       rhs.member_pointer_value.method_symbol.get() &&
+                   lhs.member_pointer_value.method_entity ==
+                       rhs.member_pointer_value.method_entity &&
                    lhs.member_pointer_value.virtual_slot_index ==
                        rhs.member_pointer_value.virtual_slot_index &&
                    lhs.member_pointer_value.member_name ==
@@ -146,6 +123,11 @@ bool const_value_equals(const ConstValue& lhs, const ConstValue& rhs) {
                        rhs.member_pointer_value.is_function_member;
         case ConstValueKind::Object:
             return const_object_equals(lhs.object_value, rhs.object_value);
+        case ConstValueKind::MetaInfo:
+            return const_meta_info_equals(lhs.meta_info_value,
+                                          rhs.meta_info_value);
+        case ConstValueKind::Void:
+            return true;
     }
     return false;
 }
@@ -159,7 +141,9 @@ bool const_object_equals(const std::shared_ptr<ConstObjectValue>& lhs,
     if (!lhs || !rhs) {
         return false;
     }
-    if (lhs->kind != rhs->kind || lhs->elements.size() != rhs->elements.size()) {
+    if (lhs->kind != rhs->kind ||
+        lhs->active_union_member != rhs->active_union_member ||
+        lhs->elements.size() != rhs->elements.size()) {
         return false;
     }
     for (size_t idx = 0; idx < lhs->elements.size(); ++idx) {
@@ -170,32 +154,63 @@ bool const_object_equals(const std::shared_ptr<ConstObjectValue>& lhs,
     return true;
 }
 
-std::string const_value_to_string_impl(const ConstValue& value,
-                                       const QualType* value_type) {
+bool const_meta_info_equals(const std::shared_ptr<ConstMetaInfoValue>& lhs,
+                            const std::shared_ptr<ConstMetaInfoValue>& rhs) {
+    if (lhs == rhs) {
+        return true;
+    }
+
+    aburi::cir::MetaInfoKind lhs_kind =
+        lhs ? lhs->kind : aburi::cir::MetaInfoKind::Null;
+    aburi::cir::MetaInfoKind rhs_kind =
+        rhs ? rhs->kind : aburi::cir::MetaInfoKind::Null;
+    if (lhs_kind != rhs_kind) {
+        return false;
+    }
+    switch (lhs_kind) {
+        case aburi::cir::MetaInfoKind::Null:
+            return true;
+        case aburi::cir::MetaInfoKind::Type:
+            return lhs->type == rhs->type;
+        case aburi::cir::MetaInfoKind::Entity:
+        case aburi::cir::MetaInfoKind::Namespace:
+        case aburi::cir::MetaInfoKind::Template:
+            return lhs->entity == rhs->entity;
+        case aburi::cir::MetaInfoKind::Value:
+            return lhs->boxed_type == rhs->boxed_type &&
+                   lhs->boxed && rhs->boxed &&
+                   const_value_equals(*lhs->boxed, *rhs->boxed);
+    }
+    return false;
+}
+
+std::string const_value_to_string_impl(const ConstValue& value) {
     switch (value.kind) {
         case ConstValueKind::Invalid:
             return "<invalid-const-value>";
         case ConstValueKind::Integer:
-            return value.int_value.is_unsigned
-                ? std::to_string(value.int_value.to_unsigned_u64())
-                : std::to_string(value.int_value.to_signed_i64());
+            return value.int_value.decimal();
         case ConstValueKind::Boolean:
             return value.bool_value ? "true" : "false";
         case ConstValueKind::Floating:
-            return std::to_string(static_cast<double>(value.float_value.value));
-        case ConstValueKind::NullPointer:
+            return aburi::floating::display(value.float_value.value);
+        case ConstValueKind::Complex:
+            if (value.complex_value.has_integer_components) {
+                return const_value_to_string_impl(
+                           ConstValue::integer(
+                               value.complex_value.integer_real)) +
+                       "+" + const_value_to_string_impl(
+                           ConstValue::integer(
+                               value.complex_value.integer_imag)) +
+                       "i";
+            }
+            return aburi::floating::display(value.complex_value.real) + "+" +
+                   aburi::floating::display(value.complex_value.imag) + "i";
+        case ConstValueKind::Null:
             return "nullptr";
         case ConstValueKind::Address:
-            if (value.address_value.symbol &&
-                !value.address_value.symbol->name.empty()) {
-                return "&" + value.address_value.symbol->name;
-            }
             return "<address-const-value>";
         case ConstValueKind::MemberPointer:
-            if (value.member_pointer_value.method_symbol &&
-                !value.member_pointer_value.method_symbol->name.empty()) {
-                return "&" + value.member_pointer_value.method_symbol->name;
-            }
             if (value.member_pointer_value.member_name &&
                 !value.member_pointer_value.member_name->empty()) {
                 return "&" + *value.member_pointer_value.member_name;
@@ -203,12 +218,13 @@ std::string const_value_to_string_impl(const ConstValue& value,
             return "<member-pointer-const-value>";
         case ConstValueKind::Object:
             break;
+        case ConstValueKind::MetaInfo:
+            return "<meta-info>";
+        case ConstValueKind::Void:
+            return "<void-const-value>";
     }
 
     std::ostringstream out;
-    if (value_type && *value_type) {
-        out << value_type->to_string();
-    }
     if (value.object_value &&
         value.object_value->kind == ConstObjectValueKind::Record) {
         out << "{";
@@ -220,7 +236,7 @@ std::string const_value_to_string_impl(const ConstValue& value,
             if (idx > 0) {
                 out << ", ";
             }
-            out << const_value_to_string_impl(value.object_value->elements[idx], nullptr);
+            out << const_value_to_string_impl(value.object_value->elements[idx]);
         }
     }
     if (value.object_value &&
@@ -233,75 +249,73 @@ std::string const_value_to_string_impl(const ConstValue& value,
 }
 } // namespace
 
-std::string const_value_to_string(const ConstValue& value,
-                                  const QualType* value_type) {
-    return const_value_to_string_impl(value, value_type);
+std::string const_value_to_string(const ConstValue& value) {
+    return const_value_to_string_impl(value);
 }
 
 ConstIntOpResult const_int_div(ConstIntValue lhs, ConstIntValue rhs) {
-    if (rhs.to_unsigned_u64() == 0) {
+    if (rhs.to_unsigned_u128() == 0) {
         return ConstIntOpResult::fail(ConstIntOpError::DivisionByZero);
     }
 
     if (lhs.is_unsigned) {
-        uint64_t q = lhs.to_unsigned_u64() / rhs.to_unsigned_u64();
+        uint128_t q = lhs.to_unsigned_u128() / rhs.to_unsigned_u128();
         return ConstIntOpResult::ok(ConstIntValue::from_unsigned(q, lhs.bit_width));
     }
 
-    int64_t q = lhs.to_signed_i64() / rhs.to_signed_i64();
+    __int128 q = lhs.to_signed_i128() / rhs.to_signed_i128();
     return ConstIntOpResult::ok(ConstIntValue::from_signed(q, lhs.bit_width));
 }
 
 ConstIntOpResult const_int_mod(ConstIntValue lhs, ConstIntValue rhs) {
-    if (rhs.to_unsigned_u64() == 0) {
+    if (rhs.to_unsigned_u128() == 0) {
         return ConstIntOpResult::fail(ConstIntOpError::DivisionByZero);
     }
 
     if (lhs.is_unsigned) {
-        uint64_t r = lhs.to_unsigned_u64() % rhs.to_unsigned_u64();
+        uint128_t r = lhs.to_unsigned_u128() % rhs.to_unsigned_u128();
         return ConstIntOpResult::ok(ConstIntValue::from_unsigned(r, lhs.bit_width));
     }
 
-    int64_t r = lhs.to_signed_i64() % rhs.to_signed_i64();
+    __int128 r = lhs.to_signed_i128() % rhs.to_signed_i128();
     return ConstIntOpResult::ok(ConstIntValue::from_signed(r, lhs.bit_width));
 }
 
 ConstIntValue const_int_neg(ConstIntValue value) {
     return make_int_from_bits(
-        uint64_t(0) - value.to_unsigned_u64(),
+        uint128_t{0} - value.to_unsigned_u128(),
         value.bit_width,
         value.is_unsigned);
 }
 
 ConstIntValue const_int_add(ConstIntValue lhs, ConstIntValue rhs) {
     return make_int_from_bits(
-        lhs.to_unsigned_u64() + rhs.to_unsigned_u64(),
+        lhs.to_unsigned_u128() + rhs.to_unsigned_u128(),
         lhs.bit_width,
         lhs.is_unsigned);
 }
 
 ConstIntValue const_int_sub(ConstIntValue lhs, ConstIntValue rhs) {
     return make_int_from_bits(
-        lhs.to_unsigned_u64() - rhs.to_unsigned_u64(),
+        lhs.to_unsigned_u128() - rhs.to_unsigned_u128(),
         lhs.bit_width,
         lhs.is_unsigned);
 }
 
 ConstIntValue const_int_mul(ConstIntValue lhs, ConstIntValue rhs) {
     return make_int_from_bits(
-        lhs.to_unsigned_u64() * rhs.to_unsigned_u64(),
+        lhs.to_unsigned_u128() * rhs.to_unsigned_u128(),
         lhs.bit_width,
         lhs.is_unsigned);
 }
 
 ConstIntOpResult const_int_shl(ConstIntValue lhs, ConstIntValue rhs) {
-    uint64_t shift = rhs.to_unsigned_u64();
-    if (shift >= lhs.bit_width) {
+    std::optional<uint64_t> shift = rhs.try_as_uint64();
+    if (!shift.has_value() || *shift >= lhs.bit_width) {
         return ConstIntOpResult::fail(ConstIntOpError::InvalidShiftAmount);
     }
 
-    uint64_t base = lhs.to_unsigned_u64();
-    uint64_t shifted = (base << shift);
+    uint128_t shifted = lhs.to_unsigned_u128() << *shift;
     return ConstIntOpResult::ok(make_int_from_bits(
         shifted,
         lhs.bit_width,
@@ -309,17 +323,19 @@ ConstIntOpResult const_int_shl(ConstIntValue lhs, ConstIntValue rhs) {
 }
 
 ConstIntOpResult const_int_shr(ConstIntValue lhs, ConstIntValue rhs) {
-    uint64_t shift = rhs.to_unsigned_u64();
-    if (shift >= lhs.bit_width) {
+    std::optional<uint64_t> shift = rhs.try_as_uint64();
+    if (!shift.has_value() || *shift >= lhs.bit_width) {
         return ConstIntOpResult::fail(ConstIntOpError::InvalidShiftAmount);
     }
 
     if (lhs.is_unsigned) {
-        return ConstIntOpResult::ok(ConstIntValue::from_unsigned(
-            lhs.to_unsigned_u64() >> shift,
-            lhs.bit_width));
+        return ConstIntOpResult::ok(make_int_from_bits(
+            lhs.to_unsigned_u128() >> *shift,
+            lhs.bit_width,
+            true));
     }
-    return ConstIntOpResult::ok(ConstIntValue::from_signed(
-        lhs.to_signed_i64() >> shift,
-        lhs.bit_width));
+    return ConstIntOpResult::ok(make_int_from_bits(
+        static_cast<uint128_t>(lhs.to_signed_i128() >> *shift),
+        lhs.bit_width,
+        false));
 }

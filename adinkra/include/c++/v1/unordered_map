@@ -1,0 +1,1157 @@
+#ifndef ADINKRA_UNORDERED_MAP
+#define ADINKRA_UNORDERED_MAP
+
+#include <__adinkra/config>
+#include <__adinkra/unordered_multi>
+#include <cstddef>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <stdexcept>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+_ADINKRA_BEGIN_NAMESPACE_STD
+
+template<class Key, class Mapped, class Hash = hash<Key>,
+         class KeyEqual = equal_to<Key>,
+         class Allocator = allocator<pair<const Key, Mapped>>>
+class unordered_map {
+    struct direct_construct_t {};
+
+    struct Node {
+        pair<const Key, Mapped> value;
+        Node* next;
+
+        template<class... Arguments>
+        Node(
+            direct_construct_t, Node* next_value,
+            Arguments&&... arguments)
+            : value(std::forward<Arguments>(arguments)...),
+              next(next_value) {}
+
+        template<class KeyValue, class... Arguments>
+        Node(KeyValue&& key, Node* next_value, Arguments&&... arguments)
+            : value(
+                  piecewise_construct,
+                  forward_as_tuple(
+                      std::forward<KeyValue>(key)),
+                  forward_as_tuple(
+                      std::forward<Arguments>(arguments)...)),
+              next(next_value) {}
+
+        template<class... KeyArguments, class... MappedArguments>
+        Node(
+            piecewise_construct_t, Node* next_value,
+            tuple<KeyArguments...> key_arguments,
+            tuple<MappedArguments...> mapped_arguments)
+            : value(
+                  piecewise_construct,
+                  std::move(key_arguments),
+                  std::move(mapped_arguments)),
+              next(next_value) {}
+    };
+
+public:
+    using key_type = Key;
+    using mapped_type = Mapped;
+    using value_type = pair<const Key, Mapped>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using hasher = Hash;
+    using key_equal = KeyEqual;
+    using allocator_type = Allocator;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+
+    class node_type {
+        struct node_value {
+            Key key;
+            Mapped mapped;
+
+            template<class KeyValue, class MappedValue>
+            node_value(KeyValue&& key_value, MappedValue&& mapped_value)
+                : key(std::forward<KeyValue>(key_value)),
+                  mapped(std::forward<MappedValue>(mapped_value)) {}
+        };
+
+        friend class unordered_map;
+
+    public:
+        node_type() noexcept : value_(nullptr) {}
+
+        node_type(node_type&& other) noexcept
+            : value_(std::exchange(other.value_, nullptr)) {}
+
+        node_type& operator=(node_type&& other) noexcept {
+            if (this != std::addressof(other)) {
+                delete value_;
+                value_ = std::exchange(other.value_, nullptr);
+            }
+            return *this;
+        }
+
+        node_type(const node_type&) = delete;
+        node_type& operator=(const node_type&) = delete;
+
+        ~node_type() {
+            delete value_;
+        }
+
+        _ADINKRA_NODISCARD bool empty() const noexcept {
+            return value_ == nullptr;
+        }
+
+        explicit operator bool() const noexcept {
+            return value_ != nullptr;
+        }
+
+        key_type& key() const {
+            return value_->key;
+        }
+
+        mapped_type& mapped() const {
+            return value_->mapped;
+        }
+
+        allocator_type get_allocator() const {
+            return allocator_type{};
+        }
+
+        void swap(node_type& other) noexcept {
+            std::swap(value_, other.value_);
+        }
+
+    private:
+        node_value* value_;
+
+        template<class KeyValue, class MappedValue>
+        explicit node_type(KeyValue&& key, MappedValue&& mapped)
+            : value_(new node_value(
+                  std::forward<KeyValue>(key),
+                  std::forward<MappedValue>(mapped))) {}
+
+        void reset() noexcept {
+            delete value_;
+            value_ = nullptr;
+        }
+    };
+
+    class const_iterator;
+
+    class iterator {
+        friend class unordered_map;
+        friend class const_iterator;
+
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type = pair<const Key, Mapped>;
+        using difference_type = ptrdiff_t;
+        using pointer = value_type*;
+        using reference = value_type&;
+
+        iterator() noexcept
+            : owner_(nullptr), bucket_(0), node_(nullptr) {}
+
+        reference operator*() const noexcept { return node_->value; }
+        pointer operator->() const noexcept {
+            return std::addressof(node_->value);
+        }
+
+        iterator& operator++() {
+            advance();
+            return *this;
+        }
+
+        iterator operator++(int) {
+            iterator result(*this);
+            advance();
+            return result;
+        }
+
+        friend bool operator==(
+            const iterator& left, const iterator& right) noexcept {
+            return left.node_ == right.node_ &&
+                   left.owner_ == right.owner_;
+        }
+
+    private:
+        unordered_map* owner_;
+        size_type bucket_;
+        Node* node_;
+
+        iterator(
+            unordered_map* owner, size_type bucket, Node* node) noexcept
+            : owner_(owner), bucket_(bucket), node_(node) {}
+
+        void advance() {
+            if (node_ == nullptr) {
+                return;
+            }
+            if (node_->next != nullptr) {
+                node_ = node_->next;
+                return;
+            }
+            ++bucket_;
+            while (bucket_ < owner_->buckets_.size() &&
+                   owner_->buckets_[bucket_] == nullptr) {
+                ++bucket_;
+            }
+            node_ = bucket_ < owner_->buckets_.size()
+                ? owner_->buckets_[bucket_]
+                : nullptr;
+        }
+    };
+
+    class const_iterator {
+        friend class unordered_map;
+
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type = pair<const Key, Mapped>;
+        using difference_type = ptrdiff_t;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+
+        const_iterator() noexcept
+            : owner_(nullptr), bucket_(0), node_(nullptr) {}
+
+        const_iterator(const iterator& other) noexcept
+            : owner_(other.owner_), bucket_(other.bucket_),
+              node_(other.node_) {}
+
+        reference operator*() const noexcept { return node_->value; }
+        pointer operator->() const noexcept {
+            return std::addressof(node_->value);
+        }
+
+        const_iterator& operator++() {
+            advance();
+            return *this;
+        }
+
+        const_iterator operator++(int) {
+            const_iterator result(*this);
+            advance();
+            return result;
+        }
+
+        friend bool operator==(
+            const const_iterator& left,
+            const const_iterator& right) noexcept {
+            return left.node_ == right.node_ &&
+                   left.owner_ == right.owner_;
+        }
+
+    private:
+        const unordered_map* owner_;
+        size_type bucket_;
+        const Node* node_;
+
+        const_iterator(
+            const unordered_map* owner, size_type bucket,
+            const Node* node) noexcept
+            : owner_(owner), bucket_(bucket), node_(node) {}
+
+        void advance() {
+            if (node_ == nullptr) {
+                return;
+            }
+            if (node_->next != nullptr) {
+                node_ = node_->next;
+                return;
+            }
+            ++bucket_;
+            while (bucket_ < owner_->buckets_.size() &&
+                   owner_->buckets_[bucket_] == nullptr) {
+                ++bucket_;
+            }
+            node_ = bucket_ < owner_->buckets_.size()
+                ? owner_->buckets_[bucket_]
+                : nullptr;
+        }
+    };
+
+    struct insert_return_type {
+        iterator position;
+        bool inserted;
+        node_type node;
+    };
+
+    using local_iterator = iterator;
+    using const_local_iterator = const_iterator;
+
+    unordered_map()
+        : unordered_map(8) {}
+
+    explicit unordered_map(
+        size_type bucket_count, const Hash& hash_value = Hash(),
+        const KeyEqual& equal_value = KeyEqual(),
+        const Allocator& allocator_value = Allocator())
+        : buckets_(
+              bucket_count == 0 ? 1 : bucket_count, nullptr),
+          size_(0), max_load_(1.0F), hash_(hash_value),
+          equal_(equal_value), allocator_(allocator_value) {}
+
+    explicit unordered_map(const Allocator& allocator_value)
+        : unordered_map(8, Hash(), KeyEqual(), allocator_value) {}
+
+    unordered_map(
+        size_type bucket_count,
+        const Allocator& allocator_value)
+        : unordered_map(
+              bucket_count, Hash(), KeyEqual(), allocator_value) {}
+
+    unordered_map(
+        size_type bucket_count,
+        const Hash& hash_value,
+        const Allocator& allocator_value)
+        : unordered_map(
+              bucket_count, hash_value,
+              KeyEqual(), allocator_value) {}
+
+    template<class InputIterator>
+    unordered_map(
+        InputIterator first, InputIterator last,
+        size_type bucket_count = 8,
+        const Hash& hash_value = Hash(),
+        const KeyEqual& equal_value = KeyEqual(),
+        const Allocator& allocator_value = Allocator())
+        : unordered_map(
+              bucket_count, hash_value, equal_value, allocator_value) {
+        insert(first, last);
+    }
+
+    template<class InputIterator>
+    unordered_map(
+        InputIterator first, InputIterator last,
+        size_type bucket_count,
+        const Allocator& allocator_value)
+        : unordered_map(
+              first, last, bucket_count,
+              Hash(), KeyEqual(), allocator_value) {}
+
+    template<class InputIterator>
+    unordered_map(
+        InputIterator first, InputIterator last,
+        size_type bucket_count,
+        const Hash& hash_value,
+        const Allocator& allocator_value)
+        : unordered_map(
+              first, last, bucket_count,
+              hash_value, KeyEqual(), allocator_value) {}
+
+    unordered_map(
+        initializer_list<value_type> values,
+        size_type bucket_count = 8,
+        const Hash& hash_value = Hash(),
+        const KeyEqual& equal_value = KeyEqual(),
+        const Allocator& allocator_value = Allocator())
+        : unordered_map(
+              values.begin(), values.end(), bucket_count,
+              hash_value, equal_value, allocator_value) {}
+
+    unordered_map(
+        initializer_list<value_type> values,
+        size_type bucket_count,
+        const Allocator& allocator_value)
+        : unordered_map(
+              values, bucket_count,
+              Hash(), KeyEqual(), allocator_value) {}
+
+    unordered_map(
+        initializer_list<value_type> values,
+        size_type bucket_count,
+        const Hash& hash_value,
+        const Allocator& allocator_value)
+        : unordered_map(
+              values, bucket_count,
+              hash_value, KeyEqual(), allocator_value) {}
+
+    unordered_map(const unordered_map& other)
+        : unordered_map(
+              other.bucket_count(), other.hash_, other.equal_,
+              allocator_traits<Allocator>::
+                  select_on_container_copy_construction(
+                      other.allocator_)) {
+        max_load_ = other.max_load_;
+        copy_nodes(other);
+    }
+
+    unordered_map(
+        const unordered_map& other,
+        const Allocator& allocator_value)
+        : unordered_map(
+              other.bucket_count(), other.hash_, other.equal_,
+              allocator_value) {
+        max_load_ = other.max_load_;
+        copy_nodes(other);
+    }
+
+    unordered_map(unordered_map&& other) noexcept
+        : buckets_(std::move(other.buckets_)),
+          size_(std::exchange(other.size_, 0)),
+          max_load_(other.max_load_),
+          hash_(std::move(other.hash_)),
+          equal_(std::move(other.equal_)),
+          allocator_(std::move(other.allocator_)) {
+        if (other.buckets_.empty()) {
+            other.buckets_.assign(1, nullptr);
+        }
+    }
+
+    unordered_map(
+        unordered_map&& other,
+        const Allocator& allocator_value)
+        : unordered_map(
+              other.bucket_count(), std::move(other.hash_),
+              std::move(other.equal_), allocator_value) {
+        max_load_ = other.max_load_;
+        insert(
+            std::make_move_iterator(other.begin()),
+            std::make_move_iterator(other.end()));
+        other.clear();
+    }
+
+    ~unordered_map() {
+        clear();
+    }
+
+    unordered_map& operator=(const unordered_map& other) {
+        if (this != std::addressof(other)) {
+            unordered_map replacement(other);
+            swap(replacement);
+        }
+        return *this;
+    }
+
+    unordered_map& operator=(unordered_map&& other) noexcept {
+        if (this != std::addressof(other)) {
+            clear();
+            buckets_ = std::move(other.buckets_);
+            size_ = std::exchange(other.size_, 0);
+            max_load_ = other.max_load_;
+            hash_ = std::move(other.hash_);
+            equal_ = std::move(other.equal_);
+            allocator_ = std::move(other.allocator_);
+            if (other.buckets_.empty()) {
+                other.buckets_.assign(1, nullptr);
+            }
+        }
+        return *this;
+    }
+
+    unordered_map& operator=(initializer_list<value_type> values) {
+        clear();
+        insert(values);
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept { return allocator_; }
+
+    _ADINKRA_NODISCARD bool empty() const noexcept {
+        return size_ == 0;
+    }
+    _ADINKRA_NODISCARD size_type size() const noexcept {
+        return size_;
+    }
+    _ADINKRA_NODISCARD size_type max_size() const noexcept {
+        return static_cast<size_type>(-1) / sizeof(Node);
+    }
+
+    iterator begin() noexcept {
+        return first_iterator();
+    }
+    const_iterator begin() const noexcept {
+        return first_const_iterator();
+    }
+    const_iterator cbegin() const noexcept {
+        return first_const_iterator();
+    }
+    iterator end() noexcept {
+        return iterator(this, buckets_.size(), nullptr);
+    }
+    const_iterator end() const noexcept {
+        return const_iterator(this, buckets_.size(), nullptr);
+    }
+    const_iterator cend() const noexcept {
+        return end();
+    }
+
+    pair<iterator, bool> insert(const value_type& value) {
+        return try_emplace(value.first, value.second);
+    }
+
+    pair<iterator, bool> insert(value_type&& value) {
+        return try_emplace(value.first, std::move(value.second));
+    }
+
+    insert_return_type insert(node_type&& node) {
+        if (!node) {
+            return {end(), false, node_type{}};
+        }
+
+        iterator existing = find(node.key());
+        if (existing != end()) {
+            return {existing, false, std::move(node)};
+        }
+
+        auto inserted = try_emplace(
+            std::move(node.key()), std::move(node.mapped()));
+        node.reset();
+        return {
+            inserted.first, inserted.second, node_type{}
+        };
+    }
+
+    template<class Value>
+        requires (
+            !is_same_v<remove_cvref_t<Value>, value_type> &&
+            requires(Value&& value) {
+                value.first;
+                value.second;
+            })
+    pair<iterator, bool> insert(Value&& value) {
+        return try_emplace(
+            std::forward<Value>(value).first,
+            std::forward<Value>(value).second);
+    }
+
+    iterator insert(const_iterator, const value_type& value) {
+        return insert(value).first;
+    }
+
+    iterator insert(const_iterator, value_type&& value) {
+        return insert(std::move(value)).first;
+    }
+
+    iterator insert(const_iterator, node_type&& node) {
+        return insert(std::move(node)).position;
+    }
+
+    template<class InputIterator>
+    void insert(InputIterator first, InputIterator last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    void insert(initializer_list<value_type> values) {
+        insert(values.begin(), values.end());
+    }
+
+    template<class... Arguments>
+    pair<iterator, bool> emplace(Arguments&&... arguments) {
+        Node* candidate = new Node(
+            direct_construct_t{}, nullptr,
+            std::forward<Arguments>(arguments)...);
+        try {
+            const Key& key = candidate->value.first;
+            const size_type existing_bucket = bucket_for(key);
+            if (Node* existing =
+                    find_node(key, existing_bucket)) {
+                delete candidate;
+                return {
+                    iterator(this, existing_bucket, existing), false
+                };
+            }
+
+            ensure_insert_capacity();
+            const size_type target = bucket_for(key);
+            candidate->next = buckets_[target];
+            buckets_[target] = candidate;
+            ++size_;
+            return {iterator(this, target, candidate), true};
+        } catch (...) {
+            delete candidate;
+            throw;
+        }
+    }
+
+    template<class KeyArgument, class... MappedArguments>
+    pair<iterator, bool> emplace(
+        piecewise_construct_t,
+        tuple<KeyArgument> key_arguments,
+        tuple<MappedArguments...> mapped_arguments) {
+        Key key(get<0>(std::move(key_arguments)));
+        const size_type existing_bucket = bucket_for(key);
+        if (Node* existing =
+                find_node(key, existing_bucket)) {
+            return {
+                iterator(this, existing_bucket, existing), false
+            };
+        }
+
+        ensure_insert_capacity();
+        const size_type target = bucket_for(key);
+        Node* node = new Node(
+            piecewise_construct, buckets_[target],
+            std::forward_as_tuple(std::move(key)),
+            std::move(mapped_arguments));
+        buckets_[target] = node;
+        ++size_;
+        return {iterator(this, target, node), true};
+    }
+
+    template<class... Arguments>
+    iterator emplace_hint(
+        const_iterator, Arguments&&... arguments) {
+        return emplace(
+            std::forward<Arguments>(arguments)...).first;
+    }
+
+    template<class KeyValue, class... Arguments>
+        requires is_constructible_v<Key, KeyValue&&>
+    pair<iterator, bool> try_emplace(
+        KeyValue&& key, Arguments&&... arguments) {
+        const size_type existing_bucket = bucket_for(key);
+        if (Node* existing =
+                find_node(key, existing_bucket)) {
+            return {
+                iterator(this, existing_bucket, existing), false
+            };
+        }
+
+        ensure_insert_capacity();
+        const size_type target = bucket_for(key);
+        Node* node = new Node(
+            std::forward<KeyValue>(key), buckets_[target],
+            std::forward<Arguments>(arguments)...);
+        buckets_[target] = node;
+        ++size_;
+        return {iterator(this, target, node), true};
+    }
+
+    template<class KeyValue, class... Arguments>
+    iterator try_emplace(
+        const_iterator, KeyValue&& key,
+        Arguments&&... arguments) {
+        return try_emplace(
+            std::forward<KeyValue>(key),
+            std::forward<Arguments>(arguments)...).first;
+    }
+
+    template<class KeyValue, class MappedValue>
+        requires is_constructible_v<Key, KeyValue&&>
+    pair<iterator, bool> insert_or_assign(
+        KeyValue&& key, MappedValue&& value) {
+        auto found = find(key);
+        if (found != end()) {
+            found->second = std::forward<MappedValue>(value);
+            return {found, false};
+        }
+        return try_emplace(
+            std::forward<KeyValue>(key),
+            std::forward<MappedValue>(value));
+    }
+
+    template<class KeyValue, class MappedValue>
+    iterator insert_or_assign(
+        const_iterator, KeyValue&& key,
+        MappedValue&& value) {
+        return insert_or_assign(
+            std::forward<KeyValue>(key),
+            std::forward<MappedValue>(value)).first;
+    }
+
+    iterator erase(const_iterator position) {
+        const size_type target = position.bucket_;
+        Node** current = std::addressof(buckets_[target]);
+        while (*current != position.node_) {
+            current = std::addressof((*current)->next);
+        }
+        Node* removed = *current;
+        Node* following = removed->next;
+        *current = following;
+        delete removed;
+        --size_;
+        if (following != nullptr) {
+            return iterator(this, target, following);
+        }
+        size_type next_bucket = target + 1;
+        while (next_bucket < buckets_.size() &&
+               buckets_[next_bucket] == nullptr) {
+            ++next_bucket;
+        }
+        return next_bucket < buckets_.size()
+            ? iterator(this, next_bucket, buckets_[next_bucket])
+            : end();
+    }
+
+    iterator erase(
+        const_iterator first, const_iterator last) {
+        while (first != last) {
+            first = erase(first);
+        }
+        return iterator(
+            this, last.bucket_, const_cast<Node*>(last.node_));
+    }
+
+    size_type erase(const Key& key) {
+        const size_type target = bucket_for(key);
+        Node** current = std::addressof(buckets_[target]);
+        while (*current != nullptr) {
+            if (equal_((*current)->value.first, key)) {
+                Node* removed = *current;
+                *current = removed->next;
+                delete removed;
+                --size_;
+                return 1;
+            }
+            current = std::addressof((*current)->next);
+        }
+        return 0;
+    }
+
+    node_type extract(const_iterator position) {
+        if (position == end()) {
+            return node_type{};
+        }
+
+        const size_type target = position.bucket_;
+        Node** current = std::addressof(buckets_[target]);
+        while (*current != position.node_) {
+            current = std::addressof((*current)->next);
+        }
+
+        Node* removed = *current;
+        node_type result(
+            removed->value.first,
+            std::move(removed->value.second));
+        *current = removed->next;
+        delete removed;
+        --size_;
+        return result;
+    }
+
+    node_type extract(const Key& key) {
+        iterator position = find(key);
+        return position == end()
+            ? node_type{}
+            : extract(const_iterator(position));
+    }
+
+    void clear() noexcept {
+        for (Node*& bucket : buckets_) {
+            while (bucket != nullptr) {
+                Node* removed = bucket;
+                bucket = bucket->next;
+                delete removed;
+            }
+        }
+        size_ = 0;
+    }
+
+    void swap(unordered_map& other) {
+        buckets_.swap(other.buckets_);
+        std::swap(size_, other.size_);
+        std::swap(max_load_, other.max_load_);
+        std::swap(hash_, other.hash_);
+        std::swap(equal_, other.equal_);
+        if constexpr (allocator_traits<Allocator>::
+                          propagate_on_container_swap::value) {
+            std::swap(allocator_, other.allocator_);
+        }
+    }
+
+    mapped_type& at(const Key& key) {
+        iterator found = find(key);
+        if (found == end()) {
+            throw out_of_range("unordered_map::at");
+        }
+        return found->second;
+    }
+
+    const mapped_type& at(const Key& key) const {
+        const_iterator found = find(key);
+        if (found == end()) {
+            throw out_of_range("unordered_map::at");
+        }
+        return found->second;
+    }
+
+    mapped_type& operator[](const Key& key) {
+        return try_emplace(key).first->second;
+    }
+
+    mapped_type& operator[](Key&& key) {
+        return try_emplace(std::move(key)).first->second;
+    }
+
+    iterator find(const Key& key) {
+        const size_type target = bucket_for(key);
+        Node* node = find_node(key, target);
+        return node == nullptr ? end() : iterator(this, target, node);
+    }
+
+    const_iterator find(const Key& key) const {
+        const size_type target = bucket_for(key);
+        const Node* node = find_node(key, target);
+        return node == nullptr
+            ? end()
+            : const_iterator(this, target, node);
+    }
+
+    _ADINKRA_NODISCARD bool contains(const Key& key) const {
+        return find(key) != end();
+    }
+
+    _ADINKRA_NODISCARD size_type count(const Key& key) const {
+        return contains(key) ? 1 : 0;
+    }
+
+    pair<iterator, iterator> equal_range(const Key& key) {
+        iterator found = find(key);
+        if (found == end()) {
+            return {found, found};
+        }
+        iterator following = found;
+        ++following;
+        return {found, following};
+    }
+
+    pair<const_iterator, const_iterator> equal_range(
+        const Key& key) const {
+        const_iterator found = find(key);
+        if (found == end()) {
+            return {found, found};
+        }
+        const_iterator following = found;
+        ++following;
+        return {found, following};
+    }
+
+    size_type bucket_count() const noexcept {
+        return buckets_.size();
+    }
+
+    size_type max_bucket_count() const noexcept {
+        return buckets_.max_size();
+    }
+
+    size_type bucket_size(size_type target) const {
+        size_type result = 0;
+        for (const Node* node = buckets_[target];
+             node != nullptr; node = node->next) {
+            ++result;
+        }
+        return result;
+    }
+
+    size_type bucket(const Key& key) const {
+        return bucket_for(key);
+    }
+
+    float load_factor() const noexcept {
+        return buckets_.empty()
+            ? 0.0F
+            : static_cast<float>(size_) /
+                  static_cast<float>(buckets_.size());
+    }
+
+    float max_load_factor() const noexcept {
+        return max_load_;
+    }
+
+    void max_load_factor(float value) {
+        if (value > 0.0F) {
+            max_load_ = value;
+        }
+    }
+
+    void rehash(size_type count) {
+        const size_type minimum =
+            static_cast<size_type>(
+                static_cast<float>(size_) / max_load_) +
+            1;
+        if (count < minimum) {
+            count = minimum;
+        }
+        if (count == 0) {
+            count = 1;
+        }
+        if (count == buckets_.size()) {
+            return;
+        }
+
+        vector<Node*> replacement(count, nullptr);
+        for (Node* bucket : buckets_) {
+            while (bucket != nullptr) {
+                Node* following = bucket->next;
+                const size_type target =
+                    hash_(bucket->value.first) % count;
+                bucket->next = replacement[target];
+                replacement[target] = bucket;
+                bucket = following;
+            }
+        }
+        buckets_.swap(replacement);
+    }
+
+    void reserve(size_type count) {
+        const size_type required =
+            static_cast<size_type>(
+                static_cast<float>(count) / max_load_) +
+            1;
+        if (required > buckets_.size()) {
+            rehash(required);
+        }
+    }
+
+    hasher hash_function() const { return hash_; }
+    key_equal key_eq() const { return equal_; }
+
+private:
+    vector<Node*> buckets_;
+    size_type size_;
+    float max_load_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Hash hash_;
+    _ADINKRA_NO_UNIQUE_ADDRESS KeyEqual equal_;
+    _ADINKRA_NO_UNIQUE_ADDRESS Allocator allocator_;
+
+    void copy_nodes(const unordered_map& other) {
+        try {
+            for (size_type bucket_index = 0;
+                 bucket_index < other.buckets_.size();
+                 ++bucket_index) {
+                Node** destination =
+                    std::addressof(buckets_[bucket_index]);
+                for (const Node* source =
+                         other.buckets_[bucket_index];
+                     source != nullptr; source = source->next) {
+                    Node* copied = new Node(
+                        direct_construct_t{}, nullptr,
+                        source->value);
+                    *destination = copied;
+                    destination = std::addressof(copied->next);
+                    ++size_;
+                }
+            }
+        } catch (...) {
+            clear();
+            throw;
+        }
+    }
+
+    size_type bucket_for(const Key& key) const {
+        return hash_(key) % buckets_.size();
+    }
+
+    template<class KeyValue>
+    size_type bucket_for(const KeyValue& key) const {
+        return hash_(key) % buckets_.size();
+    }
+
+    Node* find_node(const Key& key, size_type target) {
+        Node* node = buckets_[target];
+        while (node != nullptr &&
+               !equal_(node->value.first, key)) {
+            node = node->next;
+        }
+        return node;
+    }
+
+    const Node* find_node(
+        const Key& key, size_type target) const {
+        const Node* node = buckets_[target];
+        while (node != nullptr &&
+               !equal_(node->value.first, key)) {
+            node = node->next;
+        }
+        return node;
+    }
+
+    template<class KeyValue>
+    Node* find_node(const KeyValue& key, size_type target) {
+        Node* node = buckets_[target];
+        while (node != nullptr &&
+               !equal_(node->value.first, key)) {
+            node = node->next;
+        }
+        return node;
+    }
+
+    void ensure_insert_capacity() {
+        if (static_cast<float>(size_ + 1) >
+            static_cast<float>(buckets_.size()) * max_load_) {
+            rehash(buckets_.size() * 2);
+        }
+    }
+
+    iterator first_iterator() noexcept {
+        size_type target = 0;
+        while (target < buckets_.size() &&
+               buckets_[target] == nullptr) {
+            ++target;
+        }
+        return target == buckets_.size()
+            ? end()
+            : iterator(this, target, buckets_[target]);
+    }
+
+    const_iterator first_const_iterator() const noexcept {
+        size_type target = 0;
+        while (target < buckets_.size() &&
+               buckets_[target] == nullptr) {
+            ++target;
+        }
+        return target == buckets_.size()
+            ? end()
+            : const_iterator(this, target, buckets_[target]);
+    }
+};
+
+template<class Key, class Mapped, class Hash, class KeyEqual,
+         class Allocator>
+void swap(
+    unordered_map<Key, Mapped, Hash, KeyEqual, Allocator>& left,
+    unordered_map<Key, Mapped, Hash, KeyEqual, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Key, class Mapped, class Hash, class KeyEqual,
+         class Allocator, class Predicate>
+typename unordered_map<
+    Key, Mapped, Hash, KeyEqual, Allocator>::size_type
+erase_if(
+    unordered_map<Key, Mapped, Hash, KeyEqual, Allocator>& container,
+    Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+template<class Key, class Mapped, class Hash, class KeyEqual,
+         class Allocator>
+_ADINKRA_NODISCARD bool operator==(
+    const unordered_map<
+        Key, Mapped, Hash, KeyEqual, Allocator>& left,
+    const unordered_map<
+        Key, Mapped, Hash, KeyEqual, Allocator>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (const auto& value : left) {
+        const auto found = right.find(value.first);
+        if (found == right.end() ||
+            !(found->second == value.second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template<class InputIterator,
+         class Hash =
+             hash<typename iterator_traits<InputIterator>::
+                      value_type::first_type>,
+         class Equal =
+             equal_to<typename iterator_traits<InputIterator>::
+                          value_type::first_type>,
+         class Allocator =
+             allocator<typename iterator_traits<InputIterator>::value_type>>
+unordered_map(
+    InputIterator, InputIterator, size_t = 8,
+    Hash = Hash(), Equal = Equal(), Allocator = Allocator())
+    -> unordered_map<
+        remove_const_t<
+            typename iterator_traits<InputIterator>::
+                value_type::first_type>,
+        typename iterator_traits<InputIterator>::
+            value_type::second_type,
+        Hash, Equal, Allocator>;
+
+template<class Key, class Mapped, class Hash = hash<Key>,
+         class KeyEqual = equal_to<Key>,
+         class Allocator = allocator<pair<const Key, Mapped>>>
+class unordered_multimap
+    : public __unordered_multi_table<
+          Key, pair<const Key, Mapped>,
+          __unordered_pair_key<Key, Mapped>,
+          Hash, KeyEqual, Allocator, true> {
+    using base_type = __unordered_multi_table<
+        Key, pair<const Key, Mapped>,
+        __unordered_pair_key<Key, Mapped>,
+        Hash, KeyEqual, Allocator, true>;
+
+public:
+    using mapped_type = Mapped;
+    using base_type::base_type;
+};
+
+template<class Key, class Mapped, class Hash,
+         class KeyEqual, class Allocator>
+bool operator==(
+    const unordered_multimap<
+        Key, Mapped, Hash, KeyEqual, Allocator>& left,
+    const unordered_multimap<
+        Key, Mapped, Hash, KeyEqual, Allocator>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (const auto& value : left) {
+        size_t left_count = 0;
+        size_t right_count = 0;
+        for (const auto& candidate : left) {
+            if (candidate == value) {
+                ++left_count;
+            }
+        }
+        for (const auto& candidate : right) {
+            if (candidate == value) {
+                ++right_count;
+            }
+        }
+        if (left_count != right_count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template<class Key, class Mapped, class Hash,
+         class KeyEqual, class Allocator>
+void swap(
+    unordered_multimap<
+        Key, Mapped, Hash, KeyEqual, Allocator>& left,
+    unordered_multimap<
+        Key, Mapped, Hash, KeyEqual, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
+    left.swap(right);
+}
+
+template<class Key, class Mapped, class Hash,
+         class KeyEqual, class Allocator, class Predicate>
+typename unordered_multimap<
+    Key, Mapped, Hash, KeyEqual, Allocator>::size_type
+erase_if(
+    unordered_multimap<
+        Key, Mapped, Hash, KeyEqual, Allocator>& container,
+    Predicate predicate) {
+    const auto original_size = container.size();
+    auto current = container.begin();
+    while (current != container.end()) {
+        if (predicate(*current)) {
+            current = container.erase(current);
+        } else {
+            ++current;
+        }
+    }
+    return original_size - container.size();
+}
+
+_ADINKRA_END_NAMESPACE_STD
+
+#endif
